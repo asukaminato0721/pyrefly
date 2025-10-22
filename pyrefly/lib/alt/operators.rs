@@ -39,8 +39,6 @@ use crate::error::context::ErrorContext;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
-use crate::graph::index::Idx;
-use crate::graph::index::Idx;
 use crate::types::class::ClassType;
 use crate::types::literal::Lit;
 use crate::types::tuple::Tuple;
@@ -301,7 +299,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         range: TextRange,
     ) -> Option<Type> {
         let errors = self.error_collector();
-        let mut arg_ty = arg.clone();
+        let arg_ty = arg.clone();
         let call_args = [CallArg::ty(&arg_ty, range)];
         let ret = self.call_magic_dunder_method(
             target,
@@ -337,7 +335,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 match ty {
                     Type::ClassType(cls) => Some(cls.clone()),
                     Type::SelfType(cls) => Some(cls.clone()),
-                    Type::Literal(Lit::Enum(lit_enum)) => Some(lit_enum.class.clone()),
+                    Type::Literal(lit) if let Lit::Enum(lit_enum) = &lit.value => {
+                        Some(lit_enum.class.clone())
+                    }
                     _ => None,
                 }
             };
@@ -488,7 +488,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 match ty {
                     Type::ClassType(cls) => Some(cls.clone()),
                     Type::SelfType(cls) => Some(cls.clone()),
-                    Type::Literal(Lit::Enum(lit_enum)) => Some(lit_enum.class.clone()),
+                    Type::Literal(lit) if let Lit::Enum(lit_enum) = &lit.value => {
+                        Some(lit_enum.class.clone())
+                    }
                     _ => None,
                 }
             };
