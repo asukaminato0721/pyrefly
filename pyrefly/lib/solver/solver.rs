@@ -14,6 +14,8 @@ use std::fmt::Display;
 use std::mem;
 
 use pyrefly_types::quantified::Quantified;
+use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::type_var::Restriction;
 use pyrefly_types::types::TArgs;
 use pyrefly_util::gas::Gas;
 use pyrefly_util::lock::Mutex;
@@ -238,6 +240,11 @@ impl Variables {
     }
 }
 
+#[derive(Debug, Clone)]
+struct QuantifiedRecord {
+    quantified: Quantified,
+}
+
 /// A recurser for Vars which is aware of unification.
 /// Prefer this over Recurser<Var> and use Solver::recurse.
 pub struct VarRecurser(Recurser<Var>);
@@ -256,6 +263,7 @@ impl VarRecurser {
 pub struct Solver {
     variables: Mutex<Variables>,
     instantiation_errors: RwLock<SmallMap<Var, TypeVarSpecializationError>>,
+    quantified_records: RwLock<SmallMap<Var, QuantifiedRecord>>,
     pub infer_with_first_use: bool,
 }
 
@@ -278,8 +286,25 @@ impl Solver {
         Self {
             variables: Default::default(),
             instantiation_errors: Default::default(),
+            quantified_records: Default::default(),
             infer_with_first_use,
         }
+    }
+
+    fn remember_quantified(&self, var: Var, quantified: &Quantified) {
+        self.quantified_records.write().insert(
+            var,
+            QuantifiedRecord {
+                quantified: quantified.clone(),
+            },
+        );
+    }
+
+    fn quantified(&self, var: Var) -> Option<Quantified> {
+        self.quantified_records
+            .read()
+            .get(&var)
+            .map(|record| record.quantified.clone())
     }
 
     pub fn recurse<'a>(&self, var: Var, recurser: &'a VarRecurser) -> Option<Guard<'a, Var>> {
@@ -532,7 +557,9 @@ impl Solver {
         let t = t.subst(&params.iter().map(|p| &p.quantified).zip(&ts).collect());
         let mut lock = self.variables.lock();
         for (v, param) in vs.iter().zip(params.iter()) {
-            lock.insert_fresh(*v, Variable::Quantified(Box::new(param.quantified.clone())));
+            let quantified = param.quantified.clone();
+            self.remember_quantified(*v, &quantified);
+            lock.insert_fresh(*v, Variable::Quantified(Box::new(quantified)));
         }
         (QuantifiedHandle(vs), t)
     }
@@ -577,6 +604,7 @@ impl Solver {
 
         let mut lock = self.variables.lock();
         for (v, q) in vs.iter().zip(qs.into_iter()) {
+            self.remember_quantified(*v, &q);
             lock.insert_fresh(*v, Variable::Quantified(Box::new(q)));
         }
         drop(lock);
@@ -647,7 +675,9 @@ impl Solver {
             {
                 let v = Var::new(uniques);
                 *t = v.to_type();
-                lock.insert_fresh(v, Variable::Quantified(Box::new(param.quantified.clone())));
+                let quantified = param.quantified.clone();
+                self.remember_quantified(v, &quantified);
+                lock.insert_fresh(v, Variable::Quantified(Box::new(quantified)));
             }
         })
     }
@@ -1086,6 +1116,61 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         res
     }
 
+    fn try_widen_quantified(
+        &mut self,
+        var: Var,
+        current: &Type,
+        new_value: &Type,
+    ) -> Result<bool, SubsetError> {
+        let Some(quant) = self.solver.quantified(var) else {
+            return Ok(false);
+        };
+        if quant.kind() != QuantifiedKind::TypeVar {
+            return Ok(false);
+        }
+        if matches!(quant.restriction(), Restriction::Constraints(_)) {
+            return Ok(false);
+        }
+
+        let promoted = new_value.clone().promote_literals(self.type_order.stdlib());
+        if self.is_subset_eq(&promoted, current).is_ok() {
+            return Ok(true);
+        }
+        if !matches!(promoted, Type::Union(_)) {
+            return Ok(false);
+        }
+
+        let widened = unions(vec![current.clone(), promoted.clone()]);
+        if widened != promoted {
+            return Ok(false);
+        }
+
+        if widened == *current {
+            return Ok(false);
+        }
+
+        let bound = quant.restriction().as_type(self.type_order.stdlib());
+        if let Err(error) = self.is_subset_eq(&widened, &bound) {
+            self.solver.instantiation_errors.write().insert(
+                var,
+                TypeVarSpecializationError {
+                    name: quant.name.clone(),
+                    got: promoted,
+                    want: bound,
+                    error,
+                },
+            );
+            return Ok(false);
+        }
+
+        self.solver.instantiation_errors.write().shift_remove(&var);
+        self.solver
+            .variables
+            .lock()
+            .update(var, Variable::Answer(widened));
+        Ok(true)
+    }
+
     /// Implementation of Var subset cases, calling onward to solve non-Var cases.
     ///
     /// This function does two things: it checks that got <: want, and it solves free variables assuming that
@@ -1153,6 +1238,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     Variable::Quantified(q) => {
                         let name = q.name.clone();
                         let bound = q.restriction().as_type(self.type_order.stdlib());
+                        self.solver.remember_quantified(*v1, q);
                         drop(v1_ref);
                         variables.update(*v1, Variable::Answer(t2.clone()));
                         drop(variables);
@@ -1166,6 +1252,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                     error: e,
                                 },
                             );
+                        } else {
+                            self.solver.instantiation_errors.write().shift_remove(v1);
                         }
                         Ok(())
                     }
@@ -1190,12 +1278,19 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                         let t2 = t2.clone();
                         drop(v2_ref);
                         drop(variables);
+                        if self.is_subset_eq(t1, &t2).is_ok() {
+                            return Ok(());
+                        }
+                        if self.try_widen_quantified(*v2, &t2, t1)? {
+                            return Ok(());
+                        }
                         self.is_subset_eq(t1, &t2)
                     }
                     Variable::Quantified(q) => {
                         let t1_p = t1.clone().promote_literals(self.type_order.stdlib());
                         let name = q.name.clone();
                         let bound = q.restriction().as_type(self.type_order.stdlib());
+                        self.solver.remember_quantified(*v2, q);
                         drop(v2_ref);
                         variables.update(*v2, Variable::Answer(t1_p.clone()));
                         drop(variables);
@@ -1221,7 +1316,11 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                         error: err_p,
                                     },
                                 );
+                            } else {
+                                self.solver.instantiation_errors.write().shift_remove(v2);
                             }
+                        } else {
+                            self.solver.instantiation_errors.write().shift_remove(v2);
                         }
                         Ok(())
                     }

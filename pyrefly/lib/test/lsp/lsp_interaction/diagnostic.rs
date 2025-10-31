@@ -38,6 +38,31 @@ fn test_cycle_class() {
 }
 
 #[test]
+fn test_function_invocation_pin() {
+    let test_files_root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(test_files_root.path().to_path_buf());
+    interaction.initialize(InitializeSettings {
+        configuration: Some(None),
+        ..Default::default()
+    });
+
+    interaction.server.did_open("function_invocation_pin.py");
+    interaction.server.diagnostic("function_invocation_pin.py");
+
+    interaction.client.expect_response(Response {
+        id: RequestId::from(2),
+        result: Some(serde_json::json!({
+            "items": [],
+            "kind": "full"
+        })),
+        error: None,
+    });
+
+    interaction.shutdown();
+}
+
+#[test]
 fn test_unexpected_keyword_range() {
     let test_files_root = get_test_files_root();
     let mut interaction = LspInteraction::new();
