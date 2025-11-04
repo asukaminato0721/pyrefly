@@ -1141,6 +1141,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .solver()
             .finish_quantified(vs, self.solver().infer_with_first_use)
             .err();
+        typed_dict.targs_mut().as_mut().iter_mut().for_each(|targ| {
+            *targ = targ.clone().promote_implicit_literals(self.stdlib);
+        });
         ConstructedInstance {
             ty: Type::TypedDict(TypedDict::TypedDict(typed_dict)),
             matched_hint,
@@ -1434,6 +1437,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
                 style.propagate()
             }
+        };
+        let res = match res {
+            Type::Union(members) => self.unions(members.members),
+            other => other,
         };
         if let Some(func_metadata) = kw_metadata {
             let mut kws = TypeMap::new();
