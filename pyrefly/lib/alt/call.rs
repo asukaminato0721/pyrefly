@@ -59,6 +59,7 @@ use crate::types::class::ClassType;
 use crate::types::keywords::KwCall;
 use crate::types::keywords::TypeMap;
 use crate::types::literal::Lit;
+use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
 use crate::types::typed_dict::TypedDict;
 use crate::types::types::AnyStyle;
@@ -683,6 +684,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         );
         self.solver()
             .finish_class_targs(&mut ctor_targs, self.uniques);
+        self.promote_invariant_targs(&mut ctor_targs);
         ret.subst_mut(&ctor_targs.substitution_map());
         Some(ret)
     }
@@ -903,14 +905,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     // According to the spec, the actual type (as opposed to the class under construction)
                     // should take priority. However, if the actual type comes from a type error or an implicit
                     // Any, using the class under construction is still more useful.
-                    self.solver()
-                        .finish_class_targs(cls.targs_mut(), self.uniques);
+                    {
+                        let targs = cls.targs_mut();
+                        self.solver().finish_class_targs(targs, self.uniques);
+                        self.promote_invariant_targs(targs);
+                    }
                     let specialization_errors = self
                         .solver()
                         .finish_quantified(vs, self.solver().infer_with_first_use)
                         .err();
+                    let substitution = cls.targs().substitution_map();
                     return ConstructedInstance {
-                        ty: ret.subst(&cls.targs().substitution_map()),
+                        ty: ret.subst(&substitution),
                         matched_hint,
                         errors,
                         specialization_errors,
@@ -968,8 +974,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 &errors,
             );
         }
-        self.solver()
-            .finish_class_targs(cls.targs_mut(), self.uniques);
+        {
+            let targs = cls.targs_mut();
+            self.solver().finish_class_targs(targs, self.uniques);
+            self.promote_invariant_targs(targs);
+        }
         let specialization_errors = self
             .solver()
             .finish_quantified(vs, self.solver().infer_with_first_use)
@@ -1073,6 +1082,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
         self.heap
             .mk_nn_module(NNModuleType::new(ct.clone(), fields))
+    }
+
+    fn promote_invariant_targs(&self, targs: &mut TArgs) {
+        targs.iter_paired_mut().for_each(|(param, targ)| {
+            if !matches!(param.variance(), PreInferenceVariance::Covariant) {
+                *targ = targ.clone().transform(&mut |ty| match ty {
+                    Type::Literal(lit) => {
+                        *ty = lit.value.general_class_type(self.stdlib).clone().to_type()
+                    }
+                    Type::LiteralString(_) => *ty = self.stdlib.str().clone().to_type(),
+                    _ => {}
+                });
+            }
+        });
     }
 
     fn construct_typed_dict(
