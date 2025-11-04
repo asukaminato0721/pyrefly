@@ -850,6 +850,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         {
             self.add_specialization_errors(e, arguments_range, errors, context);
         }
+        typed_dict.targs_mut().as_mut().iter_mut().for_each(|targ| {
+            let promoted = targ.clone().promote_literals(self.stdlib);
+            *targ = promoted;
+        });
         Type::TypedDict(TypedDict::TypedDict(typed_dict))
     }
 
@@ -1105,6 +1109,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
                 style.propagate()
             }
+        };
+        let res = match res {
+            Type::Union(members) => self.unions(members),
+            other => other,
         };
         if let Some(func_metadata) = kw_metadata {
             let mut kws = TypeMap::new();
