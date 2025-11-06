@@ -1768,8 +1768,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // itself depends on a TypeVar.
             return decoratee;
         }
-        if matches!(&decoratee, Type::ClassDef(_)) {
-            // TODO: don't blanket ignore class decorators.
+        let is_class_decoratee = matches!(&decoratee, Type::ClassDef(_));
+        if is_class_decoratee && self.stdlib.is_bootstrapping() {
             return decoratee;
         }
         let call_target = self.as_call_target_or_error(
@@ -1779,8 +1779,58 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             errors,
             None,
         );
-        let arg = CallArg::ty(&decoratee, range);
-        self.call_infer(call_target, &[arg], &[], range, errors, None, None, None)
+        let result = self.call_infer(
+            call_target,
+            &[CallArg::ty(&decoratee, range)],
+            &[],
+            range,
+            errors,
+            None,
+            None,
+            None,
+        );
+        result
+    }
+
+    pub(crate) fn is_class_like_value(&self, ty: &Type) -> bool {
+        match ty {
+            Type::ClassDef(_) => true,
+            Type::Type(inner) => match inner.as_ref() {
+                Type::ClassType(_)
+                | Type::SelfType(_)
+                | Type::TypedDict(_)
+                | Type::TypeVar(_)
+                | Type::ParamSpec(_)
+                | Type::TypeVarTuple(_)
+                | Type::Quantified(_)
+                | Type::QuantifiedValue(_) => true,
+                inner => self.is_class_like_value(inner),
+            },
+            Type::Union(xs) if !xs.is_empty() => {
+                xs.iter().all(|member| self.is_class_like_value(member))
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn decorator_returns_class_like(&self, decorator: &Type) -> Option<bool> {
+        let mut any_class_param = false;
+        let mut all_class_like = true;
+        decorator.visit_toplevel_callable(&mut |callable: &Callable| {
+            if let Some(first_param) = callable.get_first_param() {
+                if self.is_class_like_value(&first_param) {
+                    any_class_param = true;
+                    if !self.is_class_like_value(&callable.ret) {
+                        all_class_like = false;
+                    }
+                }
+            }
+        });
+        if any_class_param {
+            Some(all_class_like)
+        } else {
+            None
+        }
     }
 
     /// Helper to infer element types for a list or set.

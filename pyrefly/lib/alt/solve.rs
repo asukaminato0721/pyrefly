@@ -3165,9 +3165,28 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Some(cls) => {
                     let mut ty = Type::ClassDef(cls.dupe());
                     for x in decorators.iter().rev() {
-                        let decorator = self.get_idx(*x).arc_clone_ty();
-                        let range = self.bindings().idx_to_key(*x).range();
-                        ty = self.apply_decorator(decorator, ty, range, errors)
+                        let decorator_entry = self.get_idx(*x);
+                        let decorator_ty = decorator_entry.arc_clone_ty();
+                        let apply_decorator = match decorator_ty.callable_return_type() {
+                            Some(ret_hint) => {
+                                if self.is_class_like_value(&ret_hint) {
+                                    false
+                                } else {
+                                    match self.decorator_returns_class_like(&decorator_ty) {
+                                        Some(true) => false,
+                                        _ => true,
+                                    }
+                                }
+                            }
+                            None => match self.decorator_returns_class_like(&decorator_ty) {
+                                Some(true) => false,
+                                _ => true,
+                            },
+                        };
+                        if apply_decorator {
+                            let range = self.bindings().idx_to_key(*x).range();
+                            ty = self.apply_decorator(decorator_ty, ty, range, errors);
+                        }
                     }
                     ty
                 }
