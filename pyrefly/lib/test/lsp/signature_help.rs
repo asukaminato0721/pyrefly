@@ -16,8 +16,27 @@ use ruff_text_size::TextSize;
 use crate::state::state::State;
 use crate::test::util::get_batched_lsp_operations_report_allow_error;
 
+fn strip_ansi_codes(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if matches!(chars.next(), Some('[')) {
+                while let Some(next) = chars.next() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String {
-    if let Some(SignatureHelp {
+    let report = if let Some(SignatureHelp {
         signatures,
         active_signature,
         active_parameter: _,
@@ -66,7 +85,10 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
         format!("Signature Help Result:{active_signature_result}\n{signatures_result}")
     } else {
         "Signature Help: None".to_owned()
-    }
+    };
+    let stripped = strip_ansi_codes(&report);
+    debug_assert!(!stripped.contains('\u{1b}'));
+    stripped
 }
 
 #[test]
@@ -299,6 +321,41 @@ Signature Help Result: active=1
 "#
         .trim(),
         report.trim(),
+    );
+}
+
+#[test]
+fn callable_instance_test() {
+    let code = r#"
+class Callable:
+  def __call__(self, a: str, b: int) -> None: ...
+
+callable_obj = Callable()
+callable_obj()
+#            ^
+callable_obj("", )
+#               ^
+callable_obj("", 3, )
+#                  ^
+"#;
+    let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
+    let trimmed = report.trim();
+    let expected_signature = r#"- (
+    self: Callable,
+    a: str,
+    b: int
+) -> None, parameters=[a: str, b: int]"#;
+    assert!(
+        trimmed.contains(expected_signature),
+        "Report did not contain expected signature block:\n{trimmed}"
+    );
+    assert!(
+        trimmed.contains("active parameter = 0"),
+        "Report did not show active parameter 0:\n{trimmed}"
+    );
+    assert!(
+        trimmed.contains("active parameter = 1"),
+        "Report did not show active parameter 1:\n{trimmed}"
     );
 }
 

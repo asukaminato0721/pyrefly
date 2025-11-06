@@ -52,6 +52,7 @@ use crate::types::type_var::Restriction;
 use crate::types::typed_dict::TypedDict;
 use crate::types::types::AnyStyle;
 use crate::types::types::BoundMethod;
+use crate::types::types::BoundMethodType;
 use crate::types::types::OverloadType;
 use crate::types::types::Type;
 
@@ -611,6 +612,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    fn record_call_target_trace(
+        &self,
+        original_ty: &Type,
+        call_target: &CallTarget,
+        range: TextRange,
+    ) {
+        if matches!(original_ty, Type::BoundMethod(_)) {
+            return;
+        }
+        if let CallTarget::BoundMethod(obj, TargetWithTParams(_, function)) = call_target {
+            let ty = BoundMethod {
+                obj: obj.clone(),
+                func: BoundMethodType::Function(function.clone()),
+            }
+            .as_type();
+            self.record_overload_trace_from_type(range, ty);
+        }
+    }
+
     pub fn call_infer(
         &self,
         call_target: CallTarget,
@@ -1121,6 +1141,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         errors,
                         None,
                     );
+                    self.record_call_target_trace(&ty, &callable, x.arguments.range);
                     self.call_infer(
                         callable,
                         &args,
