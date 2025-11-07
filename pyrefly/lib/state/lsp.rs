@@ -462,6 +462,12 @@ impl IdentifierWithContext {
     }
 }
 
+#[derive(Clone)]
+pub struct ClassDefinitionForMove {
+    pub name: Identifier,
+    pub range: TextRange,
+}
+
 #[derive(Debug, Clone)]
 pub struct FindDefinitionItemWithDocstring {
     pub metadata: DefinitionMetadata,
@@ -651,6 +657,25 @@ impl<'a> Transaction<'a> {
             }
             _ => None,
         }
+    }
+
+    pub fn top_level_class_definition_at(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<ClassDefinitionForMove> {
+        let mod_module = self.get_ast(handle)?;
+        for stmt in &mod_module.body {
+            if let Stmt::ClassDef(class_def) = stmt
+                && class_def.name.range.contains(position)
+            {
+                return Some(ClassDefinitionForMove {
+                    name: class_def.name.clone(),
+                    range: class_def.range(),
+                });
+            }
+        }
+        None
     }
 
     fn callee_at(&self, handle: &Handle, position: TextSize) -> Option<ExprCall> {

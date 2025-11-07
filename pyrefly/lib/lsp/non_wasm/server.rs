@@ -37,6 +37,8 @@ use lsp_types::CompletionParams;
 use lsp_types::CompletionResponse;
 use lsp_types::ConfigurationItem;
 use lsp_types::ConfigurationParams;
+use lsp_types::CreateFile;
+use lsp_types::CreateFileOptions;
 use lsp_types::Diagnostic;
 use lsp_types::DiagnosticSeverity;
 use lsp_types::DiagnosticTag;
@@ -46,6 +48,8 @@ use lsp_types::DidChangeWatchedFilesClientCapabilities;
 use lsp_types::DidChangeWatchedFilesParams;
 use lsp_types::DidChangeWatchedFilesRegistrationOptions;
 use lsp_types::DidChangeWorkspaceFoldersParams;
+use lsp_types::DocumentChangeOperation;
+use lsp_types::DocumentChanges;
 use lsp_types::DocumentDiagnosticParams;
 use lsp_types::DocumentDiagnosticReport;
 use lsp_types::DocumentHighlight;
@@ -72,6 +76,7 @@ use lsp_types::InlayHintParams;
 use lsp_types::Location;
 use lsp_types::NumberOrString;
 use lsp_types::OneOf;
+use lsp_types::OptionalVersionedTextDocumentIdentifier;
 use lsp_types::Position;
 use lsp_types::PositionEncodingKind;
 use lsp_types::PrepareRenameResponse;
@@ -85,6 +90,7 @@ use lsp_types::RelativePattern;
 use lsp_types::RenameFilesParams;
 use lsp_types::RenameOptions;
 use lsp_types::RenameParams;
+use lsp_types::ResourceOp;
 use lsp_types::SemanticTokens;
 use lsp_types::SemanticTokensFullOptions;
 use lsp_types::SemanticTokensOptions;
@@ -98,6 +104,7 @@ use lsp_types::SignatureHelpOptions;
 use lsp_types::SignatureHelpParams;
 use lsp_types::SymbolInformation;
 use lsp_types::TextDocumentContentChangeEvent;
+use lsp_types::TextDocumentEdit;
 use lsp_types::TextDocumentIdentifier;
 use lsp_types::TextDocumentPositionParams;
 use lsp_types::TextDocumentSyncCapability;
@@ -457,7 +464,7 @@ pub fn capabilities(
             definition_provider: Some(OneOf::Left(true)),
             type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
             code_action_provider: Some(CodeActionProviderCapability::Options(CodeActionOptions {
-                code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                code_action_kinds: Some(vec![CodeActionKind::QUICKFIX, CodeActionKind::REFACTOR]),
                 ..Default::default()
             })),
             completion_provider: Some(CompletionOptions {
@@ -2099,26 +2106,150 @@ impl Server {
         let import_format = lsp_config.and_then(|c| c.import_format).unwrap_or_default();
         let module_info = transaction.get_module_info(&handle)?;
         let range = self.from_lsp_range(uri, &module_info, params.range);
-        let code_actions = transaction
-            .local_quickfix_code_actions(&handle, range, import_format)?
-            .into_map(|(title, info, range, insert_text)| {
-                CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: Some(CodeActionKind::QUICKFIX),
-                    edit: Some(WorkspaceEdit {
-                        changes: Some(HashMap::from([(
-                            uri.clone(),
-                            vec![TextEdit {
-                                range: info.to_lsp_range(range),
-                                new_text: insert_text,
-                            }],
-                        )])),
-                        ..Default::default()
+        let mut code_actions = Vec::new();
+        if let Some(quickfixes) =
+            transaction.local_quickfix_code_actions(&handle, range, import_format)
+        {
+            code_actions.extend(
+                quickfixes
+                    .into_iter()
+                    .map(|(title, info, range, insert_text)| {
+                        CodeActionOrCommand::CodeAction(CodeAction {
+                            title,
+                            kind: Some(CodeActionKind::QUICKFIX),
+                            edit: Some(WorkspaceEdit {
+                                changes: Some(HashMap::from([(
+                                    uri.clone(),
+                                    vec![TextEdit {
+                                        range: info.to_lsp_range(range),
+                                        new_text: insert_text,
+                                    }],
+                                )])),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
                     }),
-                    ..Default::default()
-                })
-            });
-        Some(code_actions)
+            );
+        }
+        let supports_document_changes = self
+            .initialize_params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|w| w.workspace_edit.as_ref())
+            .and_then(|we| we.document_changes)
+            .unwrap_or(false);
+        if let Some(refactor) = self.move_class_code_action(
+            transaction,
+            &handle,
+            &module_info,
+            range,
+            supports_document_changes,
+        ) {
+            code_actions.push(refactor);
+        }
+        if code_actions.is_empty() {
+            None
+        } else {
+            Some(code_actions)
+        }
+    }
+
+    fn move_class_code_action(
+        &self,
+        transaction: &Transaction<'_>,
+        handle: &Handle,
+        module_info: &ModuleInfo,
+        range: TextRange,
+        supports_document_changes: bool,
+    ) -> Option<CodeActionOrCommand> {
+        if !supports_document_changes || module_info.is_notebook() || module_info.is_generated() {
+            return None;
+        }
+        let class_info = transaction.top_level_class_definition_at(handle, range.start())?;
+        let class_name = class_info.name.id.to_string();
+        let old_real_path = to_real_path(module_info.path())?;
+        let old_abs_path = old_real_path.absolutize();
+        let directory = old_abs_path.parent()?;
+        let extension = old_abs_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("py");
+        let base_stem = class_name_to_file_stem(&class_name);
+        let mut attempt = base_stem.clone();
+        let mut suffix = 1usize;
+        let new_abs_path = loop {
+            let candidate = directory.join(format!("{attempt}.{}", extension));
+            if candidate != old_abs_path && !candidate.exists() {
+                break candidate;
+            }
+            attempt = format!("{}_{}", base_stem, suffix);
+            suffix += 1;
+            if suffix > 100 {
+                return None;
+            }
+        };
+        let old_uri = module_info_to_uri(module_info)?;
+        let new_uri = Url::from_file_path(&new_abs_path).ok()?;
+        let mut moved_source = module_info.code_at(class_info.range).to_owned();
+        if moved_source.trim().is_empty() {
+            return None;
+        }
+        if !moved_source.ends_with('\n') {
+            moved_source.push('\n');
+        }
+        let removal_range = module_info.to_lsp_range(class_info.range);
+        let old_abs_buf = old_abs_path.clone();
+        let version_lock = self.version_info.lock();
+        let version = version_lock.get(&old_abs_buf).copied();
+        drop(version_lock);
+        let mut document_changes = Vec::new();
+        document_changes.push(DocumentChangeOperation::Op(ResourceOp::Create(
+            CreateFile {
+                uri: new_uri.clone(),
+                options: Some(CreateFileOptions {
+                    overwrite: Some(false),
+                    ignore_if_exists: Some(true),
+                }),
+                annotation_id: None,
+            },
+        )));
+        document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: new_uri.clone(),
+                version: None,
+            },
+            edits: vec![OneOf::Left(TextEdit {
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                new_text: moved_source,
+            })],
+        }));
+        document_changes.push(DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier {
+                uri: old_uri.clone(),
+                version,
+            },
+            edits: vec![OneOf::Left(TextEdit {
+                range: removal_range,
+                new_text: String::new(),
+            })],
+        }));
+        let workspace_edit = WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(document_changes)),
+            ..Default::default()
+        };
+        let new_file_name = new_abs_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("new file")
+            .to_string();
+        Some(CodeActionOrCommand::CodeAction(CodeAction {
+            title: format!("Move class `{class_name}` to {new_file_name}"),
+            kind: Some(CodeActionKind::REFACTOR),
+            edit: Some(workspace_edit),
+            ..Default::default()
+        }))
     }
 
     fn document_highlight(
@@ -2845,6 +2976,45 @@ impl TspInterface for Server {
     }
 }
 
+fn class_name_to_file_stem(name: &str) -> String {
+    if name.is_empty() {
+        return "moved_class".to_string();
+    }
+    let mut result = String::new();
+    let mut prev_was_alnum = false;
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_was_alnum && !result.ends_with('_') {
+                result.push('_');
+            }
+            result.extend(ch.to_lowercase());
+            prev_was_alnum = true;
+        } else if ch.is_ascii_alphanumeric() {
+            if ch.is_ascii_digit() && prev_was_alnum && !result.ends_with('_') {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+            prev_was_alnum = true;
+        } else if !result.ends_with('_') {
+            result.push('_');
+            prev_was_alnum = false;
+        } else {
+            prev_was_alnum = false;
+        }
+    }
+    let collapsed = result
+        .trim_matches('_')
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if collapsed.is_empty() {
+        "moved_class".to_string()
+    } else {
+        collapsed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2911,5 +3081,14 @@ mod tests {
                 &stdlib_paths
             ));
         }
+    }
+
+    #[test]
+    fn test_class_name_to_file_stem() {
+        assert_eq!(class_name_to_file_stem("FooBar"), "foo_bar");
+        assert_eq!(class_name_to_file_stem("HTTPClient"), "http_client");
+        assert_eq!(class_name_to_file_stem("already_snake"), "already_snake");
+        assert_eq!(class_name_to_file_stem("X"), "x");
+        assert_eq!(class_name_to_file_stem(""), "moved_class");
     }
 }

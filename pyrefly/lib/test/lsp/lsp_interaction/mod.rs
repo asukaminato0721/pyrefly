@@ -8,6 +8,7 @@
 #![cfg(test)]
 
 mod basic;
+mod code_actions;
 mod completion;
 mod configuration;
 mod definition;
