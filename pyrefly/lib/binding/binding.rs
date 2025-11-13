@@ -9,6 +9,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use dupe::Dupe;
 use pyrefly_derive::TypeEq;
@@ -106,7 +107,7 @@ assert_words!(BindingClassBaseType, 3);
 assert_words!(BindingClassMetadata, 11);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingAbstractClassCheck, 4);
-assert_words!(BindingClassField, 21);
+assert_words!(BindingClassField, 23);
 assert_bytes!(BindingClassSynthesizedFields, 4);
 assert_bytes!(BindingLegacyTypeParam, 16);
 assert_words!(BindingYield, 4);
@@ -1963,16 +1964,18 @@ pub struct BindingClassField {
     pub name: Name,
     pub range: TextRange,
     pub definition: ClassFieldDefinition,
+    pub method_assignments: Arc<[MethodDefinedAttribute]>,
 }
 
 impl DisplayWith<Bindings> for BindingClassField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         write!(
             f,
-            "BindingClassField({}, {}, {})",
+            "BindingClassField({}, {}, {}, method_assignments = {})",
             ctx.display(self.class_idx),
             self.name,
             self.definition.display_with(ctx),
+            self.method_assignments.len(),
         )
     }
 }
@@ -1986,6 +1989,14 @@ impl DisplayWith<Bindings> for BindingClassField {
 pub struct MethodThatSetsAttr {
     pub method_name: Name,
     pub recognized_attribute_defining_method: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct MethodDefinedAttribute {
+    pub method: MethodThatSetsAttr,
+    pub value: ExprOrBinding,
+    pub annotation: Option<Idx<KeyAnnotation>>,
+    pub range: TextRange,
 }
 
 /// Bindings for fields synthesized by a class, such as a dataclass's `__init__` method. This

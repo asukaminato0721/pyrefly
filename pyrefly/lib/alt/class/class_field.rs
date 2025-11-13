@@ -49,6 +49,7 @@ use crate::binding::binding::ClassFieldDefinition;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyClassSynthesizedFields;
+use crate::binding::binding::MethodDefinedAttribute;
 use crate::binding::binding::MethodThatSetsAttr;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
@@ -1014,6 +1015,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         name: &Name,
         range: TextRange,
         field_definition: &ClassFieldDefinition,
+        method_assignments: &[MethodDefinedAttribute],
         functional_class_def: bool,
         errors: &ErrorCollector,
     ) -> ClassField {
@@ -1096,7 +1098,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // then we can avoid a bunch of work with checking for override errors.
         let mut is_inherited = IsInherited::Maybe;
 
-        let (value_ty, inherited_annotation) = match value {
+        let (mut value_ty, inherited_annotation) = match value {
             ExprOrBinding::Expr(e) => {
                 let (inherited_ty, inherited_annot) = if direct_annotation.is_some() {
                     (None, None)
@@ -1137,6 +1139,33 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             ),
         };
         let metadata = self.get_metadata_for_class(class);
+
+        if direct_annotation.is_none() && !method_assignments.is_empty() {
+            for assignment in method_assignments {
+                let assignment_annotation = assignment
+                    .annotation
+                    .map(|a| self.get_idx(a))
+                    .as_deref()
+                    .map(|annot| annot.annotation.clone());
+                let mut assignment_ty = match &assignment.value {
+                    ExprOrBinding::Expr(expr) => {
+                        if let Some(annot) = &assignment_annotation {
+                            let ctx: &dyn Fn() -> TypeCheckContext = &|| {
+                                TypeCheckContext::of_kind(TypeCheckKind::Attribute(name.clone()))
+                            };
+                            self.expr(expr, Some((annot.get_type(), ctx)), errors)
+                        } else {
+                            self.expr_infer(expr, errors)
+                        }
+                    }
+                    ExprOrBinding::Binding(binding) => {
+                        Arc::unwrap_or_clone(self.solve_binding(binding, errors)).into_ty()
+                    }
+                };
+                self.expand_vars_mut(&mut assignment_ty);
+                value_ty = unions(vec![value_ty, assignment_ty]);
+            }
+        }
 
         if let Some(named_tuple_metadata) = metadata.named_tuple_metadata()
             && !functional_class_def
@@ -1321,10 +1350,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .named_tuple_metadata()
             .is_some_and(|nt| nt.elements.contains(name));
 
+        let literalish = match &value_ty {
+            Type::Union(types) => types
+                .iter()
+                .all(|ty| ty.is_literal() || ty.is_literal_string()),
+            _ => value_ty.is_literal() || value_ty.is_literal_string(),
+        };
+
         // Promote literals. The check on `annotation` is an optimization, it does not (currently) affect semantics.
         let value_ty = if (read_only_reason.is_none() || is_namedtuple_member)
             && annotation.is_none_or(|a| a.ty.is_none())
-            && value_ty.is_literal()
+            && literalish
         {
             value_ty.promote_literals(self.stdlib)
         } else {
