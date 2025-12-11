@@ -47,7 +47,7 @@ fn test_initialize_basic() {
             },
             "completionProvider": {
                 "resolveProvider": true,
-                "triggerCharacters": [".", "'", "\""]
+                "triggerCharacters": [".", "'", "\""],
             },
             "declarationProvider": true,
             "documentHighlightProvider": true,
