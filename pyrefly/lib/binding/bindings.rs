@@ -1412,7 +1412,9 @@ impl<'a> BindingsBuilder<'a> {
                     .flow_style_for_name(&name)
                     .map(FlowStyle::assume_initialized)
                     .unwrap_or(FlowStyle::Other);
-                self.scopes.define_in_current_flow(hashed_name, idx, style);
+                let _ = self
+                    .scopes
+                    .define_in_current_flow(hashed_name, idx, style, false);
                 if let Some(narrow_idx) = capture_info.narrow_idx
                     && let Some((_, Some(Binding::Narrow(_, _, _)))) =
                         self.get_original_binding(narrow_idx)
@@ -1456,7 +1458,7 @@ impl<'a> BindingsBuilder<'a> {
                         .flow_style_for_name(name.key())
                         .map(FlowStyle::assume_initialized)
                         .unwrap_or(FlowStyle::Other);
-                    self.scopes.define_in_current_flow(name, idx, style);
+                    let _ = self.scopes.define_in_current_flow(name, idx, style, false);
                 }
                 NameLookupResult::Found {
                     idx,
@@ -1478,8 +1480,9 @@ impl<'a> BindingsBuilder<'a> {
                     // When we use a variable, we mark it as initialized
                     // If the variable was uninitialized before, this will
                     // prevent us from emitting errors for every subsequent usage
-                    self.scopes
-                        .define_in_current_flow(name, idx, FlowStyle::Other);
+                    let _ =
+                        self.scopes
+                            .define_in_current_flow(name, idx, FlowStyle::Other, false);
                 }
                 NameLookupResult::Found {
                     idx,
@@ -1780,26 +1783,21 @@ impl<'a> BindingsBuilder<'a> {
     ) -> Option<Idx<KeyAnnotation>> {
         self.check_for_type_alias_redefinition(name, idx);
         self.check_for_imported_final_reassignment(name, idx);
-        let mut hashed_name = Hashed::new(name);
-        let mut write_info = self
+        let hashed_name = Hashed::new(name);
+        let allow_unreachable_defs =
+            self.errors_suppressed() && self.should_bind_unreachable_branches();
+        let write_info = self
             .scopes
-            .define_in_current_flow(hashed_name, idx, style.clone());
-        if write_info.is_none()
-            && self.errors_suppressed()
-            && self.should_bind_unreachable_branches()
-        {
-            let key_range = self.table.types.0.idx_to_key(idx).range();
-            self.scopes.add_synthetic_definition(name, key_range);
-            // Recreate the hash since it borrows `name` by reference and we just mutated state
-            hashed_name = Hashed::new(name);
-            write_info = self.scopes.define_in_current_flow(hashed_name, idx, style);
+            .define_in_current_flow(hashed_name, idx, style.clone(), allow_unreachable_defs)
+            .unwrap_or_else(|| {
+                panic!(
+                    "Name `{name}` not found in static scope of module `{}`.",
+                    self.module_info.name(),
+                )
+            });
+        if !write_info.reachability.is_reachable() {
+            debug_assert!(allow_unreachable_defs);
         }
-        let write_info = write_info.unwrap_or_else(|| {
-            panic!(
-                "Name `{name}` not found in static scope of module `{}`.",
-                self.module_info.name(),
-            )
-        });
         if let Some(range) = write_info.anywhere_range {
             self.table
                 .record_bind_in_anywhere(hashed_name.into_key().clone(), range, idx);
