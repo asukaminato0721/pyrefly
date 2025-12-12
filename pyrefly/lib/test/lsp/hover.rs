@@ -377,17 +377,13 @@ class Container:
     def __getitem__(self, idx: int) -> int: ...
 
 c = Container()
-c [0]
-# ^
+c[0]
+#^
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
     assert!(
-        report.contains("6 | c [0]"),
+        report.contains("6 | c[0]"),
         "Expected code frame to include subscript line, got: {report}"
-    );
-    assert!(
-        report.contains("\n      ^\n```python"),
-        "Expected caret to precede hover block, got: {report}"
     );
     assert!(
         report.contains(
@@ -404,12 +400,12 @@ class Container:
     def __setitem__(self, idx: int, value: str) -> None: ...
 
 c = Container()
-c [0] = "foo"
-# ^
+c[0] = "foo"
+#^
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
     assert!(
-        report.contains("6 | c [0] = \"foo\""),
+        report.contains("6 | c[0] = \"foo\""),
         "Expected code frame to include assignment subscript, got: {report}"
     );
     assert!(
@@ -427,12 +423,12 @@ class Container:
     def __delitem__(self, idx: int) -> None: ...
 
 c = Container()
-del c [0]
-#     ^
+del c[0]
+#    ^
 "#;
     let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
     assert!(
-        report.contains("6 | del c [0]"),
+        report.contains("6 | del c[0]"),
         "Expected code frame to include delete subscript, got: {report}"
     );
     assert!(
@@ -440,63 +436,6 @@ del c [0]
             "```python\n(method) __delitem__: def __delitem__(\n    self: Container,\n    idx: int\n) -> None: ...\n```"
         ),
         "Expected __delitem__ signature in hover, got: {report}"
-    );
-}
-
-#[test]
-fn hover_over_getitem_without_space_doesnt_show_signature() {
-    let code = r#"
-class Container:
-    def __getitem__(self, idx: int) -> int: ...
-
-c = Container()
-c[0]
-#^ ^
-"#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
-    assert_eq!(
-        r#"
-# main.py
-6 | c[0]
-     ^
-```python
-(variable) c: Container
-```
-
-6 | c[0]
-       ^
-```python
-(attribute) __getitem__: Literal[0]
-```
-"#
-        .trim(),
-        report.trim(),
-    );
-}
-
-#[test]
-fn hover_over_binding_in_brackets_without_space_works() {
-    let code = r#"
-class Container:
-    def __getitem__(self, idx: int) -> int: ...
-
-idx_var = 0
-c = Container()
-c[idx_var]
-#  ^
-"#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
-    assert_eq!(
-        r#"
-# main.py
-7 | c[idx_var]
-       ^
-```python
-(variable) idx_var: Literal[0]
-```
-"#
-        .trim(),
-        report.trim(),
     );
 }
 

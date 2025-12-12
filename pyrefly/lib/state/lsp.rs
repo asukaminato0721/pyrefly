@@ -43,6 +43,7 @@ use pyrefly_util::visit::Visit;
 use ruff_python_ast::Alias;
 use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprRef;
 use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprContext;
@@ -511,8 +512,14 @@ impl<'a> Transaction<'a> {
     fn type_from_expression_at(&self, handle: &Handle, position: TextSize) -> Option<Type> {
         let module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&module, position);
+        let skip_base_name = self.cursor_on_subscript_bracket(handle, &covering_nodes, position);
         for node in covering_nodes {
             if node.as_expr_ref().is_none() {
+                continue;
+            }
+            if skip_base_name
+                && matches!(node.as_expr_ref(), Some(ExprRef::Name(_)))
+            {
                 continue;
             }
             let range = node.range();
@@ -533,11 +540,35 @@ impl<'a> Transaction<'a> {
     ) -> Option<IdentifierWithContext> {
         let mod_module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&mod_module, position);
-        Self::identifier_from_covering_nodes(&covering_nodes)
+        if self.cursor_on_subscript_bracket(handle, &covering_nodes, position) {
+            None
+        } else {
+            Self::identifier_from_covering_nodes(&covering_nodes, position)
+        }
+    }
+
+    fn cursor_on_subscript_bracket(
+        &self,
+        handle: &Handle,
+        covering_nodes: &[AnyNodeRef],
+        position: TextSize,
+    ) -> bool {
+        if !covering_nodes
+            .iter()
+            .any(|node| matches!(node, AnyNodeRef::ExprSubscript(_)))
+        {
+            return false;
+        }
+        let Some(module) = self.get_module_info(handle) else {
+            return false;
+        };
+        let snippet = module.code_at(TextRange::at(position, TextSize::new(1)));
+        snippet.chars().next() == Some('[')
     }
 
     fn identifier_from_covering_nodes(
         covering_nodes: &[AnyNodeRef],
+        position: TextSize,
     ) -> Option<IdentifierWithContext> {
         match (
             covering_nodes.first(),
@@ -665,7 +696,21 @@ impl<'a> Transaction<'a> {
                 Some(IdentifierWithContext::from_expr_attr(id, attr))
             }
             (Some(AnyNodeRef::ExprName(name)), _, _, _) => {
-                Some(IdentifierWithContext::from_expr_name(name))
+                let identifier = IdentifierWithContext::from_expr_name(name);
+                let is_subscript_boundary = position >= identifier.identifier.range.end()
+                    && covering_nodes.iter().any(|node| {
+                        if let AnyNodeRef::ExprSubscript(sub) = node {
+                            sub.range().contains(position)
+                                && sub.value.range() == identifier.identifier.range
+                        } else {
+                            false
+                        }
+                    });
+                if is_subscript_boundary {
+                    None
+                } else {
+                    Some(identifier)
+                }
             }
             _ => None,
         }
@@ -719,6 +764,12 @@ impl<'a> Transaction<'a> {
     }
 
     fn definition_at(&self, handle: &Handle, position: TextSize) -> Option<Key> {
+        if let Some(ast) = self.get_ast(handle) {
+            let covering_nodes = Ast::locate_node(&ast, position);
+            if self.cursor_on_subscript_bracket(handle, &covering_nodes, position) {
+                return None;
+            }
+        }
         self.get_bindings(handle)?
             .definition_at_position(position)
             .cloned()
@@ -1411,7 +1462,12 @@ impl<'a> Transaction<'a> {
         };
         let covering_nodes = Ast::locate_node(&mod_module, position);
 
-        match Self::identifier_from_covering_nodes(&covering_nodes) {
+        let identifier = if self.cursor_on_subscript_bracket(handle, &covering_nodes, position) {
+            None
+        } else {
+            Self::identifier_from_covering_nodes(&covering_nodes, position)
+        };
+        match identifier {
             Some(IdentifierWithContext {
                 identifier: id,
                 context: IdentifierContext::Expr(expr_context),
