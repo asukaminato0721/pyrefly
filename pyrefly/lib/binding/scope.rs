@@ -438,6 +438,14 @@ pub struct Flow {
     has_terminated: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct RuntimeAssignment {
+    pub name: Name,
+    pub range: TextRange,
+    pub idx: Idx<Key>,
+    pub style: FlowStyle,
+}
+
 impl Flow {
     fn get_info(&self, name: &Name) -> Option<&FlowInfo> {
         self.info.get(name)
@@ -995,6 +1003,47 @@ impl Scope {
             imports: SmallMap::new(),
             variables: SmallMap::new(),
             finally_depth: 0,
+        }
+    }
+
+    /// Consume the scope and return the names that received runtime assignments while it
+    /// was active. Used to surface walrus assignments performed inside synthetic scopes such
+    /// as those created for PEP 695 `type` statements.
+    pub fn into_runtime_assignments(self) -> Option<Vec<RuntimeAssignment>> {
+        let Scope {
+            kind,
+            range,
+            stat,
+            flow,
+            ..
+        } = self;
+        if !matches!(kind, ScopeKind::TypeAlias) {
+            return None;
+        }
+        let assignments: Vec<_> = flow
+            .info
+            .into_iter()
+            .filter_map(|(name, info)| {
+                let FlowInfo { value, .. } = info;
+                value.map(|value| {
+                    let name_range = stat
+                        .0
+                        .get(&name)
+                        .map(|static_info| static_info.range)
+                        .unwrap_or(range);
+                    RuntimeAssignment {
+                        name,
+                        range: name_range,
+                        idx: value.idx,
+                        style: value.style,
+                    }
+                })
+            })
+            .collect();
+        if assignments.is_empty() {
+            None
+        } else {
+            Some(assignments)
         }
     }
 
@@ -1765,6 +1814,16 @@ impl Scopes {
             name.range,
             StaticStyle::SingleDef(ann),
         )
+    }
+
+    /// Record that a runtime expression inside a synthetic scope (like a `type`
+    /// statement body) bound a name that should be visible in the enclosing scope.
+    pub fn register_runtime_assignment(&mut self, name: &Name, range: TextRange) {
+        self.current_mut().stat.upsert(
+            Hashed::new(name.clone()),
+            range,
+            StaticStyle::SingleDef(None),
+        );
     }
 
     pub fn register_parameter(&mut self, name: &Identifier, allow_unused: bool) {

@@ -47,6 +47,7 @@ use crate::binding::expr::Usage;
 use crate::binding::narrow::NarrowOps;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::LoopExit;
+use crate::binding::scope::RuntimeAssignment;
 use crate::binding::scope::Scope;
 use crate::config::error_kind::ErrorKind;
 use crate::error::context::ErrorInfo;
@@ -109,6 +110,22 @@ fn is_definitely_nonempty_iterable(iter: &Expr) -> bool {
 }
 
 impl<'a> BindingsBuilder<'a> {
+    fn promote_runtime_assignments(&mut self, assignments: Vec<RuntimeAssignment>) {
+        for RuntimeAssignment {
+            name,
+            range,
+            idx,
+            style,
+        } in assignments
+        {
+            if matches!(self.binding_at(idx), Some(Binding::TypeParameter(_))) {
+                continue;
+            }
+            self.scopes.register_runtime_assignment(&name, range);
+            self.bind_name(&name, idx, style);
+        }
+    }
+
     fn assert(&mut self, assert_range: TextRange, mut test: Expr, msg: Option<Expr>) {
         let test_range = test.range();
         self.ensure_expr(&mut test, &mut Usage::Narrowing(None));
@@ -685,7 +702,10 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     self.ensure_type(&mut x.value, &mut None);
                     // Pop the type alias scope before binding the definition
-                    self.scopes.pop();
+                    let type_alias_scope = self.scopes.pop();
+                    if let Some(assignments) = type_alias_scope.into_runtime_assignments() {
+                        self.promote_runtime_assignments(assignments);
+                    }
                     let binding = Binding::ScopedTypeAlias(
                         name.id.clone(),
                         x.type_params.map(|x| *x),

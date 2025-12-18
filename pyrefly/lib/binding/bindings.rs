@@ -638,6 +638,10 @@ impl<'a> BindingsBuilder<'a> {
         self.table.get::<K>().0.idx_to_key(idx)
     }
 
+    pub fn binding_at(&self, idx: Idx<Key>) -> Option<&Binding> {
+        self.table.get::<Key>().1.get(idx)
+    }
+
     /// Declare a `Key` as a usage, which can be used for name lookups. Like `idx_for_promise`,
     /// this is a promise to later provide a `Binding` corresponding this key.
     pub fn declare_current_idx(&mut self, key: Key) -> CurrentIdx {

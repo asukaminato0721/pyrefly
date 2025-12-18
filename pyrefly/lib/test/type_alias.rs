@@ -49,6 +49,15 @@ def f(x: X[int]):
 );
 
 testcase!(
+    test_type_alias_named_expr_assigns_to_enclosing_scope,
+    r#"
+from typing import Literal, assert_type
+type Alias = (captured := 1)
+assert_type(captured, Literal[1])
+    "#,
+);
+
+testcase!(
     test_type_alias_missing_quantifieds,
     r#"
 from typing import TypeVar
