@@ -64,7 +64,14 @@ fn test_inlay_hints() {
                     ("]", false),
                     ("]", false),
                 ],
-            )
+                position: (0, 21),
+                text_edit: ExpectedTextEdit {
+                    new_text: " -> tuple[Literal[1], Literal[2]]",
+                    range_start: (0, 21),
+                    range_end: (0, 21),
+                },
+            }];
+            inlay_hints_match_expected(result, &expected)
         })
         .unwrap();
 
@@ -99,7 +106,14 @@ fn test_inlay_hints() {
                     ("]", false),
                     ("]", false),
                 ],
-            )
+                position: (0, 6),
+                text_edit: ExpectedTextEdit {
+                    new_text: ": tuple[Literal[1], Literal[2]]",
+                    range_start: (0, 6),
+                    range_end: (0, 6),
+                },
+            }];
+            inlay_hints_match_expected(result, &expected)
         })
         .unwrap();
 
