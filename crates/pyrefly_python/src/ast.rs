@@ -45,6 +45,8 @@ use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
+use crate::cython;
+use crate::module::Module;
 use crate::sys_info::PythonVersion;
 
 /// Just used for convenient namespacing - not a real type
@@ -88,6 +90,26 @@ impl<'a> SourceOrderVisitor<'a> for CoveringNodeVisitor<'a> {
 }
 
 impl Ast {
+    pub fn parse_module(
+        module: &Module,
+    ) -> (ModModule, Vec<ParseError>, Vec<UnsupportedSyntaxError>) {
+        Ast::parse_module_with_version(module, PythonVersion::default())
+    }
+
+    pub fn parse_module_with_version(
+        module: &Module,
+        version: PythonVersion,
+    ) -> (ModModule, Vec<ParseError>, Vec<UnsupportedSyntaxError>) {
+        let source_type = module.source_type();
+        let contents = module.contents();
+        if cython::is_cython_path(module.path().as_path()) {
+            let sanitized = cython::sanitize_for_parse(contents);
+            Ast::parse_with_version(sanitized.as_ref(), version, source_type)
+        } else {
+            Ast::parse_with_version(contents, version, source_type)
+        }
+    }
+
     pub fn parse(
         contents: &str,
         source_type: PySourceType,

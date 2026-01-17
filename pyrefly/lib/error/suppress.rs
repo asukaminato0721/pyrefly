@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::anyhow;
 use pyrefly_config::error_kind::Severity;
 use pyrefly_python::ast::Ast;
+use pyrefly_python::cython;
 use pyrefly_python::ignore::Tool;
 use pyrefly_python::module::GENERATED_TOKEN;
 use pyrefly_python::module_path::ModulePathDetails;
@@ -62,7 +63,13 @@ fn read_and_validate_file(path: &Path) -> anyhow::Result<String> {
     match file {
         Ok(file) => {
             // Check for generated + parsable files
-            let (_ast, parse_errors, _unsupported_syntax_errors) = Ast::parse(&file, source_type);
+            let sanitized = if cython::is_cython_path(path) {
+                cython::sanitize_for_parse(&file)
+            } else {
+                std::borrow::Cow::Borrowed(file.as_str())
+            };
+            let (_ast, parse_errors, _unsupported_syntax_errors) =
+                Ast::parse(sanitized.as_ref(), source_type);
             if !parse_errors.is_empty() {
                 return Err(anyhow!("File is not parsable"));
             }

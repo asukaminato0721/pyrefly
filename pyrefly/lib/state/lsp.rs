@@ -1481,9 +1481,7 @@ impl<'a> Transaction<'a> {
                 self.get_ast(&handle).unwrap_or_else(|| {
                     // We may not have the AST available for the handle if it's not opened -- in that case,
                     // Re-parse the module to get the AST.
-                    Ast::parse(module_info.contents(), module_info.source_type())
-                        .0
-                        .into()
+                    Ast::parse_module(&module_info).0.into()
                 })
             };
 

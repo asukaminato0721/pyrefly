@@ -32,7 +32,7 @@ impl AttributeContext {
         module: &Module,
         target_range: TextRange,
     ) -> Option<AttributeContext> {
-        let ast = Ast::parse(module.contents(), module.source_type()).0;
+        let ast = Ast::parse_module(module).0;
         let mut parents = Vec::new();
         Self::from_body(ast.body.as_slice(), &mut parents, target_range)
     }

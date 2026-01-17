@@ -148,9 +148,8 @@ impl Step {
     #[inline(never)]
     fn step_ast<Lookup>(ctx: &Context<Lookup>, load: Arc<Load>) -> Arc<ModModule> {
         Arc::new(module_parse(
-            load.module_info.contents(),
+            &load.module_info,
             ctx.sys_info.version(),
-            load.module_info.source_type(),
             &load.errors,
         ))
     }
