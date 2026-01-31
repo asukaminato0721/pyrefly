@@ -31,10 +31,12 @@ import {
   disableBasedPyrightIfInstalled,
   disableCursorPyrightIfInstalled,
 } from './extension-interop';
+import {EndpointViewProvider, openEndpointLocation} from './endpoint-view';
 
 let client: LanguageClient;
 let outputChannel: vscode.OutputChannel;
 let traceOutputChannel: vscode.OutputChannel;
+let endpointProvider: EndpointViewProvider | undefined;
 
 /// Get a setting at the path, or throw an error if it's not set.
 function requireSetting<T>(path: string): T {
@@ -235,6 +237,16 @@ export async function activate(context: ExtensionContext) {
   );
   registerCodeLensCommands(context, pythonExtension);
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('pyrefly.refreshEndpoints', () => {
+      endpointProvider?.refresh();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('pyrefly.openEndpoint', openEndpointLocation),
+  );
+
   // When our extension is activated, make sure ms-python knows
   // TODO(kylei): remove this hack once ms-python has this behavior
   await triggerMsPythonRefreshLanguageServers();
@@ -268,6 +280,28 @@ export async function activate(context: ExtensionContext) {
   if (statusBarItem) {
     context.subscriptions.push(statusBarItem);
   }
+
+  endpointProvider = new EndpointViewProvider(client, outputChannel);
+  const endpointView = vscode.window.createTreeView('pyreflyEndpoints', {
+    treeDataProvider: endpointProvider,
+  });
+  context.subscriptions.push(endpointView);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidSaveTextDocument(doc => {
+      if (doc.languageId === 'python') {
+        endpointProvider?.refresh();
+      }
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => {
+      endpointProvider?.refresh();
+    }),
+  );
+
+  endpointProvider.refresh();
 }
 
 export function deactivate(): Thenable<void> | undefined {

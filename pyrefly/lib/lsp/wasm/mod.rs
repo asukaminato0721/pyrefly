@@ -6,6 +6,7 @@
  */
 
 pub mod completion;
+pub mod endpoint_list;
 pub mod hover;
 pub mod inlay_hints;
 pub mod notebook;

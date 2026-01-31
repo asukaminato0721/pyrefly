@@ -80,8 +80,30 @@
                 "title": "Run Test",
                 "category": "pyrefly",
                 "command": "pyrefly.runTest"
+            },
+            {
+                "title": "Refresh Endpoints",
+                "category": "pyrefly",
+                "command": "pyrefly.refreshEndpoints"
             }
         ],
+        "views": {
+            "explorer": [
+                {
+                    "id": "pyreflyEndpoints",
+                    "name": "Pyrefly Endpoints"
+                }
+            ]
+        },
+        "menus": {
+            "view/title": [
+                {
+                    "command": "pyrefly.refreshEndpoints",
+                    "when": "view == pyreflyEndpoints",
+                    "group": "navigation"
+                }
+            ]
+        },
         "semanticTokenScopes": [
             {
                 "language": "python",
