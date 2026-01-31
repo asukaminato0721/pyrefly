@@ -64,8 +64,30 @@
                 "title": "Unfold All Docstrings",
                 "category": "pyrefly",
                 "command": "pyrefly.unfoldAllDocstrings"
+            },
+            {
+                "title": "Refresh Endpoints",
+                "category": "pyrefly",
+                "command": "pyrefly.refreshEndpoints"
             }
         ],
+        "views": {
+            "explorer": [
+                {
+                    "id": "pyreflyEndpoints",
+                    "name": "Pyrefly Endpoints"
+                }
+            ]
+        },
+        "menus": {
+            "view/title": [
+                {
+                    "command": "pyrefly.refreshEndpoints",
+                    "when": "view == pyreflyEndpoints",
+                    "group": "navigation"
+                }
+            ]
+        },
         "semanticTokenScopes": [
             {
                 "language": "python",

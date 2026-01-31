@@ -95,6 +95,13 @@ struct EndpointDefinition {
     docstring_range: Option<TextRange>,
 }
 
+pub(crate) struct EndpointSummary {
+    pub path: String,
+    pub methods: Vec<String>,
+    pub module: Module,
+    pub definition_range: TextRange,
+}
+
 struct EndpointCallContext {
     literal: ExprStringLiteral,
     method: EndpointMethod,
@@ -389,6 +396,11 @@ impl<'a> Transaction<'a> {
                 | ModulePathDetails::Namespace(_) => {}
                 _ => continue,
             }
+            if self.is_third_party_module(&module, &handle)
+                && !self.is_source_file(&module, &handle)
+            {
+                continue;
+            }
             let Some(ast) = self.get_ast(&handle) else {
                 continue;
             };
@@ -399,6 +411,24 @@ impl<'a> Transaction<'a> {
             endpoints.extend(collector.endpoints);
         }
         endpoints
+    }
+
+    pub(crate) fn list_endpoints(&self) -> Vec<EndpointSummary> {
+        self.collect_endpoint_definitions()
+            .into_iter()
+            .map(|endpoint| EndpointSummary {
+                path: endpoint.path,
+                methods: endpoint
+                    .methods
+                    .as_ref()
+                    .map(|methods| {
+                        methods.iter().map(|method| method.as_str().to_owned()).collect()
+                    })
+                    .unwrap_or_default(),
+                module: endpoint.module,
+                definition_range: endpoint.definition_range,
+            })
+            .collect()
     }
 
     pub(crate) fn add_endpoint_completions(

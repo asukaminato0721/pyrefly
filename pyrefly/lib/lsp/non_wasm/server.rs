@@ -256,6 +256,9 @@ use crate::lsp::wasm::notebook::DidChangeNotebookDocumentParams;
 use crate::lsp::wasm::notebook::DidCloseNotebookDocument;
 use crate::lsp::wasm::notebook::DidOpenNotebookDocument;
 use crate::lsp::wasm::notebook::DidSaveNotebookDocument;
+use crate::lsp::wasm::endpoint_list::EndpointItem;
+use crate::lsp::wasm::endpoint_list::EndpointList;
+use crate::lsp::wasm::endpoint_list::EndpointListParams;
 use crate::lsp::wasm::provide_type::ProvideType;
 use crate::lsp::wasm::provide_type::ProvideTypeResponse;
 use crate::lsp::wasm::provide_type::provide_type;
@@ -1575,6 +1578,15 @@ impl Server {
                             Ok(self.provide_type(&mut transaction, params)),
                         ));
                     }
+                } else if let Some(params) = as_request::<EndpointList>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<EndpointList>(params, &x.id)
+                    {
+                        self.send_response(new_response(
+                            x.id,
+                            Ok(self.list_endpoints(&transaction, params)),
+                        ));
+                    }
                 } else if let Some(params) = as_request::<WillRenameFiles>(&x) {
                     if let Some(params) = self
                         .extract_request_params_or_send_err_response::<WillRenameFiles>(
@@ -1928,6 +1940,28 @@ impl Server {
         }
         let handle = self.make_handle_if_enabled(uri, None)?;
         provide_type(transaction, &handle, params.positions)
+    }
+
+    fn list_endpoints(
+        &self,
+        transaction: &Transaction<'_>,
+        _params: EndpointListParams,
+    ) -> Vec<EndpointItem> {
+        transaction
+            .list_endpoints()
+            .into_iter()
+            .filter_map(|endpoint| {
+                let uri = module_info_to_uri(&endpoint.module)?;
+                Some(EndpointItem {
+                    path: endpoint.path,
+                    methods: endpoint.methods,
+                    location: Location {
+                        uri,
+                        range: endpoint.module.to_lsp_range(endpoint.definition_range),
+                    },
+                })
+            })
+            .collect()
     }
 
     fn type_error_display_status(&self, path: &Path) -> TypeErrorDisplayStatus {
