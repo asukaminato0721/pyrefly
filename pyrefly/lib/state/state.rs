@@ -381,6 +381,11 @@ struct ModuleDataMut {
     rdeps: Mutex<HashSet<Handle>>,
 }
 
+fn module_sys_info_override(sys_info: &SysInfo, steps: &Steps) -> Option<SysInfo> {
+    let ast = steps.ast.as_ref()?;
+    module_platform_guard(&ast.body).map(|platform| sys_info.with_platform(platform))
+}
+
 impl ModuleData {
     /// Make a copy of the data that can be mutated.
     fn clone_for_mutation(&self) -> ModuleDataMut {
@@ -1029,7 +1034,7 @@ impl<'a> Transaction<'a> {
                 require,
                 module: module_data.handle.module(),
                 path: module_data.handle.path(),
-                sys_info: module_data.handle.sys_info(),
+                sys_info,
                 memory: &self.memory_lookup(),
                 uniques: &self.data.state.uniques,
                 stdlib: &stdlib,
@@ -1436,13 +1441,17 @@ impl<'a> Transaction<'a> {
             .dupe()
     }
 
-    pub fn get_stdlib(&self, handle: &Handle) -> Arc<Stdlib> {
+    pub fn get_stdlib_for_sys_info(&self, sys_info: &SysInfo) -> Arc<Stdlib> {
         if self.data.stdlib.len() == 1 {
             // Since we know our one must exist, we can shortcut
             return self.data.stdlib.first().unwrap().1.dupe();
         }
 
-        self.data.stdlib.get(handle.sys_info()).unwrap().dupe()
+        self.data.stdlib.get(sys_info).unwrap().dupe()
+    }
+
+    pub fn get_stdlib(&self, handle: &Handle) -> Arc<Stdlib> {
+        self.get_stdlib_for_sys_info(handle.sys_info())
     }
 
     fn compute_stdlib(&mut self, sys_infos: SmallSet<SysInfo>) {
@@ -2092,7 +2101,11 @@ impl<'a> TransactionHandle<'a> {
 
         match handle {
             FindingOrError::Finding(finding) => {
-                let handle = finding.finding;
+                let handle = if let Some(sys_info) = &sys_info_override {
+                    Handle::new(module, finding.finding.path().dupe(), sys_info.dupe())
+                } else {
+                    finding.finding
+                };
                 let error = finding.error;
                 let res = self.transaction.get_imported_module(&handle);
 

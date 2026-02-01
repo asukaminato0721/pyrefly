@@ -471,6 +471,9 @@ impl Bindings {
         enable_trace: bool,
         untyped_def_behavior: UntypedDefBehavior,
     ) -> Self {
+        let override_sys_info =
+            module_platform_guard(&x.body).map(|platform| sys_info.with_platform(platform));
+        let sys_info = override_sys_info.as_ref().unwrap_or(sys_info);
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             lookup,
