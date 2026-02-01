@@ -32,6 +32,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_python::sys_info::module_platform_guard;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::events::CategorizedEvents;
 use pyrefly_util::fs_anyhow;
@@ -239,6 +240,11 @@ impl ModuleDataInner {
             steps: Steps::default(),
         }
     }
+}
+
+fn module_sys_info_override(sys_info: &SysInfo, steps: &Steps) -> Option<SysInfo> {
+    let ast = steps.ast.as_ref()?;
+    module_platform_guard(&ast.body).map(|platform| sys_info.with_platform(platform))
 }
 
 impl ModuleData {
@@ -973,13 +979,18 @@ impl<'a> Transaction<'a> {
 
             computed = true;
             let require = exclusive.require;
-            let stdlib = self.get_stdlib(&module_data.handle);
+            let sys_info_override =
+                module_sys_info_override(module_data.handle.sys_info(), &exclusive.steps);
+            let sys_info = sys_info_override
+                .as_ref()
+                .unwrap_or(module_data.handle.sys_info());
+            let stdlib = self.get_stdlib_for_sys_info(sys_info);
             let config = module_data.config.read();
             let ctx = Context {
                 require,
                 module: module_data.handle.module(),
                 path: module_data.handle.path(),
-                sys_info: module_data.handle.sys_info(),
+                sys_info,
                 memory: &self.memory_lookup(),
                 uniques: &self.data.state.uniques,
                 stdlib: &stdlib,
@@ -1351,8 +1362,14 @@ impl<'a> Transaction<'a> {
             } else if let Some(answers) = &lock.steps.answers {
                 let load = lock.steps.load.dupe().unwrap();
                 let answers = answers.dupe();
+                let sys_info_override =
+                    module_sys_info_override(module_data.handle.sys_info(), &lock.steps);
                 drop(lock);
-                let stdlib = self.get_stdlib(&module_data.handle);
+                let stdlib = self.get_stdlib_for_sys_info(
+                    sys_info_override
+                        .as_ref()
+                        .unwrap_or(module_data.handle.sys_info()),
+                );
                 let lookup = self.lookup(module_data);
                 return answers.1.solve_exported_key(
                     &lookup,
@@ -1386,13 +1403,17 @@ impl<'a> Transaction<'a> {
             .dupe()
     }
 
-    pub fn get_stdlib(&self, handle: &Handle) -> Arc<Stdlib> {
+    pub fn get_stdlib_for_sys_info(&self, sys_info: &SysInfo) -> Arc<Stdlib> {
         if self.data.stdlib.len() == 1 {
             // Since we know our one must exist, we can shortcut
             return self.data.stdlib.first().unwrap().1.dupe();
         }
 
-        self.data.stdlib.get(handle.sys_info()).unwrap().dupe()
+        self.data.stdlib.get(sys_info).unwrap().dupe()
+    }
+
+    pub fn get_stdlib(&self, handle: &Handle) -> Arc<Stdlib> {
+        self.get_stdlib_for_sys_info(handle.sys_info())
     }
 
     fn compute_stdlib(&mut self, sys_infos: SmallSet<SysInfo>) {
@@ -2064,7 +2085,11 @@ impl<'a> TransactionHandle<'a> {
         module: ModuleName,
         path: Option<&ModulePath>,
     ) -> FindingOrError<ArcId<ModuleDataMut>> {
-        let require = self.module_data.state.read().require;
+        let state = self.module_data.state.read();
+        let require = state.require;
+        let sys_info_override =
+            module_sys_info_override(self.module_data.handle.sys_info(), &state.steps);
+        drop(state);
         if let Some(ImportResolution::Resolved(handles)) = self.module_data.deps.read().get(&module)
             && path.is_none_or(|path| path == handles.first().0.path())
         {
@@ -2080,7 +2105,11 @@ impl<'a> TransactionHandle<'a> {
 
         match handle {
             FindingOrError::Finding(finding) => {
-                let handle = finding.finding;
+                let handle = if let Some(sys_info) = &sys_info_override {
+                    Handle::new(module, finding.finding.path().dupe(), sys_info.dupe())
+                } else {
+                    finding.finding
+                };
                 let error = finding.error;
                 let res = self.transaction.get_imported_module(&handle, require);
 

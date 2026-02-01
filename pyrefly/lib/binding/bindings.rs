@@ -21,6 +21,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_python::sys_info::module_platform_guard;
 use pyrefly_types::type_info::JoinStyle;
 use pyrefly_types::types::Type;
 use pyrefly_util::display::DisplayWithCtx;
@@ -423,6 +424,9 @@ impl Bindings {
         enable_trace: bool,
         untyped_def_behavior: UntypedDefBehavior,
     ) -> Self {
+        let override_sys_info =
+            module_platform_guard(&x.body).map(|platform| sys_info.with_platform(platform));
+        let sys_info = override_sys_info.as_ref().unwrap_or(sys_info);
         let mut builder = BindingsBuilder {
             module_info: module_info.dupe(),
             lookup,

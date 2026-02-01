@@ -162,6 +162,32 @@ assert_type(Y(), int)
 );
 
 testcase!(
+    test_platform_guard_assert,
+    r#"
+import sys
+assert sys.platform == "win32"
+
+import winreg
+
+winreg.OpenKeyEx(winreg.HKEY_LOCAL_MACHINE, "SOFTWARE")
+"#,
+);
+
+testcase!(
+    test_platform_guard_if_not_win32_raise,
+    r#"
+import sys
+
+if sys.platform != "win32":
+    raise EnvironmentError("Windows only")
+
+import winreg
+
+winreg.OpenKeyEx(winreg.HKEY_LOCAL_MACHINE, "SOFTWARE")
+"#,
+);
+
+testcase!(
     test_sys_info_with_or,
     r#"
 from typing import TYPE_CHECKING, Literal, assert_type
