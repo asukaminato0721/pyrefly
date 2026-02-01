@@ -177,6 +177,22 @@ def f(c: C) -> None:
     "#,
 );
 
+testcase!(
+    test_cached_property_class_attribute_access,
+    r#"
+from functools import cached_property
+from typing import reveal_type
+
+class A:
+    @cached_property
+    def func(self) -> int:
+        return 3
+
+reveal_type(A.func.attrname)  # E: revealed type: str | None
+A.func.__name__  # E: Object of class `cached_property` has no attribute `__name__`
+    "#,
+);
+
 // Make sure we don't crash.
 testcase!(
     test_staticmethod_class,

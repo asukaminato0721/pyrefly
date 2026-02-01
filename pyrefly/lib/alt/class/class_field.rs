@@ -2621,8 +2621,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
         match field.0 {
             ClassFieldInner::Property { ty, .. } => {
-                // When accessing a property on a class (not instance), you get the property object itself
-                bind_class_attribute(cls, ty, None)
+                if ty.is_cached_property() {
+                    let ret = ty.callable_return_type().unwrap_or_else(Type::any_implicit);
+                    ClassAttribute::read_write(self.stdlib.cached_property(ret).to_type())
+                } else {
+                    // When accessing a property on a class (not instance), you get the property object itself
+                    bind_class_attribute(cls, ty, None)
+                }
             }
             ClassFieldInner::Descriptor { descriptor, .. } => ClassAttribute::descriptor(
                 descriptor,

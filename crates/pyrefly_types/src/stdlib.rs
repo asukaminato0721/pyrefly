@@ -115,6 +115,7 @@ pub struct Stdlib {
     /// this class does not exist at runtime.
     typed_dict_fallback: StdlibResult<ClassType>,
     property: StdlibResult<ClassType>,
+    cached_property: StdlibResult<(Class, Arc<TParams>)>,
     object: StdlibResult<ClassType>,
     /// Introduced in Python 3.10.
     union_type: Option<StdlibResult<ClassType>>,
@@ -255,6 +256,7 @@ impl Stdlib {
             named_tuple_fallback: lookup_concrete(type_checker_internals, "NamedTupleFallback"),
             typed_dict_fallback: lookup_concrete(type_checker_internals, "TypedDictFallback"),
             property: lookup_concrete(builtins, "property"),
+            cached_property: lookup_generic(ModuleName::functools(), "cached_property", 1),
             object: lookup_concrete(builtins, "object"),
             union_type: version
                 .at_least(3, 10)
@@ -575,6 +577,10 @@ impl Stdlib {
 
     pub fn property(&self) -> &ClassType {
         Self::primitive(&self.property)
+    }
+
+    pub fn cached_property(&self, x: Type) -> ClassType {
+        Self::apply(&self.cached_property, vec![x])
     }
 
     pub fn special_form_qname(&self, name: &str) -> Option<&QName> {
