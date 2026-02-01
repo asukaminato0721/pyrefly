@@ -508,6 +508,25 @@ def g(x: int):
 );
 
 testcase!(
+    test_overload_type_form_inference,
+    r#"
+from typing import assert_type, overload
+
+class C: ...
+
+@overload
+def foo[T](x: type[T]) -> T: ...  # E: Overloaded function must have an implementation
+@overload
+def foo(x: int) -> int: ...
+
+def bar[T](x: type[T]) -> T: ...
+
+assert_type(foo(C), C)
+assert_type(bar(C), C)
+    "#,
+);
+
+testcase!(
     test_overload_exponential,
     r#"
 # This used to take an exponential amount of time to type check
