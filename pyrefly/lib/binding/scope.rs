@@ -70,11 +70,8 @@ use crate::export::definitions::Definition;
 use crate::export::definitions::DefinitionStyle;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::MutableCaptureKind;
-<<<<<<< 1254
 use crate::export::definitions::Reachability;
 use crate::export::exports::ExportLocation;
-=======
->>>>>>> main
 use crate::export::exports::LookupExport;
 use crate::export::special::SpecialExport;
 use crate::module::module_info::ModuleInfo;
