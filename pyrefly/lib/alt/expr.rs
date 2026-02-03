@@ -12,6 +12,7 @@ use std::fmt::Display;
 use dupe::Dupe;
 use itertools::Either;
 use itertools::Itertools;
+use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
@@ -63,6 +64,7 @@ use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use starlark_map::Hashed;
 use vec1::Vec1;
+use vec1::vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -80,13 +82,7 @@ use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
-<<<<<<< HEAD
-||||||| parent of 434a44124 (fmt)
 use crate::types::callable::Callable;
-=======
-use crate::graph::index::Idx;
-use crate::types::callable::Callable;
->>>>>>> 434a44124 (fmt)
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
@@ -438,21 +434,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let param_vars = if let Some(parameters) = &lambda.parameters {
                     parameters
                         .iter_non_variadic_params()
-                        .map(|x| (&x.name().id, self.bindings().get_lambda_param(x.name())))
+                        .map(|x| {
+                            (
+                                x.name().id.clone(),
+                                self.bindings().get_lambda_param(x.name()),
+                            )
+                        })
                         .collect()
                 } else {
                     Vec::new()
                 };
+                let param_var_refs: Vec<(&Name, Var)> =
+                    param_vars.iter().map(|(name, var)| (name, *var)).collect();
                 // Pass any contextual information to the parameter bindings used in the lambda body as a side
                 // effect, by setting an answer for the vars created at binding time.
-                let return_hint = hint.and_then(|hint| self.decompose_lambda(hint, &param_vars));
+                let return_hint =
+                    hint.and_then(|hint| self.decompose_lambda(hint, &param_var_refs));
 
                 let mut params = param_vars.into_map(|(name, var)| {
-                    Param::Pos(
-                        name.clone(),
-                        self.solver().force_var(var),
-                        Required::Required,
-                    )
+                    Param::Pos(name, self.solver().force_var(var), Required::Required)
                 });
                 if let Some(parameters) = &lambda.parameters {
                     params.extend(parameters.vararg.iter().map(|x| {
@@ -504,22 +504,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             Expr::Tuple(x) => self.tuple_infer(x, hint, errors),
             Expr::List(x) => {
-                let elt_hint = hint.and_then(|ty| self.decompose_list(ty));
-                if x.is_empty() {
-                    let elem_ty = elt_hint.map_or_else(
-                        || {
-                            self.solver()
-                                .fresh_partial_contained(self.uniques, x.range)
-                                .to_type(self.heap)
-                        },
-                        |hint| hint.to_type(),
-                    );
-                    self.heap.mk_class_type(self.stdlib.list(elem_ty))
-                } else {
-                    let elem_tys = self.elts_infer(&x.elts, elt_hint, errors);
-                    self.heap
-                        .mk_class_type(self.stdlib.list(self.unions(elem_tys)))
-                }
                 let elt_hint = hint.and_then(|ty| self.decompose_list(ty));
                 self.list_with_hint(x, elt_hint, errors)
             }
@@ -1099,36 +1083,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 value_tys.push(value_t);
                             }
                         }
-                    }
-                    None => {
-                        let ty = self.expr_infer(&item.value, errors);
-                        if let Some((key_t, value_t)) = self.unwrap_mapping(&ty) {
-                            if !key_t.is_error() {
-                                if let Some(key_hint) = &key_hint
-                                    && self.is_subset_eq(&key_t, key_hint.union())
-                                {
-                                    key_tys.push(key_hint.union().clone());
-                                } else {
-                                    key_tys.push(key_t);
-                                }
-                            }
-                            if !value_t.is_error() {
-                                if let Some(value_hint) = &value_hint
-                                    && self.is_subset_eq(&value_t, value_hint.union())
-                                {
-                                    value_tys.push(value_hint.union().clone());
-                                } else {
-                                    value_tys.push(value_t);
-                                }
-                            }
-                        } else {
-                            self.error(
-                                errors,
-                                item.value.range(),
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                                format!("Expected a mapping, got {}", self.for_display(ty)),
-                            );
-                        }
+                    } else {
+                        self.error(
+                            errors,
+                            x.value.range(),
+                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            format!("Expected a mapping, got {}", self.for_display(ty)),
+                        );
                     }
                 }
             });
@@ -1341,7 +1302,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .iter()
             .map(|(_, var)| self.solver().snapshot_unwrap_var(*var))
             .collect::<Vec<_>>();
-        let return_hint = hint.and_then(|hint| self.decompose_lambda(hint, &param_vars));
+        let param_var_refs: Vec<(&Name, Var)> =
+            param_vars.iter().map(|(name, var)| (name, *var)).collect();
+        let return_hint = hint.and_then(|hint| self.decompose_lambda(hint, &param_var_refs));
 
         let ret = self.expr_infer_type_no_trace(
             &lambda.body,
@@ -1392,7 +1355,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     fn lambda_param_type_info_from_idx(&self, idx: Idx<Key>) -> Option<TypeInfo> {
         match self.bindings().get(idx) {
             Binding::Forward(next) => self.lambda_param_type_info_from_idx(*next),
-            Binding::LambdaParameter(var) => Some(TypeInfo::of_ty(var.to_type())),
+            Binding::LambdaParameter(var) => Some(TypeInfo::of_ty(var.to_type(self.heap))),
             _ => None,
         }
     }
@@ -2006,7 +1969,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         );
                         Type::any_implicit()
                     } else {
-                        self.solver().fresh_contained(self.uniques).to_type()
+                        self.solver()
+                            .fresh_partial_contained(self.uniques, x.range())
+                            .to_type(self.heap)
                     }
                 },
                 |hint| hint.to_type(),
