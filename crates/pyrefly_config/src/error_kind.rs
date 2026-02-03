@@ -291,6 +291,10 @@ pub enum ErrorKind {
     /// Kept so that existing `# pyrefly: ignore[unannotated-attribute]` comments
     /// and config entries continue to work. This variant is never emitted by
     /// the type checker.
+    /// An attribute is missing a type annotation and is initialized with the `None` literal.
+    /// Passing a string to something that expects an iterable of strings.
+    StringAsIterable,
+    /// An attribute is missing a type annotation and is initialized with the `None` literal.
     UnannotatedAttribute,
     /// DEPRECATED: use [ImplicitAnyParameter] (`implicit-any-parameter`) instead.
     /// Kept so that existing `# pyrefly: ignore[unannotated-parameter]` comments
@@ -414,6 +418,7 @@ impl ErrorKind {
         match self {
             ErrorKind::Deprecated => Severity::Warn,
             ErrorKind::DivisionByZero => Severity::Warn,
+            ErrorKind::StringAsIterable => Severity::Warn,
             ErrorKind::ImplicitAbstractClass => Severity::Ignore,
             ErrorKind::ImplicitAny => Severity::Ignore,
             ErrorKind::ImplicitAnyAttribute => Severity::Ignore,
