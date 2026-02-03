@@ -368,20 +368,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             matched,
         );
         if matched {
-            let CalledOverload {
-                func,
-                res,
-                ctor_targs: _,
-                partial_var_map: _,
-                call_errors,
-                expected_types: _,
-            } = closest_overload;
-            errors.extend(call_errors);
             // If the selected overload is deprecated, we log a deprecation error.
-            if let Some(deprecation) = &func.1.metadata.flags.deprecation {
+            if let Some(deprecation) = &closest_overload.func.1.metadata.flags.deprecation {
                 let msg = deprecation.as_error_message(format!(
                     "Call to deprecated overload `{}`",
-                    func.1.metadata.kind.format(self.module().name())
+                    closest_overload
+                        .func
+                        .1
+                        .metadata
+                        .kind
+                        .format(self.module().name())
                 ));
                 errors.add(
                     arguments_range,
@@ -389,7 +385,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     msg,
                 );
             }
-            (res, func.1.signature.clone())
+            (closest_overload.res, closest_overload.func.1.signature.clone())
         } else {
             // Build a string showing the argument types for error messages
             let mut arg_type_strs = Vec::new();
@@ -524,13 +520,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 None, // don't use the hint yet, it shouldn't influence overload selection
                 ctor_targs,
             );
-            if called_overload.call_errors.is_empty_for_overload_matching() {
+            if called_overload.call_errors.is_empty() {
                 matched_overloads.push(called_overload);
             } else {
                 match &closest_unmatched_overload {
                     Some(overload)
-                        if overload.call_errors.len_for_overload_matching()
-                            <= called_overload.call_errors.len_for_overload_matching() => {}
+                        if overload.call_errors.len() <= called_overload.call_errors.len() => {}
                     _ => {
                         closest_unmatched_overload = Some(called_overload);
                     }
@@ -644,7 +639,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 None, // don't use the hint yet, it shouldn't influence overload selection
                                 &None,
                             );
-                            res.call_errors.is_empty_for_overload_matching()
+                            res.call_errors.is_empty()
                         })
                         .map(|(split_point, _)| split_point + 1)
                 };
@@ -890,8 +885,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // try again without a hint in case we can still match this overload.
         let (call_errors, res, expected_types) = try_call(hint);
         let (call_errors, res, expected_types) =
-            if tparams.is_some() && hint.is_some() && !call_errors.is_empty_for_overload_matching()
-            {
+            if tparams.is_some() && hint.is_some() && !call_errors.is_empty() {
                 try_call(None)
             } else {
                 (call_errors, res, expected_types)
