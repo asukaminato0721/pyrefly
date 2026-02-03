@@ -39,7 +39,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let expanded_types: Vec<Type> = types.iter().map(|cls| (*cls).clone().to_type()).collect();
         let mut union_type = self.unions(expanded_types);
         if let Type::Union(ref mut boxed_union) = union_type {
-            boxed_union.display_name = Some(display_name);
+            boxed_union.display_name = Some(display_name.into_boxed_str());
         }
         union_type
     }
@@ -167,6 +167,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
     fn expand_type_for_lax_mode(&self, ty: &Type) -> Type {
         match ty {
+            Type::None => ty.clone(),
+            // Literal types have no lax coercion - they require exact values
+            Type::Literal(_) => ty.clone(),
+            Type::LiteralString(_) => ty.clone(),
+            Type::Type(box inner) => Type::Type(Box::new(self.expand_type_for_lax_mode(inner))),
             // Tuple types: convert to Iterable[T] where T is a union of expanded element types
             Type::Tuple(tuple) => self
                 .stdlib

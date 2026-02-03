@@ -5,13 +5,17 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fmt;
+use std::fmt::Debug;
+use std::fmt::Formatter;
+use std::path::MAIN_SEPARATOR_STR;
 use std::path::Path;
 use std::path::PathBuf;
 
 /// Some kind of pattern that can be used by filesystem watchers. Some filesystem watchers
 /// expect the path to be separate from the pattern part, so this enables downstream logic
 /// to handle pattern components as they need.
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(PartialEq, Eq, Clone, Hash)]
 pub enum WatchPattern<'a> {
     /// A pattern consisting of a file or directory with no wildcards.
     File(PathBuf),
@@ -32,5 +36,19 @@ impl<'a> WatchPattern<'a> {
 
     pub fn owned_root(root: PathBuf, pattern: String) -> Self {
         Self::OwnedRoot(root, pattern)
+    }
+}
+
+impl<'a> Debug for WatchPattern<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(p) => write!(f, "{}", p.display()),
+            Self::Root(r, p) => {
+                write!(f, "{}{}{p}", r.display(), MAIN_SEPARATOR_STR)
+            }
+            Self::OwnedRoot(r, p) => {
+                write!(f, "{}{}{p}", r.display(), MAIN_SEPARATOR_STR)
+            }
+        }
     }
 }

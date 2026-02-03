@@ -11,8 +11,8 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use dupe::Dupe;
+use pyrefly_graph::calculation::Calculation;
 use pyrefly_python::docstring::Docstring;
-use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_python::sys_info::SysInfo;
@@ -26,15 +26,41 @@ use starlark_map::small_set::SmallSet;
 use crate::export::definitions::DefinitionStyle;
 use crate::export::definitions::Definitions;
 use crate::export::definitions::DunderAllEntry;
+use crate::export::definitions::DunderAllKind;
 use crate::export::special::SpecialExport;
-use crate::graph::calculation::Calculation;
 use crate::module::module_info::ModuleInfo;
 use crate::state::loader::FindingOrError;
 
-/// Find the exports of a given module.
+/// Find the exports of a given module. Beware: these APIs record dependencies between modules during lookups. Using the
+/// wrong API can lead to invalidation bugs.
 pub trait LookupExport {
-    /// Get the exports of a given module, or an error if the module is not available.
-    fn get(&self, module: ModuleName) -> FindingOrError<Exports>;
+    /// Check if a specific export exists in a module. Records a dependency on `name` from `module` regardless of if it exists.
+    fn export_exists(&self, module: ModuleName, name: &Name) -> bool;
+
+    /// Check if a module exists and do nothing with it. Note: if we rely on the exports of `module`, we need to call
+    /// `module_exists_and_record_export_dependency` instead.
+    fn module_exists(&self, module: ModuleName) -> FindingOrError<()>;
+
+    /// Get the wildcard exports for a module. Records a dependency on `module` regardless of if it exists.
+    fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>>;
+
+    /// Get all export names for a module. Records a dependency on all changes to `module`.
+    fn get_every_export(&self, module: ModuleName) -> Option<SmallSet<Name>>;
+
+    /// Check if a submodule is imported implicitly. Records a dependency on `name` from `module` regardless of if it exists.
+    fn is_submodule_imported_implicitly(&self, module: ModuleName, name: &Name) -> bool;
+
+    /// Get deprecation info for an export. Records a dependency on `name` from `module` regardless of if it exists.
+    fn get_deprecated(&self, module: ModuleName, name: &Name) -> Option<Deprecation>;
+
+    /// Check if an export is a re-export from another module. Records a dependency on `name` from `module` regardless of if it exists.
+    fn is_reexport(&self, module: ModuleName, name: &Name) -> bool;
+
+    /// Check if an export is a special export. Records a dependency on `name` from `module` regardless of if it exists.
+    fn is_special_export(&self, module: ModuleName, name: &Name) -> Option<SpecialExport>;
+
+    /// Get the docstring range for an export. Records a dependency on `name` from `module` regardless of if it exists.
+    fn docstring_range(&self, module: ModuleName, name: &Name) -> Option<TextRange>;
 }
 
 #[derive(Debug, Clone)]
@@ -49,9 +75,9 @@ pub struct Export {
 /// Where is this export defined?
 #[derive(Debug, Clone)]
 pub enum ExportLocation {
-    // This export is defined in this module.
+    /// This export is defined in this module.
     ThisModule(Export),
-    // Export from another module ModuleName. If it's aliased, the old name (before the alias) is provided.
+    /// Export from another module ModuleName. If it's aliased, the old name (before the alias) is provided.
     OtherModule(ModuleName, Option<Name>),
 }
 
@@ -78,7 +104,7 @@ struct ExportsInner {
 
 impl Display for Exports {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for x in self.0.definitions.dunder_all.iter() {
+        for x in self.0.definitions.dunder_all.entries.iter() {
             match x {
                 DunderAllEntry::Name(_, x) => writeln!(f, "export {x}")?,
                 DunderAllEntry::Module(_, x) => writeln!(f, "from {x} import *")?,
@@ -125,15 +151,14 @@ impl Exports {
     pub fn wildcard(&self, lookup: &dyn LookupExport) -> Arc<SmallSet<Name>> {
         let f = || {
             let mut result = SmallSet::new();
-            for x in &self.0.definitions.dunder_all {
+            for x in &self.0.definitions.dunder_all.entries {
                 match x {
                     DunderAllEntry::Name(_, x) => {
                         result.insert(x.clone());
                     }
                     DunderAllEntry::Module(_, x) => {
                         // They did `__all__.extend(foo.__all__)`, but didn't import `foo`.
-                        if let Some(import) = lookup.get(*x).finding() {
-                            let wildcard = import.wildcard(lookup);
+                        if let Some(wildcard) = lookup.get_wildcard(*x) {
                             for y in wildcard.iter_hashed() {
                                 result.insert_hashed(y.cloned());
                             }
@@ -162,6 +187,24 @@ impl Exports {
             .contains(name)
     }
 
+    /// Return an iterator with entries in `__all__` that are user-defined or None if `__all__` was not present.
+    pub fn get_explicit_dunder_all_names_iter(&self) -> Option<impl Iterator<Item = &Name>> {
+        match self.0.definitions.dunder_all.kind {
+            DunderAllKind::Specified => Some(
+                self.0
+                    .definitions
+                    .dunder_all
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        DunderAllEntry::Name(_, name) => Some(name),
+                        _ => None,
+                    }),
+            ),
+            _ => None,
+        }
+    }
+
     /// Returns entries in `__all__` that don't exist in the module's definitions.
     /// Only validates explicitly user-defined `__all__` entries, not synthesized ones.
     /// Returns a vector of (range, name) tuples for invalid entries.
@@ -171,11 +214,11 @@ impl Exports {
         module_info: &ModuleInfo,
     ) -> Vec<(TextRange, Name)> {
         // Only validate if __all__ was explicitly defined by the user
-        if !self.0.definitions.definitions.contains_key(&dunder::ALL) {
+        if self.0.definitions.dunder_all.kind == DunderAllKind::Inferred {
             return Vec::new();
         }
         let mut invalid = Vec::new();
-        for entry in &self.0.definitions.dunder_all {
+        for entry in &self.0.definitions.dunder_all.entries {
             if let DunderAllEntry::Name(range, name) = entry {
                 // Check if name exists in definitions
                 if self.0.definitions.definitions.contains_key(name) {
@@ -184,8 +227,8 @@ impl Exports {
                 // Check if name is available through a wildcard import
                 let mut found_in_import = false;
                 for (module, _) in self.0.definitions.import_all.iter() {
-                    if let Some(exports) = lookup.get(*module).finding()
-                        && exports.wildcard(lookup).contains(name)
+                    if let Some(wildcard) = lookup.get_wildcard(*module)
+                        && wildcard.contains(name)
                     {
                         found_in_import = true;
                         break;
@@ -197,7 +240,7 @@ impl Exports {
                 // In __init__.py, __all__ can list submodule names
                 if module_info.path().is_init() {
                     let submodule = module_info.name().append(name);
-                    if lookup.get(submodule).finding().is_some() {
+                    if lookup.module_exists(submodule).finding().is_some() {
                         continue;
                     }
                 }
@@ -256,8 +299,8 @@ impl Exports {
                 result.insert_hashed(name.cloned(), export);
             }
             for m in self.0.definitions.import_all.keys() {
-                if let Some(exports) = lookup.get(*m).finding() {
-                    for name in exports.wildcard(lookup).iter_hashed() {
+                if let Some(wildcard) = lookup.get_wildcard(*m) {
+                    for name in wildcard.iter_hashed() {
                         result.insert_hashed(name.cloned(), ExportLocation::OtherModule(*m, None));
                     }
                 }
@@ -284,11 +327,46 @@ mod tests {
     use crate::state::loader::FindError;
 
     impl LookupExport for SmallMap<ModuleName, Exports> {
-        fn get(&self, module: ModuleName) -> FindingOrError<Exports> {
+        fn export_exists(&self, module: ModuleName, k: &Name) -> bool {
+            self.get(&module)
+                .map(|x| x.exports(self).contains_key(k))
+                .unwrap_or(false)
+        }
+
+        fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
+            self.get(&module).map(|x| x.wildcard(self))
+        }
+
+        fn get_every_export(&self, module: ModuleName) -> Option<SmallSet<Name>> {
+            self.get(&module)
+                .map(|x| x.exports(self).keys().cloned().collect::<SmallSet<Name>>())
+        }
+
+        fn module_exists(&self, module: ModuleName) -> FindingOrError<()> {
             match self.get(&module) {
-                Some(x) => FindingOrError::new_finding(x.dupe()),
+                Some(_) => FindingOrError::new_finding(()),
                 None => FindingOrError::Error(FindError::not_found(anyhow!("Error"), module)),
             }
+        }
+
+        fn get_deprecated(&self, _module: ModuleName, _name: &Name) -> Option<Deprecation> {
+            None
+        }
+
+        fn is_reexport(&self, _module: ModuleName, _name: &Name) -> bool {
+            false
+        }
+
+        fn docstring_range(&self, _module: ModuleName, _name: &Name) -> Option<TextRange> {
+            None
+        }
+
+        fn is_special_export(&self, _module: ModuleName, _name: &Name) -> Option<SpecialExport> {
+            None
+        }
+
+        fn is_submodule_imported_implicitly(&self, _module: ModuleName, _name: &Name) -> bool {
+            false
         }
     }
 

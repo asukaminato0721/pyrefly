@@ -214,7 +214,7 @@ def nested():
     config["user"][""]
 #                  ^
 "#;
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::indexing(), true);
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
     let handle = handles.get("main").unwrap();
     let position = extract_cursors_for_test(code)[0];
     let txn = state.transaction();
@@ -230,7 +230,7 @@ def nested():
     config["user"][""]
 #           ^
 "#;
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::indexing(), true);
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
     let handle = handles.get("main").unwrap();
     let position = extract_cursors_for_test(code)[0];
     let txn = state.transaction();
@@ -267,6 +267,88 @@ Completion Results:
             .trim()
         )
     );
+}
+
+#[test]
+fn dict_key_completion_from_typed_dict_get() {
+    let code = r#"
+from typing import TypedDict
+
+class Dimension(TypedDict):
+    x: int
+    y: int
+    z: int
+
+dim: Dimension
+dim.get("")
+#        ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(
+        report.contains(
+            r#"
+Completion Results:
+- (Field) x: int
+- (Field) y: int
+- (Field) z: int
+"#
+            .trim()
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn dict_key_completion_from_typed_dict_get_keyword() {
+    let code = r#"
+from typing import TypedDict
+
+class Dimension(TypedDict):
+    x: int
+    y: int
+    z: int
+
+dim: Dimension
+dim.get(key="")
+#             ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(
+        report.contains(
+            r#"
+Completion Results:
+- (Value) 'x': Literal['x'] inserting `x`
+- (Field) x: int
+- (Field) y: int
+- (Field) z: int
+"#
+            .trim()
+        ),
+        "{report}"
+    );
+}
+
+#[test]
+fn dict_key_completion_from_typed_dict_literal() {
+    let code = r#"
+from typing import TypedDict
+
+class Config(TypedDict):
+    name: str
+    age: int
+
+cfg: Config = {"": 1}
+#             ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    let report = strip_ansi(&report);
+    assert!(report.contains("- (Field) age: int"));
+    assert!(report.contains("- (Field) name: str"));
 }
 
 #[test]
@@ -1154,17 +1236,9 @@ Completion Results:
 - (Function) isinstance
 - (Class) DivisionImpossible: from decimal import DivisionImpossible
 
-- (Class) FirstHeaderLineIsContinuationDefect: from email.errors import FirstHeaderLineIsContinuationDefect
-
-- (Class) MissingHeaderBodySeparatorDefect: from email.errors import MissingHeaderBodySeparatorDefect
-
 - (Function) disjoint_base: from typing_extensions import disjoint_base
 
-- (Function) distributions: from importlib.metadata import distributions
-
 - (Function) fix_missing_locations: from ast import fix_missing_locations
-
-- (Function) packages_distributions: from importlib.metadata import packages_distributions
 
 - (Function) timerfd_settime_ns: from os import timerfd_settime_ns
 
@@ -1191,7 +1265,7 @@ foo(
 4 | foo(
         ^
 Completion Results:
-- (Value) 'foo': Literal['foo']
+- (Value) 'foo': Literal['foo'] inserting `'foo'`
 - (Variable) x=: Literal['foo']
 "#
         .trim(),
@@ -1215,16 +1289,16 @@ foo(
 4 | foo(
         ^
 Completion Results:
-- (Value) '"': Literal['"']
-- (Value) '\'': Literal['\'']
-- (Value) '\\': Literal['\\']
-- (Value) '\a': Literal['\a']
-- (Value) '\b': Literal['\b']
-- (Value) '\f': Literal['\f']
-- (Value) '\n': Literal['\n']
-- (Value) '\r': Literal['\r']
-- (Value) '\t': Literal['\t']
-- (Value) '\v': Literal['\v']
+- (Value) '"': Literal['"'] inserting `'"'`
+- (Value) '\'': Literal['\''] inserting `'\''`
+- (Value) '\\': Literal['\\'] inserting `'\\'`
+- (Value) '\a': Literal['\a'] inserting `'\a'`
+- (Value) '\b': Literal['\b'] inserting `'\b'`
+- (Value) '\f': Literal['\f'] inserting `'\f'`
+- (Value) '\n': Literal['\n'] inserting `'\n'`
+- (Value) '\r': Literal['\r'] inserting `'\r'`
+- (Value) '\t': Literal['\t'] inserting `'\t'`
+- (Value) '\v': Literal['\v'] inserting `'\v'`
 - (Variable) x=: Literal['\a', '\b', '\t', '\n', '\v', '\f', '\r', '"', '\'', '\\']
 "#
         .trim(),
@@ -1248,8 +1322,9 @@ foo("
 4 | foo("
          ^
 Completion Results:
-- (Value) 'a\nb': Literal['a\nb']"#
-            .trim(),
+- (Value) 'a\nb': Literal['a\nb'] inserting `a
+b`"#
+        .trim(),
         report.trim(),
     );
 }
@@ -1270,8 +1345,8 @@ foo(
 4 | foo(
         ^
 Completion Results:
-- (Value) 'bar': Literal['bar']
-- (Value) 'foo': Literal['foo']
+- (Value) 'bar': Literal['bar'] inserting `'bar'`
+- (Value) 'foo': Literal['foo'] inserting `'foo'`
 - (Variable) x=: Literal['bar', 'foo']
 "#
         .trim(),
@@ -1295,8 +1370,33 @@ foo('
 4 | foo('
          ^
 Completion Results:
-- (Value) 'bar': Literal['bar']
-- (Value) 'foo': Literal['foo']
+- (Value) 'bar': Literal['bar'] inserting `bar`
+- (Value) 'foo': Literal['foo'] inserting `foo`
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
+fn completion_literal_match_value() {
+    let code = r#"
+from typing import Literal
+x: Literal['a', 'b'] = 'a'
+match x:
+    case ':
+#         ^
+"#;
+    let report =
+        get_batched_lsp_operations_report_allow_error(&[("main", code)], get_default_test_report());
+    assert_eq!(
+        r#"
+# main.py
+5 |     case ':
+              ^
+Completion Results:
+- (Value) 'a': Literal['a'] inserting `a`
+- (Value) 'b': Literal['b'] inserting `b`
 "#
         .trim(),
         report.trim(),
@@ -1321,8 +1421,8 @@ foo(
 5 | foo(
         ^
 Completion Results:
-- (Value) 'bar': Literal['bar']
-- (Value) 'foo': Literal['foo']
+- (Value) 'bar': Literal['bar'] inserting `'bar'`
+- (Value) 'foo': Literal['foo'] inserting `'foo'`
 - (Variable) x=: Literal['bar', 'foo']
 "#
         .trim(),
@@ -1346,7 +1446,7 @@ foo(
 4 | foo(
         ^
 Completion Results:
-- (Value) 1: Literal[1]
+- (Value) 1: Literal[1] inserting `1`
 - (Variable) x=: Literal[1] | LiteralString
 "#
         .trim(),
@@ -1371,8 +1471,8 @@ foo(
 5 | foo(
         ^
 Completion Results:
-- (Value) 'foo': Literal['foo']
-- (Value) 1: Literal[1]
+- (Value) 'foo': Literal['foo'] inserting `'foo'`
+- (Value) 1: Literal[1] inserting `1`
 - (Variable) x=: Literal['foo', 1] | Foo
 "#
         .trim(),
@@ -1380,7 +1480,6 @@ Completion Results:
     );
 }
 
-// todo(kylei): provide editttext to remove the quotes
 #[test]
 fn completion_literal_do_not_duplicate_quotes() {
     let code = r#"
@@ -1398,8 +1497,8 @@ foo(''
 5 | foo(''
          ^
 Completion Results:
-- (Value) 'foo': Literal['foo']
-- (Value) 1: Literal[1]
+- (Value) 'foo': Literal['foo'] inserting `foo`
+- (Value) 1: Literal[1] inserting `1`
 "#
         .trim(),
         report.trim(),
@@ -1734,7 +1833,7 @@ T = foooooo
 #       ^
 "#;
     let files = [("main", code), ("bar", "foooooo = 1")];
-    let (handles, state) = mk_multi_file_state(&files, Require::indexing(), false);
+    let (handles, state) = mk_multi_file_state(&files, Require::Exports, false);
     let handle = handles.get("main").unwrap();
     let position = extract_cursors_for_test(code)[0];
 
@@ -2426,7 +2525,7 @@ import sys
 x = sys.version
 #       ^
 "#;
-    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::indexing(), true);
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
     let handle = handles.get("main").unwrap();
     let positions = extract_cursors_for_test(code);
     let txn = state.transaction();
@@ -2444,5 +2543,55 @@ x = sys.version
     assert!(
         !normal_completions.is_empty(),
         "Expected completions in normal code but got none"
+    );
+}
+
+#[test]
+fn bound_method_completions_include_descriptor_attributes() {
+    // Make sure completions work for bound methods from custom descriptors.
+    // See: https://github.com/facebook/pyrefly/issues/821
+    let code = r#"
+from __future__ import annotations
+from typing import Callable
+
+class CachedMethod:
+    def __init__(self, fn: Callable[[Constraint], int]) -> None:
+        self._fn = fn
+
+    def __get__(self, obj: Constraint | None, owner: type[Constraint]) -> CachedMethod:
+        return self
+
+    def __call__(self, obj: Constraint) -> int:
+        return self._fn(obj)
+
+    def clear_cache(self, obj: Constraint) -> None: ...
+
+def cache_on_self(fn: Callable[[Constraint], int]) -> CachedMethod:
+    return CachedMethod(fn)
+
+class Constraint:
+    @cache_on_self
+    def pointwise_read_writes(self) -> int:
+        return 0
+
+    def use_cached_method(self) -> None:
+        self.pointwise_read_writes.
+#                                  ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(code)[0];
+    let txn = state.transaction();
+    let completions = txn.completion(handle, position, ImportFormat::Absolute, true);
+
+    let completion_labels: Vec<_> = completions.iter().map(|c| c.label.as_str()).collect();
+
+    // The descriptor's `clear_cache` method should appear in completions
+    assert!(
+        completion_labels.contains(&"clear_cache"),
+        "Expected `clear_cache` in completions for bound method from custom descriptor.\n\
+         This attribute is defined on CachedMethod and should be accessible.\n\
+         Got completions: {:?}",
+        completion_labels
     );
 }
