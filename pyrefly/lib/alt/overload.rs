@@ -385,7 +385,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     msg,
                 );
             }
-            (closest_overload.res, closest_overload.func.1.signature.clone())
+            (
+                closest_overload.res,
+                closest_overload.func.1.signature.clone(),
+            )
         } else {
             // Build a string showing the argument types for error messages
             let mut arg_type_strs = Vec::new();

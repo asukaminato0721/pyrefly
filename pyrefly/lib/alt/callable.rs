@@ -1193,7 +1193,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 let (got, ok) = self.check_expr_argument(
                                     x,
                                     hint,
-                                    kw.range,
+                                    x.range(),
                                     arg_errors,
                                     call_errors,
                                     tcc,
