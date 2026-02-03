@@ -749,8 +749,7 @@ def foo():
             return ExampleA()
         "#;
         let output = r#"
-        from file_two import ExampleA
-from file_two import get_a
+        from file_two import get_a, ExampleA
         def foo() -> ExampleA:
             return get_a()
         "#;
@@ -777,9 +776,7 @@ from file_two import get_a
             return ExampleB()
         "#;
         let output = r#"
-        from file_two import ExampleB
-from file_two import ExampleA
-from file_two import get_a, get_b
+        from file_two import get_a, get_b, ExampleB, ExampleA
         def foo() -> ExampleA:
             return get_a()
         def bar() -> ExampleB:
