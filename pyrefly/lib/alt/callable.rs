@@ -521,14 +521,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         if got.is_error() || got.is_any() || want.is_any() {
             return;
         }
-<<<<<<< HEAD
-        if want.contains_type_variable() {
-||||||| parent of e36024e96 (update)
-        if want.may_contain_quantified_var() {
-=======
         let got_is_str = matches!(got, Type::ClassType(cls) if cls.is_builtin("str"));
         if !got_is_str {
->>>>>>> e36024e96 (update)
             return;
         }
         let want_is_iterable_str = match want {
@@ -1198,7 +1192,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 let (got, ok) = self.check_expr_argument(
                                     x,
                                     hint,
-                                    kw.range,
+                                    x.range(),
                                     arg_errors,
                                     call_errors,
                                     tcc,
