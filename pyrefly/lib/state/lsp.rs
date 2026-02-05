@@ -1923,6 +1923,39 @@ impl<'a> Transaction<'a> {
                             if module_name == handle.module() {
                                 continue;
                             }
+                            if let Some((parent_module_str, submodule_name)) =
+                                module_name.as_str().rsplit_once('.')
+                                && let Some(parent_handle) = self
+                                    .import_handle(
+                                        handle,
+                                        ModuleName::from_str(parent_module_str),
+                                        None,
+                                    )
+                                    .finding()
+                            {
+                                let (position, insert_text, _) = insert_import_edit(
+                                    &ast,
+                                    self.config_finder(),
+                                    handle.dupe(),
+                                    parent_handle,
+                                    submodule_name,
+                                    import_format,
+                                );
+                                let range = TextRange::at(position, TextSize::new(0));
+                                let title = format!("Insert import: `{}`", insert_text.trim());
+                                let is_private_import = module_name
+                                    .components()
+                                    .iter()
+                                    .any(|component| component.as_str().starts_with('_'));
+                                code_actions.push((
+                                    title,
+                                    module_info.dupe(),
+                                    range,
+                                    insert_text,
+                                    false,
+                                    is_private_import,
+                                ));
+                            }
                             if let Some(module_handle) =
                                 self.import_handle(handle, module_name, None).finding()
                             {
