@@ -2204,15 +2204,14 @@ impl Scopes {
             SmallMap::new();
         class_scope.method_defined_attributes().for_each(
             |(name, method, InstanceAttribute(value, annotation, range, _))| {
-                method_defined_fields
-                    .entry_hashed(name)
-                    .or_default()
-                    .push(MethodDefinedAttribute {
+                method_defined_fields.entry_hashed(name).or_default().push(
+                    MethodDefinedAttribute {
                         method,
                         value,
                         annotation,
                         range,
-                    });
+                    },
+                );
             },
         );
         method_defined_fields
