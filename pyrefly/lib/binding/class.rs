@@ -285,7 +285,7 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 _ => &mut none,
             };
-            self.ensure_type(&mut base, legacy);
+            self.ensure_runtime_type(&mut base, legacy);
 
             let base_class = self.base_class_of(base.clone());
             // NOTE(grievejia): If any of the class base is a specialized generic class (e.g. `Foo[Bar]`), and if the tparam of the

@@ -52,6 +52,7 @@ use crate::binding::binding::PrivateAttributeAccessCheck;
 use crate::binding::binding::SuperStyle;
 use crate::binding::bindings::AwaitContext;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::InitializedInFlow;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::bindings::LegacyTParamId;
 use crate::binding::bindings::NameLookupResult;
@@ -87,6 +88,11 @@ pub enum Usage {
     Narrowing(Option<Idx<Key>>),
     /// Static type context that should not pin partial types.
     StaticTypeInformation,
+    /// Type context that is evaluated at runtime.
+    ///
+    /// Behaves like static type information for partial type inference,
+    /// but still reports uninitialized local errors.
+    RuntimeTypeInformation,
 }
 
 impl Usage {
@@ -95,7 +101,7 @@ impl Usage {
         match other {
             Self::CurrentIdx(idx) => Self::Narrowing(Some(*idx)),
             Self::Narrowing(idx) => Self::Narrowing(*idx),
-            Self::StaticTypeInformation => Self::Narrowing(None),
+            Self::StaticTypeInformation | Self::RuntimeTypeInformation => Self::Narrowing(None),
         }
     }
 
@@ -104,7 +110,7 @@ impl Usage {
         match self {
             Usage::CurrentIdx(idx) => Some(*idx),
             Usage::Narrowing(idx) => *idx,
-            Usage::StaticTypeInformation => None,
+            Usage::StaticTypeInformation | Usage::RuntimeTypeInformation => None,
         }
     }
 
@@ -325,7 +331,11 @@ impl<'a> BindingsBuilder<'a> {
             // in an IDE setting if we don't ensure this is the case.
             return self.insert_binding_overwrite(key, Binding::Any(AnyStyle::Error));
         }
-        let used_in_static_type = matches!(usage, Usage::StaticTypeInformation);
+        let used_in_static_type = matches!(
+            usage,
+            Usage::StaticTypeInformation | Usage::RuntimeTypeInformation
+        );
+        let report_uninitialized = !matches!(usage, Usage::StaticTypeInformation);
         let lookup_result =
             if used_in_static_type && let Some((tparams_collector, tparam_id)) = tparams_lookup {
                 self.intercept_lookup(tparams_collector, tparam_id)
@@ -339,7 +349,7 @@ impl<'a> BindingsBuilder<'a> {
             } => {
                 // Uninitialized local errors are only reported when we are neither in a stub
                 // nor a static type context.
-                if !used_in_static_type && !self.module_info.path().is_interface() {
+                if report_uninitialized && !self.module_info.path().is_interface() {
                     if let Some(termination_keys) = is_initialized
                         .deferred_termination_keys()
                         .map(|s| s.to_vec())
@@ -354,7 +364,23 @@ impl<'a> BindingsBuilder<'a> {
                                 termination_keys,
                             },
                         );
-                    } else if let Some(error_message) = is_initialized.as_error_message(&name.id) {
+                    } else if let Some(mut error_message) =
+                        is_initialized.as_error_message(&name.id)
+                    {
+                        if matches!(usage, Usage::RuntimeTypeInformation)
+                            && matches!(is_initialized, InitializedInFlow::No)
+                            && self.scopes.in_function_scope()
+                            && self.scopes.module_has_name(&name.id)
+                            && self
+                                .scopes
+                                .get_global_declaration(name.id.as_str())
+                                .is_none()
+                        {
+                            let name_str = name.id.as_str();
+                            error_message = format!(
+                                "{error_message}. If you meant the global `{name_str}`, add `global {name_str}`",
+                            );
+                        }
                         self.error(
                             name.range,
                             ErrorInfo::Kind(ErrorKind::UnboundName),
@@ -367,7 +393,13 @@ impl<'a> BindingsBuilder<'a> {
                 // doesn't participate in partial type pinning anyway and legacy tparam handling
                 // needs this; otherwise, defer creating a bound name.
                 if used_in_static_type {
-                    self.insert_binding(key, Binding::Forward(lookup_result_idx))
+                    if matches!(usage, Usage::RuntimeTypeInformation)
+                        && matches!(is_initialized, InitializedInFlow::No)
+                    {
+                        self.insert_binding(key, Binding::Any(AnyStyle::Error))
+                    } else {
+                        self.insert_binding(key, Binding::Forward(lookup_result_idx))
+                    }
                 } else {
                     self.defer_bound_name(key, lookup_result_idx, usage)
                 }
@@ -861,7 +893,17 @@ impl<'a> BindingsBuilder<'a> {
         x: &mut Expr,
         tparams_builder: &mut Option<LegacyTParamCollector>,
     ) {
-        self.ensure_type_impl(x, tparams_builder, false);
+        let mut usage = Usage::StaticTypeInformation;
+        self.ensure_type_impl(x, tparams_builder, false, &mut usage);
+    }
+
+    pub fn ensure_runtime_type(
+        &mut self,
+        x: &mut Expr,
+        tparams_builder: &mut Option<LegacyTParamCollector>,
+    ) {
+        let mut usage = Usage::RuntimeTypeInformation;
+        self.ensure_type_impl(x, tparams_builder, false, &mut usage);
     }
 
     fn ensure_type_impl(
@@ -869,10 +911,9 @@ impl<'a> BindingsBuilder<'a> {
         x: &mut Expr,
         tparams_builder: &mut Option<LegacyTParamCollector>,
         in_string_literal: bool,
+        usage: &mut Usage,
     ) {
         self.track_potential_typing_self(x);
-        // We do not treat static types as usage for the purpose of first-usage-based type inference.
-        let static_type_usage = &mut Usage::StaticTypeInformation;
         fn as_forward_ref<'b>(
             literal: &'b ExprStringLiteral,
             in_string_literal: bool,
@@ -886,30 +927,30 @@ impl<'a> BindingsBuilder<'a> {
         match x {
             Expr::Name(x) => {
                 let name = Ast::expr_name_identifier(x.clone());
-                self.ensure_name(&name, static_type_usage, tparams_builder);
+                self.ensure_name(&name, usage, tparams_builder);
             }
             Expr::Subscript(ExprSubscript { value, .. })
                 if self.as_special_export(value) == Some(SpecialExport::Literal) =>
             {
                 // Don't go inside a literal, since you might find strings which are really strings, not string-types
-                self.ensure_expr(x, static_type_usage);
+                self.ensure_expr(x, usage);
             }
             Expr::Subscript(ExprSubscript { value, slice, .. })
                 if self.as_special_export(value) == Some(SpecialExport::Annotated)
                     && matches!(&**slice, Expr::Tuple(tup) if !tup.is_empty()) =>
             {
                 // Only go inside the first argument to Annotated, the rest are non-type metadata.
-                self.ensure_type_impl(&mut *value, tparams_builder, in_string_literal);
+                self.ensure_type_impl(&mut *value, tparams_builder, in_string_literal, usage);
                 // We can't bind a mut box in the guard (sadly), so force unwrapping it here
                 let tup = slice.as_tuple_expr_mut().unwrap();
-                self.ensure_type_impl(&mut tup.elts[0], tparams_builder, in_string_literal);
+                self.ensure_type_impl(&mut tup.elts[0], tparams_builder, in_string_literal, usage);
                 for e in tup.elts[1..].iter_mut() {
-                    self.ensure_expr(e, static_type_usage);
+                    self.ensure_expr(e, usage);
                 }
             }
             Expr::Subscript(ExprSubscript { value, slice, .. }) => {
-                self.ensure_type_impl(&mut *value, tparams_builder, in_string_literal);
-                self.ensure_type_impl(&mut *slice, tparams_builder, in_string_literal);
+                self.ensure_type_impl(&mut *value, tparams_builder, in_string_literal, usage);
+                self.ensure_type_impl(&mut *slice, tparams_builder, in_string_literal, usage);
             }
             Expr::StringLiteral(literal)
                 if let Some(literal) = as_forward_ref(literal, in_string_literal) =>
@@ -917,7 +958,7 @@ impl<'a> BindingsBuilder<'a> {
                 match Ast::parse_type_literal(literal) {
                     Ok(expr) => {
                         *x = expr;
-                        self.ensure_type_impl(x, tparams_builder, true);
+                        self.ensure_type_impl(x, tparams_builder, true, usage);
                     }
                     Err(_) => {
                         // We don't need to emit errors here, because the solving logic expects the expression to resolve to a type, and it will fail.
@@ -925,11 +966,11 @@ impl<'a> BindingsBuilder<'a> {
                 }
             }
             // Bind the lambda so we don't crash on undefined parameter names.
-            Expr::Lambda(_) => self.ensure_expr(x, static_type_usage),
+            Expr::Lambda(_) => self.ensure_expr(x, usage),
             // Bind the call so we generate all expected bindings. See
             // test::class_super::test_super_in_base_classes for an example of a SuperInstance
             // binding that we crash looking for if we don't do this.
-            Expr::Call(_) => self.ensure_expr(x, static_type_usage),
+            Expr::Call(_) => self.ensure_expr(x, usage),
             // Bind walrus so we don't crash when looking up the assigned name later.
             // Named expressions are not allowed inside type aliases (PEP 695).
             Expr::Named(named) => {
@@ -940,14 +981,14 @@ impl<'a> BindingsBuilder<'a> {
                         "Named expression cannot be used within a type alias".to_owned(),
                     );
                 }
-                self.ensure_expr(x, static_type_usage);
+                self.ensure_expr(x, usage);
             }
             // Bind yield and yield from so we don't crash when checking return type later.
             Expr::Yield(_) => {
-                self.ensure_expr(x, static_type_usage);
+                self.ensure_expr(x, usage);
             }
             Expr::YieldFrom(_) => {
-                self.ensure_expr(x, static_type_usage);
+                self.ensure_expr(x, usage);
             }
             Expr::Attribute(ExprAttribute { value, attr, .. })
                 if let Expr::Name(value) = &**value
@@ -958,7 +999,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.ensure_simple_attr(
                     &Ast::expr_name_identifier(value.clone()),
                     attr,
-                    static_type_usage,
+                    usage,
                     tparams_builder,
                 );
             }
@@ -975,8 +1016,8 @@ impl<'a> BindingsBuilder<'a> {
                 let right_is_forward_ref = matches!(&**right, Expr::StringLiteral(s) if as_forward_ref(s, in_string_literal).is_some());
 
                 // Recurse into children to handle string literal parsing
-                self.ensure_type_impl(left, tparams_builder, in_string_literal);
-                self.ensure_type_impl(right, tparams_builder, in_string_literal);
+                self.ensure_type_impl(left, tparams_builder, in_string_literal, usage);
+                self.ensure_type_impl(right, tparams_builder, in_string_literal, usage);
 
                 // Only create the check if we're in an executable file, at least one side
                 // is a forward ref, and we're not in Python 3.14+ or with future annotations
@@ -998,9 +1039,9 @@ impl<'a> BindingsBuilder<'a> {
                     );
                 }
             }
-            _ => {
-                x.recurse_mut(&mut |x| self.ensure_type_impl(x, tparams_builder, in_string_literal))
-            }
+            _ => x.recurse_mut(&mut |x| {
+                self.ensure_type_impl(x, tparams_builder, in_string_literal, usage)
+            }),
         }
     }
 

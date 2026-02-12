@@ -1349,6 +1349,12 @@ impl Scopes {
         }
     }
 
+    pub fn module_has_name(&self, name: &Name) -> bool {
+        let module_scope = self.scopes.first();
+        matches!(module_scope.scope.kind, ScopeKind::Module)
+            && module_scope.scope.stat.0.get(name).is_some()
+    }
+
     pub fn collect_module_unused_imports(&self) -> Vec<UnusedImport> {
         let module_scope = self.scopes.first();
         if !matches!(module_scope.scope.kind, ScopeKind::Module) {

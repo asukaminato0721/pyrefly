@@ -489,6 +489,16 @@ def f():
 );
 
 testcase!(
+    test_class_base_uninitialized_shadowing_global,
+    r#"
+class A: ...
+def f():
+    class A(A):  # E: `A` is uninitialized. If you meant the global `A`, add `global A`
+        pass
+"#,
+);
+
+testcase!(
     test_uninitialized_merge_flow,
     r#"
 def test(cond: bool):
