@@ -15,12 +15,12 @@ use ruff_python_ast::ExprCall;
 use ruff_python_ast::ModModule;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
-use ruff_text_size::TextSize;
 
 use super::types::LocalRefactorCodeAction;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::Transaction;
 use crate::state::lsp::quick_fixes::extract_shared::NameRefCollector;
+use crate::state::lsp::quick_fixes::extract_shared::expand_range_to_remove_item;
 use crate::state::lsp::quick_fixes::extract_shared::find_enclosing_function;
 
 pub(crate) fn inline_parameter_code_actions(
@@ -135,38 +135,6 @@ fn collect_calls_to_definition(
         return None;
     }
     Some(calls)
-}
-
-fn expand_range_to_remove_item(source: &str, item_range: TextRange) -> TextRange {
-    let bytes = source.as_bytes();
-    let mut start = item_range.start().to_usize();
-    let mut end = item_range.end().to_usize().min(bytes.len());
-    let mut idx = end;
-    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
-        idx += 1;
-    }
-    if idx < bytes.len() && bytes[idx] == b',' {
-        idx += 1;
-        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
-            idx += 1;
-        }
-        end = idx;
-    } else {
-        idx = start;
-        while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
-            idx -= 1;
-        }
-        if idx > 0 && bytes[idx - 1] == b',' {
-            idx -= 1;
-            while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
-                idx -= 1;
-            }
-            start = idx;
-        }
-    }
-    let start = TextSize::try_from(start).unwrap_or(item_range.start());
-    let end = TextSize::try_from(end).unwrap_or(item_range.end());
-    TextRange::new(start, end)
 }
 
 fn argument_remove_range(

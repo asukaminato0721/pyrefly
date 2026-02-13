@@ -2176,6 +2176,14 @@ impl<'a> Transaction<'a> {
         quick_fixes::inline_parameter::inline_parameter_code_actions(self, handle, selection)
     }
 
+    pub fn change_signature_code_actions(
+        &self,
+        handle: &Handle,
+        selection: TextRange,
+    ) -> Option<Vec<LocalRefactorCodeAction>> {
+        quick_fixes::change_signature::change_signature_code_actions(self, handle, selection)
+    }
+
     pub fn introduce_parameter_code_actions(
         &self,
         handle: &Handle,

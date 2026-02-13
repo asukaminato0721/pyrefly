@@ -470,6 +470,38 @@ fn compute_convert_star_import_actions(
     (module_info, edit_sets, titles)
 }
 
+fn compute_change_signature_actions(
+    code_by_module: &[(&'static str, &str)],
+    module_name: &'static str,
+    selection: TextRange,
+) -> (
+    ModuleInfo,
+    Vec<Vec<(Module, TextRange, String)>>,
+    Vec<String>,
+    std::collections::HashMap<String, ModuleInfo>,
+) {
+    let (handles, state) =
+        mk_multi_file_state_assert_no_errors(code_by_module, Require::Everything);
+    let handle = handles.get(module_name).unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let mut module_infos = std::collections::HashMap::new();
+    for (name, _) in code_by_module {
+        if let Some(handle) = handles.get(*name)
+            && let Some(info) = transaction.get_module_info(handle)
+        {
+            module_infos.insert((*name).to_owned(), info);
+        }
+    }
+    let actions = transaction
+        .change_signature_code_actions(handle, selection)
+        .unwrap_or_default();
+    let edit_sets: Vec<Vec<(Module, TextRange, String)>> =
+        actions.iter().map(|action| action.edits.clone()).collect();
+    let titles = actions.iter().map(|action| action.title.clone()).collect();
+    (module_info, edit_sets, titles, module_infos)
+}
+
 fn compute_pull_up_actions(
     code: &str,
 ) -> (
@@ -3015,4 +3047,57 @@ def compute():
     return add(1)
 "#;
     assert_eq!(expected, updated);
+}
+
+#[test]
+fn change_signature_remove_parameter_updates_call_sites() {
+    let code_a = r#"
+def greet(name, punctuation):
+#              ^
+    return name
+"#;
+    let code_b = r#"
+from a import greet
+
+def run():
+    return greet("Alice", "!")
+"#;
+    let selection = cursor_selection(code_a);
+    let (module_info, actions, titles, module_infos) =
+        compute_change_signature_actions(&[("a", code_a), ("b", code_b)], "a", selection);
+    assert_eq!(
+        vec!["Change signature: remove parameter `punctuation`"],
+        titles
+    );
+    let updated_a = apply_refactor_edits_for_module(&module_info, &actions[0]);
+    let updated_b = apply_refactor_edits_for_module(
+        module_infos.get("b").expect("missing module b"),
+        &actions[0],
+    );
+    let expected_a = r#"
+def greet(name):
+#              ^
+    return name
+"#;
+    let expected_b = r#"
+from a import greet
+
+def run():
+    return greet("Alice")
+"#;
+    assert_eq!(expected_a, updated_a);
+    assert_eq!(expected_b, updated_b);
+}
+
+#[test]
+fn change_signature_no_action_when_param_used() {
+    let code = r#"
+def greet(name, punctuation):
+#              ^
+    return punctuation + name
+"#;
+    let selection = cursor_selection(code);
+    let (_module_info, actions, _titles, _module_infos) =
+        compute_change_signature_actions(&[("main", code)], "main", selection);
+    assert!(actions.is_empty(), "expected no change-signature actions");
 }

@@ -151,6 +151,40 @@ pub(super) fn wrap_if_needed(expr: &Expr, text: &str) -> String {
     }
 }
 
+/// Expands a range to remove a comma-separated item, trimming adjacent whitespace.
+/// This is used to remove parameters or arguments while keeping valid syntax.
+pub(super) fn expand_range_to_remove_item(source: &str, item_range: TextRange) -> TextRange {
+    let bytes = source.as_bytes();
+    let mut start = item_range.start().to_usize();
+    let mut end = item_range.end().to_usize().min(bytes.len());
+    let mut idx = end;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if idx < bytes.len() && bytes[idx] == b',' {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        end = idx;
+    } else {
+        idx = start;
+        while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
+            idx -= 1;
+        }
+        if idx > 0 && bytes[idx - 1] == b',' {
+            idx -= 1;
+            while idx > 0 && bytes[idx - 1].is_ascii_whitespace() {
+                idx -= 1;
+            }
+            start = idx;
+        }
+    }
+    let start = TextSize::try_from(start).unwrap_or(item_range.start());
+    let end = TextSize::try_from(end).unwrap_or(item_range.end());
+    TextRange::new(start, end)
+}
+
 /// Extracts the name from a statement that defines a named symbol.
 /// Returns `None` for statements that don't define a single named symbol.
 pub(super) fn member_name_from_stmt(stmt: &Stmt) -> Option<String> {

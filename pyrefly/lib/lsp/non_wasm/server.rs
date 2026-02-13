@@ -3478,6 +3478,9 @@ impl Server {
         if let Some(refactors) = transaction.inline_parameter_code_actions(&handle, range) {
             push_refactor_actions(refactors);
         }
+        if let Some(refactors) = transaction.change_signature_code_actions(&handle, range) {
+            push_refactor_actions(refactors);
+        }
         if let Some(refactors) = transaction.pull_members_up_code_actions(&handle, range) {
             push_refactor_actions(refactors);
         }
