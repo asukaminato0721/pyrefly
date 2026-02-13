@@ -588,6 +588,33 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    pub(crate) fn submodule_autoimport_edit(
+        &self,
+        handle: &Handle,
+        ast: &ModModule,
+        module_name: &ModuleName,
+        import_format: ImportFormat,
+    ) -> Option<(String, TextSize, String, String)> {
+        let (parent_module_str, submodule_name) = module_name.as_str().rsplit_once('.')?;
+        let parent_handle = self
+            .import_handle(handle, ModuleName::from_str(parent_module_str), None)
+            .finding()?;
+        let (position, insert_text, imported_module) = insert_import_edit(
+            ast,
+            self.config_finder(),
+            handle.dupe(),
+            parent_handle,
+            submodule_name,
+            import_format,
+        );
+        Some((
+            submodule_name.to_owned(),
+            position,
+            insert_text,
+            imported_module,
+        ))
+    }
+
     fn type_from_expression_at(&self, handle: &Handle, position: TextSize) -> Option<Type> {
         let module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&module, position);
@@ -2009,6 +2036,29 @@ impl<'a> Transaction<'a> {
                                 || aliased_module.is_some_and(|m| m == module_name)
                             {
                                 continue;
+                            }
+                            if let Some((_submodule_name, position, insert_text, _)) = self
+                                .submodule_autoimport_edit(
+                                    handle,
+                                    &ast,
+                                    module_name,
+                                    import_format,
+                                )
+                            {
+                                let range = TextRange::at(position, TextSize::new(0));
+                                let title = format!("Insert import: `{}`", insert_text.trim());
+                                let is_private_import = module_name
+                                    .components()
+                                    .last()
+                                    .is_some_and(|component| component.as_str().starts_with('_'));
+                                import_actions.push(QuickfixAction {
+                                    title,
+                                    module_info: module_info.dupe(),
+                                    range,
+                                    insert_text,
+                                    is_deprecated: false,
+                                    is_private_import,
+                                });
                             }
                             self.create_quickfix_action_for_fuzzy_match(
                                 handle,
