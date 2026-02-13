@@ -592,7 +592,7 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         ast: &ModModule,
-        module_name: &ModuleName,
+        module_name: ModuleName,
         import_format: ImportFormat,
     ) -> Option<(String, TextSize, String, String)> {
         let (parent_module_str, submodule_name) = module_name.as_str().rsplit_once('.')?;
@@ -2038,12 +2038,7 @@ impl<'a> Transaction<'a> {
                                 continue;
                             }
                             if let Some((_submodule_name, position, insert_text, _)) = self
-                                .submodule_autoimport_edit(
-                                    handle,
-                                    &ast,
-                                    module_name,
-                                    import_format,
-                                )
+                                .submodule_autoimport_edit(handle, &ast, module_name, import_format)
                             {
                                 let range = TextRange::at(position, TextSize::new(0));
                                 let title = format!("Insert import: `{}`", insert_text.trim());
