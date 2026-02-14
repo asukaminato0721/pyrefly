@@ -58,7 +58,7 @@ pub(crate) fn implement_abstract_members_code_actions(
     let class_idx = bindings.key_to_idx_hashed_opt(starlark_map::Hashed::new(&key))?;
 
     let members = transaction
-        .ad_hoc_solve(handle, |solver| {
+        .ad_hoc_solve(handle, "implement_abstract_members", |solver| {
             let class = solver.get_idx(class_idx).0.clone()?;
             let abstract_members = solver.get_abstract_members_for_class(&class);
             let mut infos = Vec::new();
