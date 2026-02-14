@@ -2030,11 +2030,11 @@ impl<'a> Transaction<'a> {
                             &mut import_actions,
                             unknown_name,
                         );
-
                         for module_name in self.search_modules_fuzzy(unknown_name) {
-                            if module_name == handle.module()
-                                || aliased_module.is_some_and(|m| m == module_name)
-                            {
+                            if module_name == handle.module() {
+                                continue;
+                            }
+                            if aliased_module.is_some_and(|m| m == module_name) {
                                 continue;
                             }
                             if let Some((_submodule_name, position, insert_text, _)) = self
