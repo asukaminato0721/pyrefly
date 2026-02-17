@@ -60,6 +60,7 @@ use crate::binding::binding::BindingExport;
 use crate::binding::binding::BindingLegacyTypeParam;
 use crate::binding::binding::BranchInfo;
 use crate::binding::binding::FirstUse;
+use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
@@ -526,7 +527,7 @@ impl Bindings {
 
     pub(crate) fn pytest_fixture_param_hint(
         &self,
-        def: &StmtFunctionDef,
+        def: &FunctionDefData,
         class_key: Option<&Idx<KeyClass>>,
         param: &Identifier,
     ) -> Option<ShortIdentifier> {
@@ -554,7 +555,7 @@ impl Bindings {
 
     fn is_pytest_test_or_fixture(
         &self,
-        def: &StmtFunctionDef,
+        def: &FunctionDefData,
         class_key: Option<&Idx<KeyClass>>,
         info: &PytestBindingInfo,
     ) -> bool {
