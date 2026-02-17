@@ -1071,10 +1071,7 @@ impl Type {
         rendered
     }
 
-    pub fn get_types_with_locations(
-        &self,
-        stdlib: Option<&Stdlib>,
-    ) -> Vec<TypeLabelPart> {
+    pub fn get_types_with_locations(&self, stdlib: Option<&Stdlib>) -> Vec<TypeLabelPart> {
         let mut ctx = TypeDisplayContext::new(&[self]);
         if let Some(s) = stdlib {
             ctx.set_stdlib(s);
@@ -2082,8 +2079,8 @@ def overloaded_func[T](
 
     #[test]
     fn test_get_types_with_location_typevar() {
-        let tvar = fake_tyvar("T", "test.module", 15);
         let heap = TypeHeap::new();
+        let tvar = fake_tyvar("T", "test.module", 15);
         let t = tvar.to_type(&heap);
         let parts = get_parts(&t);
 
