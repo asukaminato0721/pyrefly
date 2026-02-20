@@ -71,6 +71,7 @@ pub struct DecoratedFunction {
 pub struct Decorator {
     pub ty: Type,
     pub deprecation: Option<Deprecation>,
+    pub attrs_default_field: Option<Name>,
 }
 
 impl Display for Decorator {
@@ -95,6 +96,7 @@ pub enum SpecialDecorator<'a> {
     DataclassTransformCall(&'a TypeMap),
     EnumNonmember,
     AbstractMethod,
+    AttrsDefault(&'a Name),
 }
 
 impl UndecoratedFunction {
