@@ -96,6 +96,15 @@ pub(crate) enum CalleeKind {
     Unknown,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExportSearchMatch {
+    pub(crate) score: i64,
+    pub(crate) handle: Handle,
+    pub(crate) name: String,
+    pub(crate) export: Export,
+    pub(crate) is_reexport: bool,
+}
+
 pub(crate) fn callee_kind_from_call(call: &ExprCall) -> CalleeKind {
     match call.func.as_ref() {
         Expr::Name(name) => CalleeKind::Function(Ast::expr_name_identifier(name.clone())),
@@ -3018,8 +3027,8 @@ impl<'a> Transaction<'a> {
         })
     }
 
-    pub fn search_exports_fuzzy(&self, pattern: &str) -> Vec<(Handle, String, Export)> {
-        let mut res = self.search_exports(|handle, exports_data, exports| {
+    pub(crate) fn search_exports_fuzzy_scored(&self, pattern: &str) -> Vec<ExportSearchMatch> {
+        self.search_exports(|handle, exports_data, exports| {
             let matcher = SkimMatcherV2::default().smart_case();
             let mut results = Vec::new();
             for (name, location) in exports.iter() {
@@ -3028,25 +3037,36 @@ impl<'a> Transaction<'a> {
                     && let Some((canonical_handle, export)) =
                         self.export_from_location(handle, name, location)
                 {
-                    results.push((
+                    results.push(ExportSearchMatch {
                         score,
-                        canonical_handle.dupe(),
-                        name_str.to_owned(),
-                        export.clone(),
-                    ));
+                        handle: canonical_handle.dupe(),
+                        name: name_str.to_owned(),
+                        export: export.clone(),
+                        is_reexport: false,
+                    });
                     if canonical_handle != *handle
                         && (Self::should_include_reexport(handle, &canonical_handle)
                             || (exports_data.is_explicit_reexport(name)
                                 && Self::allows_explicit_reexport(handle)))
                     {
-                        results.push((score, handle.dupe(), name_str.to_owned(), export));
+                        results.push(ExportSearchMatch {
+                            score,
+                            handle: handle.dupe(),
+                            name: name_str.to_owned(),
+                            export,
+                            is_reexport: true,
+                        });
                     }
                 }
             }
             results
-        });
-        res.sort_by_key(|(score, _, _, _)| Reverse(*score));
-        res.into_map(|(_, handle, name, export)| (handle, name, export))
+        })
+    }
+
+    pub fn search_exports_fuzzy(&self, pattern: &str) -> Vec<(Handle, String, Export)> {
+        let mut res = self.search_exports_fuzzy_scored(pattern);
+        res.sort_by_key(|result| Reverse(result.score));
+        res.into_map(|result| (result.handle, result.name, result.export))
     }
 }
 
