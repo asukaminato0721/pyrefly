@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::any::Any;
 use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -15,14 +16,12 @@ use dupe::Dupe;
 use pyrefly_graph::calculation::Calculation;
 use pyrefly_graph::index::Idx;
 use pyrefly_graph::index_map::IndexMap;
-use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_util::display::DisplayWith;
 use pyrefly_util::display::DisplayWithCtx;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::uniques::UniqueFactory;
-use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -30,10 +29,13 @@ use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::answers_solver::CalcId;
 use crate::alt::answers_solver::ThreadState;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
 use crate::alt::traits::Solve;
+use crate::binding::binding::AnyIdx;
+use crate::binding::binding::ChangedExport;
 use crate::binding::binding::Exported;
 use crate::binding::binding::Key;
 use crate::binding::binding::Keyed;
@@ -42,6 +44,7 @@ use crate::binding::bindings::BindingTable;
 use crate::binding::bindings::Bindings;
 use crate::binding::table::TableKeyed;
 use crate::config::base::RecursionLimitConfig;
+use crate::dispatch_anyidx;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::LookupExport;
@@ -57,12 +60,12 @@ use crate::table_try_for_each;
 use crate::types::callable::Callable;
 use crate::types::equality::TypeEq;
 use crate::types::equality::TypeEqCtx;
+use crate::types::heap::TypeHeap;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::Forall;
 use crate::types::types::Forallable;
 use crate::types::types::TParams;
 use crate::types::types::Type;
-use crate::types::types::Var;
 
 /// The index stores all the references where the definition is external to the current module.
 /// This is useful for fast references computation.
@@ -140,7 +143,7 @@ pub struct Answers {
     trace: Option<Mutex<Traces>>,
 }
 
-pub type AnswerEntry<K> = IndexMap<K, Calculation<Arc<<K as Keyed>::Answer>, Var>>;
+pub type AnswerEntry<K> = IndexMap<K, Calculation<Arc<<K as Keyed>::Answer>>>;
 
 table!(
     #[derive(Debug, Default)]
@@ -215,25 +218,10 @@ impl Display for Solutions {
     }
 }
 
-/// Object-safe trait for extracting export names from keys.
-/// This allows SolutionsDifference to query export names without knowing the concrete key type.
-pub trait AsExportName {
-    fn as_export_name(&self) -> Option<&Name>;
-}
-
-/// Blanket implementation for all Keyed types.
-impl<K: Keyed> AsExportName for K {
-    fn as_export_name(&self) -> Option<&Name> {
-        Keyed::as_export_name(self)
-    }
-}
-
 pub struct SolutionsDifference<'a> {
     key: (&'a dyn DisplayWith<ModuleInfo>, &'a dyn Debug),
     lhs: Option<(&'a dyn Display, &'a dyn Debug)>,
     rhs: Option<(&'a dyn Display, &'a dyn Debug)>,
-    /// The key as an AsExportName trait object, for fine-grained change tracking.
-    export_name: &'a dyn AsExportName,
 }
 
 impl Debug for SolutionsDifference<'_> {
@@ -270,14 +258,6 @@ impl Display for SolutionsDifference<'_> {
         write!(f, " now ")?;
         missing(f, self.rhs)?;
         Ok(())
-    }
-}
-
-impl<'a> SolutionsDifference<'a> {
-    /// Get the export name if this difference is for a named export.
-    /// Returns None if the key is not a named export.
-    pub fn export_name(&self) -> Option<&'a Name> {
-        self.export_name.as_export_name()
     }
 }
 
@@ -318,7 +298,6 @@ impl Solutions {
             key: (k, k),
             lhs: None,
             rhs: Some((v, v)),
-            export_name: k,
         }
     }
 
@@ -329,7 +308,6 @@ impl Solutions {
             key: (k, k),
             lhs: Some((v, v)),
             rhs: None,
-            export_name: k,
         }
     }
 
@@ -344,7 +322,6 @@ impl Solutions {
             key: (k, k),
             lhs: Some((v1, v1)),
             rhs: Some((v2, v2)),
-            export_name: k,
         }
     }
 
@@ -401,37 +378,35 @@ impl Solutions {
         difference
     }
 
-    /// Compute the set of export names that have changed between two solutions.
-    /// Returns None if we should invalidate everything (non-export changes or changes to non-name exports).
-    pub fn changed_export_names(
+    /// Compute the set of exports that have changed between two solutions.
+    /// Returns a set of `ChangedExport` values: either `Name` (for `KeyExport`) or
+    /// `ClassDefIndex` (for class-related keys).
+    pub fn changed_exports(
         &self,
         other: &Self,
-    ) -> Option<starlark_map::small_set::SmallSet<Name>> {
+    ) -> starlark_map::small_set::SmallSet<ChangedExport> {
         use starlark_map::small_set::SmallSet;
 
         fn check_table<K: Keyed>(
             x: &SolutionsEntry<K>,
             y: &Solutions,
             ctx: &mut TypeEqCtx,
-            changed: &mut SmallSet<Name>,
-        ) -> Option<()>
-        where
+            changed: &mut SmallSet<ChangedExport>,
+        ) where
             SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
         {
             if !K::EXPORTED {
-                return Some(());
+                return;
             }
 
             let y_table = y.table.get::<K>();
 
-            // Check for items only in y
+            // Check for items only in y (added keys)
             for (k, _v) in y_table {
-                if !x.contains_key(k) {
-                    if let Some(name) = k.as_export_name() {
-                        changed.insert(name.clone());
-                    } else {
-                        return None; // Non-name export changed
-                    }
+                if !x.contains_key(k)
+                    && let Some(anykey) = k.try_to_anykey()
+                {
+                    changed.insert(anykey.to_changed_export());
                 }
             }
 
@@ -439,23 +414,20 @@ impl Solutions {
             for (k, v) in x {
                 match y_table.get(k) {
                     Some(v2) if !v.type_eq(v2, ctx) => {
-                        if let Some(name) = k.as_export_name() {
-                            changed.insert(name.clone());
-                        } else {
-                            return None; // Non-name export changed
+                        // Value changed
+                        if let Some(anykey) = k.try_to_anykey() {
+                            changed.insert(anykey.to_changed_export());
                         }
                     }
                     None => {
-                        if let Some(name) = k.as_export_name() {
-                            changed.insert(name.clone());
-                        } else {
-                            return None; // Non-name export changed
+                        // Key removed
+                        if let Some(anykey) = k.try_to_anykey() {
+                            changed.insert(anykey.to_changed_export());
                         }
                     }
                     _ => {}
                 }
             }
-            Some(())
         }
 
         let mut changed = SmallSet::new();
@@ -464,15 +436,11 @@ impl Solutions {
         let mut ctx = TypeEqCtx::default();
 
         // Check all tables
-        let mut result = Some(());
         table_for_each!(self.table, |x| {
-            if result.is_some() {
-                result = check_table(x, other, &mut ctx, &mut changed);
-            }
+            check_table(x, other, &mut ctx, &mut changed);
         });
-        result?;
 
-        Some(changed)
+        changed
     }
 
     pub fn get_index(&self) -> Option<Arc<Mutex<Index>>> {
@@ -496,6 +464,22 @@ pub trait LookupAnswer: Sized {
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
         SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>;
+
+    /// Commit a preliminary answer to a specific module's Calculation cell.
+    /// Used for cross-module batch commit when an SCC spans module boundaries.
+    ///
+    /// Returns true if the commit was performed, false if the implementation
+    /// does not support cross-module commits.
+    ///
+    /// Default implementation returns false (not supported).
+    fn commit_to_module(
+        &self,
+        _calc_id: CalcId,
+        _answer: Arc<dyn Any + Send + Sync>,
+        _errors: Option<Arc<ErrorCollector>>,
+    ) -> bool {
+        false
+    }
 }
 
 impl Answers {
@@ -538,6 +522,10 @@ impl Answers {
 
     pub fn table(&self) -> &AnswerTable {
         &self.table
+    }
+
+    pub fn heap(&self) -> &TypeHeap {
+        &self.solver.heap
     }
 
     #[expect(dead_code)]
@@ -598,6 +586,7 @@ impl Answers {
             recurser,
             stdlib,
             thread_state,
+            self.heap(),
         );
         table_mut_for_each!(&mut res, |items| pre_solve(
             items,
@@ -647,15 +636,6 @@ impl Answers {
         }
         answers_solver.validate_final_thread_state();
 
-        // Now force all types to be fully resolved.
-        fn post_solve<K: Keyed>(items: &mut SolutionsEntry<K>, solver: &Solver) {
-            for v in items.values_mut() {
-                let mut vv = (**v).clone();
-                vv.visit_mut(&mut |x| solver.deep_force_mut(x));
-                *v = Arc::new(vv);
-            }
-        }
-        table_mut_for_each!(&mut res, |items| post_solve(items, &self.solver));
         Solutions {
             module_info: bindings.module().dupe(),
             table: res,
@@ -678,6 +658,14 @@ impl Answers {
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
     {
+        // Fast path: check if the answer has already been computed in the Calculation cell.
+        // This avoids constructing a VarRecurser and AnswersSolver when the value is cached.
+        if let Some(idx) = bindings.key_to_idx_hashed_opt(key)
+            && let Some(v) = self.get_idx(idx)
+        {
+            return Some(v);
+        }
+        // Slow path: need to compute the answer.
         let recurser = &VarRecurser::new();
         let solver = AnswersSolver::new(
             answers,
@@ -689,11 +677,9 @@ impl Answers {
             recurser,
             stdlib,
             thread_state,
+            self.heap(),
         );
-        let v = solver.get_hashed_opt(key)?;
-        let mut vv = (*v).clone();
-        vv.visit_mut(&mut |x| self.solver.deep_force_mut(x));
-        Some(Arc::new(vv))
+        solver.get_hashed_opt(key)
     }
 
     pub fn get_idx<K: Keyed>(&self, k: Idx<K>) -> Option<Arc<K::Answer>>
@@ -701,6 +687,36 @@ impl Answers {
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
     {
         self.table.get::<K>().get(k)?.get()
+    }
+
+    /// Commit a type-erased answer to this module's Calculation cell.
+    /// Target-side entry point for cross-module batch commit.
+    /// Returns true if the write won the first-write-wins race.
+    pub fn commit_preliminary(&self, any_idx: &AnyIdx, answer: Arc<dyn Any + Send + Sync>) -> bool {
+        dispatch_anyidx!(any_idx, self, commit_typed, answer)
+    }
+
+    /// Typed commit for a specific key type. Downcasts the answer and writes
+    /// to the Calculation cell. Returns true if this write won the first-write-wins
+    /// race (i.e., the answer was actually stored).
+    fn commit_typed<K: Keyed>(&self, idx: Idx<K>, answer: Arc<dyn Any + Send + Sync>) -> bool
+    where
+        AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
+    {
+        let typed_answer: Arc<K::Answer> = Arc::unwrap_or_clone(
+            answer
+                .downcast::<Arc<K::Answer>>()
+                .expect("Answers::commit_typed: type mismatch in cross-module batch commit"),
+        );
+        // Get the calculation cell from the answer table
+        if let Some(calculation) = self.table.get::<K>().get(idx) {
+            // No recursive placeholder can exist in the Calculation cell because
+            // placeholders are stored only in SCC-local NodeState::HasPlaceholder.
+            let (_answer, did_write) = calculation.record_value(typed_answer);
+            did_write
+        } else {
+            false
+        }
     }
 
     fn deep_force(&self, t: Type) -> Type {
@@ -728,12 +744,16 @@ impl Answers {
     pub fn get_chosen_overload_trace(&self, range: TextRange) -> Option<Type> {
         let lock = self.trace.as_ref()?.lock();
         match lock.overloaded_callees.get(&range)? {
-            OverloadedCallee::Resolved { callable } => Some(self.deep_force(callable.as_type())),
+            OverloadedCallee::Resolved { callable } => {
+                Some(self.deep_force(self.heap().mk_callable_from(callable.as_type())))
+            }
             OverloadedCallee::Candidates {
                 closest,
                 is_closest_chosen,
                 ..
-            } if *is_closest_chosen => Some(self.deep_force(closest.as_type())),
+            } if *is_closest_chosen => {
+                Some(self.deep_force(self.heap().mk_callable_from(closest.as_type())))
+            }
             _ => None,
         }
     }
@@ -776,7 +796,7 @@ impl Answers {
 }
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
-    pub fn get_calculation<K: Solve<Ans>>(&self, idx: Idx<K>) -> &Calculation<Arc<K::Answer>, Var>
+    pub fn get_calculation<K: Solve<Ans>>(&self, idx: Idx<K>) -> &Calculation<Arc<K::Answer>>
     where
         AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
@@ -843,24 +863,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 ty: _,
                 is_deprecated: _,
                 definition,
-                docstring_range: _,
                 is_reexport: _,
             } in self.completions(base.clone(), Some(attribute_name), false)
             {
                 match definition {
-                    Some(AttrDefinition::FullyResolved(TextRangeWithModule { module, range })) => {
-                        if module.path() != self.bindings().module().path() {
+                    AttrDefinition::FullyResolved {
+                        cls,
+                        range,
+                        docstring_range: _,
+                    } => {
+                        if cls.module_path() != self.bindings().module().path() {
                             index
                                 .lock()
                                 .externally_defined_attribute_references
-                                .entry(module.path().dupe())
+                                .entry(cls.module_path().dupe())
                                 .or_default()
                                 .push((range, attribute_reference_range))
                         }
                     }
-                    Some(AttrDefinition::PartiallyResolvedImportedModuleAttribute {
-                        module_name,
-                    }) => {
+                    AttrDefinition::PartiallyResolvedImportedModuleAttribute { module_name } => {
                         index
                             .lock()
                             .externally_defined_variable_references
@@ -868,7 +889,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             .or_default()
                             .push(attribute_reference_range);
                     }
-                    Some(AttrDefinition::Submodule { module_name }) => {
+                    AttrDefinition::Submodule { module_name } => {
                         // For submodule access (e.g., `b` in `a.b`), record as a reference to
                         // the submodule. The last component of module_name is the attribute name.
                         if let Some(parent) = module_name.parent() {
@@ -880,7 +901,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 .push(attribute_reference_range);
                         }
                     }
-                    None => {}
                 }
             }
         }

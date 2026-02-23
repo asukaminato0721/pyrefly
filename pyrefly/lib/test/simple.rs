@@ -70,6 +70,19 @@ assert_type(y, int)
 );
 
 testcase!(
+    test_tstring,
+    TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+    r#"
+from string.templatelib import Template
+from typing import assert_type
+
+v = 99
+template = t"hello{42}world{v}goodbye"
+assert isinstance(template, Template)
+"#,
+);
+
+testcase!(
     test_mypy_demo,
     r#"
 from typing import Any
@@ -354,10 +367,10 @@ testcase!(
 from typing import Final
 
 x: Final[int] = 0
-x = 1  # E: `x` is marked final
+x = 1  # E: Cannot assign to variable `x` because it is marked final
 
 y: Final = "foo"
-y = "bar"  # E: `y` is marked final
+y = "bar"  # E: Cannot assign to variable `y` because it is marked final
 "#,
 );
 
@@ -379,7 +392,7 @@ testcase!(
     r#"
 from typing import Final, TextIO
 x: Final[int] = 0
-x = 1  # E: `x` is marked final
+x = 1  # E: Cannot assign to variable `x` because it is marked final
 x += 1  # E: Cannot assign to variable `x` because it is marked final
 y = x = 3 # E: Cannot assign to variable `x` because it is marked final
 y = (x := 3) # E: Cannot assign to variable `x` because it is marked final
@@ -1054,6 +1067,13 @@ testcase!(
 # This parse error results in two identical Identifiers, which previously caused a panic.
 a = True if # E: Parse
 "#,
+);
+
+testcase!(
+    test_syntax_error_resulting_in_empty_defintion,
+    r#"
+@:a=1 # E: Parse # E: Could not find name `a`
+    "#,
 );
 
 testcase!(
@@ -1877,6 +1897,22 @@ from typing import assert_type
 class Foo:
     def __class_getitem__(cls, item: int) -> str:
         return str(item)
+
+assert_type(Foo[0], str)
+"#,
+);
+
+testcase!(
+    test_class_metaclass_getitem,
+    r#"
+from typing import assert_type
+
+class Meta(type):
+    def __getitem__(self, item: int) -> str:
+        return str(item)
+
+class Foo(metaclass=Meta):
+    pass
 
 assert_type(Foo[0], str)
 "#,

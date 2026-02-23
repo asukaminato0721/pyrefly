@@ -1497,7 +1497,7 @@ class Bad1:
     x: int
     y: InitVar[str]
     z: InitVar[bytes]
-    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `BoundMethod[Bad1, (self: Bad1, y: bytes, z: str) -> None]` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
+    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `(self: Bad1, y: bytes, z: str) -> None` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
 @dataclass
 class Bad2:
     x: int
@@ -1752,5 +1752,22 @@ class DC3:
         self.x = 3
         # should error: y is not in slots
         self.y = 3
+"#,
+);
+
+testcase!(
+    test_dataclass_protocol_dataclass_fields,
+    r#"
+from dataclasses import dataclass, Field
+from typing import Any, ClassVar, Protocol
+
+class P(Protocol):
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
+@dataclass
+class C(P):
+    x: int
+
+C(42)
 "#,
 );

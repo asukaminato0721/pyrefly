@@ -6,23 +6,29 @@
  */
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use dupe::Dupe;
+use pyrefly_build::handle::Handle;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::finder::ConfigFinder;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::class::ClassDefIndex;
 use pyrefly_util::forgetter::Forgetter;
 use pyrefly_util::includes::Includes;
 use regex::Regex;
 use ruff_python_ast::Parameters;
+use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use serde::Serialize;
+use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers::Answers;
 use crate::alt::types::class_metadata::ClassMro;
@@ -37,6 +43,7 @@ use crate::binding::bindings::Bindings;
 use crate::commands::check::Handles;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
+use crate::export::exports::ExportLocation;
 use crate::state::require::Require;
 use crate::state::state::State;
 
@@ -114,13 +121,18 @@ pub struct ReportArgs {
     /// Configuration override options
     #[command(flatten)]
     config_override: ConfigOverrideArgs,
+
+    /// When enabled, `.py` files are skipped if a corresponding `.pyi`
+    /// file is also present in the set of files to check.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    prefer_stubs: bool,
 }
 
 impl ReportArgs {
     pub fn run(self) -> anyhow::Result<CommandExitStatus> {
         self.config_override.validate()?;
         let (files_to_check, config_finder) = self.files.resolve(self.config_override)?;
-        Self::run_inner(files_to_check, config_finder)
+        Self::run_inner(files_to_check, config_finder, self.prefer_stubs)
     }
 
     /// Helper to extract all parameters from Parameters struct
@@ -206,7 +218,25 @@ impl ReportArgs {
         suppressions
     }
 
-    fn parse_functions(module: &Module, bindings: Bindings) -> Vec<Function> {
+    /// Check if any ancestor in a `NestingContext` chain is a function.
+    fn has_function_ancestor(parent: &NestingContext) -> bool {
+        let mut current = parent;
+        loop {
+            if current.is_function() {
+                return true;
+            }
+            match current.parent() {
+                Some(p) => current = p,
+                None => return false,
+            }
+        }
+    }
+
+    fn parse_functions(
+        module: &Module,
+        bindings: Bindings,
+        exports: &SmallMap<Name, ExportLocation>,
+    ) -> Vec<Function> {
         let mut functions = Vec::new();
         let module_prefix = if module.name() != ModuleName::unknown() {
             format!("{}.", module.name())
@@ -223,6 +253,10 @@ impl ReportArgs {
                 let func_name = if let Some(class_key) = fun.class_key {
                     match bindings.get(class_key) {
                         BindingClass::ClassDef(cls) => {
+                            // Skip methods of classes nested inside functions
+                            if Self::has_function_ancestor(&cls.parent) {
+                                continue;
+                            }
                             // Build full qualified name using nesting context
                             let parent_path = module.display(&cls.parent).to_string();
                             if parent_path.is_empty() {
@@ -239,6 +273,11 @@ impl ReportArgs {
                         }
                     }
                 } else {
+                    // Skip functions not present in the module's exports
+                    // (e.g. functions nested inside other functions).
+                    if !exports.contains_key(&fun.def.name.id) {
+                        continue;
+                    }
                     format!("{}{}", module_prefix, fun.def.name)
                 };
                 // Get return annotation from ReturnTypeKind
@@ -340,6 +379,10 @@ impl ReportArgs {
                 BindingClass::ClassDef(cls) => cls,
                 BindingClass::FunctionalClassDef(..) => continue,
             };
+            // Skip classes nested inside functions, since they are not public symbols.
+            if Self::has_function_ancestor(&cls_binding.parent) {
+                continue;
+            }
             let class_type = match answers.get_idx(class_idx) {
                 Some(result) => match &result.0 {
                     Some(cls) => cls.clone(),
@@ -439,9 +482,20 @@ impl ReportArgs {
         classes
     }
 
+    /// Returns the set of `.py` paths that should be skipped because a
+    /// corresponding `.pyi` file also appears in `handles`.
+    fn py_paths_shadowed_by_pyi(handles: &[Handle]) -> HashSet<PathBuf> {
+        handles
+            .iter()
+            .filter(|h| h.path().is_interface())
+            .map(|h| h.path().as_path().with_extension("py"))
+            .collect()
+    }
+
     fn run_inner(
         files_to_check: Box<dyn Includes>,
         config_finder: ConfigFinder,
+        prefer_stubs: bool,
     ) -> anyhow::Result<CommandExitStatus> {
         let expanded_file_list = config_finder.checkpoint(files_to_check.files())?;
         let state = State::new(config_finder);
@@ -464,13 +518,24 @@ impl ReportArgs {
 
         let mut report: HashMap<String, FileReport> = HashMap::new();
         transaction.run(handles.as_slice(), Require::Everything);
-        for handle in handles {
-            if let Some(bindings) = transaction.get_bindings(&handle)
-                && let Some(module) = transaction.get_module_info(&handle)
-                && let Some(answers) = transaction.get_answers(&handle)
+
+        let shadowed = if prefer_stubs {
+            Self::py_paths_shadowed_by_pyi(&handles)
+        } else {
+            HashSet::new()
+        };
+        for handle in &handles {
+            if shadowed.contains(handle.path().as_path()) {
+                continue;
+            }
+
+            if let Some(bindings) = transaction.get_bindings(handle)
+                && let Some(module) = transaction.get_module_info(handle)
+                && let Some(answers) = transaction.get_answers(handle)
             {
                 let line_count = module.lined_buffer().line_index().line_count();
-                let functions = Self::parse_functions(&module, bindings.dupe());
+                let exports = transaction.get_exports(handle);
+                let functions = Self::parse_functions(&module, bindings.dupe(), &exports);
                 let classes = Self::parse_classes(&module, bindings.dupe(), answers);
                 let suppressions = Self::parse_suppressions(&module);
 
@@ -499,9 +564,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use dupe::Dupe;
+    use pyrefly_build::handle::Handle;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
+    use pyrefly_python::sys_info::SysInfo;
 
     use super::*;
     use crate::state::require::Require;
@@ -561,8 +629,9 @@ class C:
 
         let module = transaction.get_module_info(&handle).unwrap();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings);
+        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
 
         assert_eq!(functions.len(), 4);
 
@@ -628,8 +697,9 @@ def foo():
         let handle = handle_fn("__unknown__");
         let transaction = state.transaction();
         let bindings = transaction.get_bindings(&handle).unwrap();
+        let exports = transaction.get_exports(&handle);
 
-        let functions = ReportArgs::parse_functions(&module, bindings);
+        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
 
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name, "foo");
@@ -747,5 +817,168 @@ class Child(Base):
         assert_eq!(base.incomplete_attributes.len(), 1);
         assert_eq!(base.incomplete_attributes[0].name, "base_method");
         assert_eq!(base.incomplete_attributes[0].declared_in, "test.Base");
+    }
+
+    #[test]
+    fn test_parse_functions_excludes_nested_in_functions() {
+        let code = r#"
+def outer() -> None:
+    def inner() -> None:
+        pass
+    def inner2(x: int) -> str:
+        return str(x)
+
+def top_level(x: int) -> bool:
+    return True
+"#;
+        let (state, handle_fn) = TestEnv::one("test", code)
+            .with_default_require_level(Require::Everything)
+            .to_state();
+        let handle = handle_fn("test");
+        let transaction = state.transaction();
+
+        let module = transaction.get_module_info(&handle).unwrap();
+        let bindings = transaction.get_bindings(&handle).unwrap();
+        let exports = transaction.get_exports(&handle);
+
+        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+
+        // Only top-level functions should be reported; inner and inner2 are nested
+        // inside outer and are not public symbols.
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test.outer"),
+            "top-level function 'outer' should be reported, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"test.top_level"),
+            "top-level function 'top_level' should be reported, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("inner")),
+            "nested functions should not be reported, got: {names:?}"
+        );
+        assert_eq!(
+            functions.len(),
+            2,
+            "only 2 top-level functions expected, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_functions_excludes_methods_of_classes_nested_in_functions() {
+        let code = r#"
+def outer() -> None:
+    class LocalClass:
+        def method(self) -> None:
+            pass
+
+class TopLevel:
+    def method(self) -> None:
+        pass
+"#;
+        let (state, handle_fn) = TestEnv::one("test", code)
+            .with_default_require_level(Require::Everything)
+            .to_state();
+        let handle = handle_fn("test");
+        let transaction = state.transaction();
+
+        let module = transaction.get_module_info(&handle).unwrap();
+        let bindings = transaction.get_bindings(&handle).unwrap();
+        let exports = transaction.get_exports(&handle);
+
+        let functions = ReportArgs::parse_functions(&module, bindings, &exports);
+        // LocalClass.method is inside a function and is not a public symbol.
+        let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test.outer"),
+            "top-level function 'outer' should be reported, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"test.TopLevel.method"),
+            "method of top-level class should be reported, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("LocalClass")),
+            "methods of classes nested in functions should not be reported, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_classes_excludes_nested_in_functions() {
+        let code = r#"
+def outer() -> None:
+    class LocalClass:
+        def method(self) -> None:
+            pass
+
+class TopLevel:
+    def method(self) -> None:
+        pass
+"#;
+        let (state, handle_fn) = TestEnv::one("test", code)
+            .with_default_require_level(Require::Everything)
+            .to_state();
+        let handle = handle_fn("test");
+        let transaction = state.transaction();
+
+        let module = transaction.get_module_info(&handle).unwrap();
+        let bindings = transaction.get_bindings(&handle).unwrap();
+        let answers = transaction.get_answers(&handle).unwrap();
+
+        let classes = ReportArgs::parse_classes(&module, bindings, answers);
+
+        // Only TopLevel should be reported; LocalClass is nested inside a function
+        // and is not a public symbol.
+        let names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"test.TopLevel"),
+            "top-level class should be reported, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("LocalClass")),
+            "classes nested in functions should not be reported, got: {names:?}"
+        );
+        assert_eq!(
+            classes.len(),
+            1,
+            "only 1 top-level class expected, got: {names:?}"
+        );
+    }
+
+    /// When both test.py and test.pyi exist, the .py file is shadowed.
+    #[test]
+    fn test_pyi_shadows_py_in_report() {
+        let sys_info = SysInfo::default();
+        let py_handle = Handle::new(
+            ModuleName::from_str("test"),
+            ModulePath::memory(PathBuf::from("test.py")),
+            sys_info.dupe(),
+        );
+        let py_handle2 = Handle::new(
+            ModuleName::from_str("test2"),
+            ModulePath::memory(PathBuf::from("test2.py")),
+            sys_info.dupe(),
+        );
+        let pyi_handle = Handle::new(
+            ModuleName::from_str("test"),
+            ModulePath::memory(PathBuf::from("test.pyi")),
+            sys_info.dupe(),
+        );
+        let handles = vec![py_handle, py_handle2, pyi_handle];
+        let shadowed = ReportArgs::py_paths_shadowed_by_pyi(&handles);
+
+        assert!(
+            shadowed.contains(PathBuf::from("test.py").as_path()),
+            "test.py should be shadowed when test.pyi exists"
+        );
+        assert!(
+            !shadowed.contains(PathBuf::from("test.pyi").as_path()),
+            "test.pyi should not be shadowed"
+        );
+        assert!(
+            !shadowed.contains(PathBuf::from("test2.py").as_path()),
+            "test2.py should not be shadowed"
+        );
     }
 }

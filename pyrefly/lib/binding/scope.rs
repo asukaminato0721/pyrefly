@@ -54,6 +54,7 @@ use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyConsistentOverrideCheck;
 use crate::binding::binding::KeyDecoratedFunction;
 use crate::binding::binding::KeyVariance;
+use crate::binding::binding::KeyVarianceCheck;
 use crate::binding::binding::KeyYield;
 use crate::binding::binding::KeyYieldFrom;
 use crate::binding::binding::MethodSelfKind;
@@ -296,11 +297,11 @@ impl StaticInfo {
             })
         };
         match self.style {
-            StaticStyle::Anywhere(..) => Key::Anywhere(name.clone(), self.range),
+            StaticStyle::Anywhere(..) => Key::Anywhere(Box::new((name.clone(), self.range))),
             StaticStyle::Delete => Key::Delete(self.range),
             StaticStyle::MutableCapture(..) => Key::MutableCapture(short_identifier()),
-            StaticStyle::MergeableImport => Key::Import(name.clone(), self.range),
-            StaticStyle::ImplicitGlobal => Key::ImplicitGlobal(name.clone()),
+            StaticStyle::MergeableImport => Key::Import(Box::new((name.clone(), self.range))),
+            StaticStyle::ImplicitGlobal => Key::ImplicitGlobal(Box::new(name.clone())),
             StaticStyle::SingleDef(..) => Key::Definition(short_identifier()),
             StaticStyle::PossibleLegacyTParam => Key::PossibleLegacyTParam(self.range),
         }
@@ -719,6 +720,7 @@ pub struct ClassIndices {
     pub mro_idx: Idx<KeyClassMro>,
     pub synthesized_fields_idx: Idx<KeyClassSynthesizedFields>,
     pub variance_idx: Idx<KeyVariance>,
+    pub variance_check_idx: Idx<KeyVarianceCheck>,
     pub consistent_override_check_idx: Idx<KeyConsistentOverrideCheck>,
     pub abstract_class_check_idx: Idx<KeyAbstractClassCheck>,
 }
@@ -1015,6 +1017,8 @@ pub struct Scope {
     forks: Vec<Fork>,
     /// Tracking imports in the current scope (module-level only)
     imports: SmallMap<Name, ImportUsage>,
+    /// Whether `from __future__ import annotations` is present (module-level only)
+    has_future_annotations: bool,
     /// Tracking variables in the current scope (module, function, and method scopes)
     variables: SmallMap<Name, VariableUsage>,
     /// Depth of finally blocks we're in. Resets in new function scopes (PEP 765).
@@ -1034,6 +1038,7 @@ impl Scope {
             loops: Default::default(),
             forks: Default::default(),
             imports: SmallMap::new(),
+            has_future_annotations: false,
             variables: SmallMap::new(),
             finally_depth: 0,
             with_depth: 0,
@@ -1743,6 +1748,14 @@ impl Scopes {
         Some(self.current().flow.get_info(name)?.value()?.style.clone())
     }
 
+    /// Get the flow idx for `name` in the current scope.
+    ///
+    /// Returns `None` if there is no current flow (which may mean the
+    /// name is uninitialized in the current scope, or is not in scope at all).
+    pub fn current_flow_idx(&self, name: &Name) -> Option<Idx<Key>> {
+        Some(self.current().flow.get_info(name)?.value()?.idx)
+    }
+
     /// Return the current binding index and flow style for `name`, if it exists
     /// in any enclosing scope.
     pub fn binding_idx_for_name(&self, name: &Name) -> Option<(Idx<Key>, FlowStyle)> {
@@ -1842,6 +1855,23 @@ impl Scopes {
 
     pub fn register_future_import(&mut self, name: &Identifier) {
         self.register_import_internal(name, true);
+    }
+
+    pub fn set_has_future_annotations(&mut self) {
+        // Only set on module scope, similar to register_import_internal
+        if matches!(self.current().kind, ScopeKind::Module) {
+            self.current_mut().has_future_annotations = true;
+        }
+    }
+
+    pub fn has_future_annotations(&self) -> bool {
+        // Look up through scopes to find the module scope's flag
+        for scope in self.iter_rev() {
+            if matches!(scope.kind, ScopeKind::Module) {
+                return scope.has_future_annotations;
+            }
+        }
+        false
     }
 
     /// Register an import that uses the `X as X` pattern (e.g., `import os as os`
@@ -2144,7 +2174,7 @@ impl Scopes {
                             }
                         }
                         ClassFieldDefinition::AssignedInBody {
-                            value: ExprOrBinding::Expr(e.clone()),
+                            value: Box::new(ExprOrBinding::Expr(e.clone())),
                             annotation: static_info.annotation(),
                             alias_of,
                         }
@@ -2170,7 +2200,7 @@ impl Scopes {
                         name,
                         (
                             ClassFieldDefinition::DefinedInMethod {
-                                value,
+                                value: Box::new(value),
                                 annotation,
                                 method,
                             },
@@ -2339,7 +2369,7 @@ impl Scopes {
     /// - For other usages: Normal lookup behavior.
     pub fn look_up_name_for_read(&self, name: Hashed<&Name>, usage: &Usage) -> NameReadInfo {
         let skip_class_overload_function_definitions =
-            matches!(usage, Usage::StaticTypeInformation);
+            matches!(usage, Usage::StaticTypeInformation | Usage::TypeAliasRhs);
         self.visit_scopes(|_, scope, flow_barrier| {
             let is_class = matches!(scope.kind, ScopeKind::Class(_));
 
@@ -2488,6 +2518,12 @@ impl ScopeTrace {
         let mut exportables = SmallMap::new();
         let scope = self.toplevel_scope();
         for (name, static_info) in scope.stat.0.iter_hashed() {
+            // Definitions with empty names are not actually accessible and should not be considered
+            // as exported. They are likely syntax errors, which are handled elsewhere.
+            if name.as_str() == "" {
+                continue;
+            }
+
             let exportable = match scope.flow.get_value_hashed(name) {
                 Some(FlowValue { idx: key, .. }) => {
                     if let Some(ann) = static_info.annotation() {
@@ -2666,7 +2702,10 @@ impl<'a> BindingsBuilder<'a> {
             self.insert_binding_idx(phi_idx, Binding::LoopPhi(loop_prior, branch_idxs));
             phi_idx
         } else {
-            self.insert_binding_idx(phi_idx, Binding::Phi(join_style, branch_infos));
+            self.insert_binding_idx(
+                phi_idx,
+                Binding::Phi(join_style, branch_infos.into_boxed_slice()),
+            );
             phi_idx
         }
     }
@@ -2996,7 +3035,7 @@ impl<'a> BindingsBuilder<'a> {
         // For each name and merge item, produce the merged FlowInfo for our new Flow
         let mut merged_flow_infos = SmallMap::with_capacity(merge_items.len());
         for (name, merge_item) in merge_items.into_iter_hashed() {
-            let phi_idx = self.idx_for_promise(Key::Phi(name.key().clone(), range));
+            let phi_idx = self.idx_for_promise(Key::Phi(Box::new((name.key().clone(), range))));
             merged_flow_infos.insert_hashed(
                 name,
                 self.merged_flow_info(
@@ -3031,7 +3070,7 @@ impl<'a> BindingsBuilder<'a> {
                 continue;
             }
             // We are promising to insert a binding for this key when we merge the flow
-            let phi_idx = self.idx_for_promise(Key::Phi(name.clone(), range));
+            let phi_idx = self.idx_for_promise(Key::Phi(Box::new((name.clone(), range))));
             match &mut info.value {
                 Some(value) => {
                     value.idx = phi_idx;

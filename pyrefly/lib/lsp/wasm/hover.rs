@@ -42,6 +42,7 @@ use ruff_text_size::TextSize;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::error::error::Error;
 use crate::lsp::module_helpers::collect_symbol_def_paths;
+use crate::lsp::wasm::signature_help::CallInfo;
 use crate::lsp::wasm::signature_help::is_constructor_call;
 use crate::lsp::wasm::signature_help::override_constructor_return_type;
 use crate::state::lsp::DefinitionMetadata;
@@ -393,7 +394,7 @@ fn keyword_argument_documentation(
     if !matches!(identifier.context, IdentifierContext::KeywordArgument(_)) {
         return None;
     }
-    let (_, _, _, callee_range) = transaction.get_callables_from_call(handle, position)?;
+    let CallInfo { callee_range, .. } = transaction.get_callables_from_call(handle, position)?;
     let docs = parameter_documentation_for_callee(transaction, handle, callee_range)?;
     let name = identifier.identifier.id.to_string();
     docs.get(name.as_str()).cloned().map(|doc| (name, doc))
@@ -527,7 +528,7 @@ pub fn get_hover(
     // Check both: hovering in arguments area OR hovering over the callee itself
     let callee_range_opt = transaction
         .get_callables_from_call(handle, position)
-        .map(|(_, _, _, range)| range)
+        .map(|info| info.callee_range)
         .or_else(find_callee_range_at_position);
 
     if let Some(callee_range) = callee_range_opt {
@@ -647,11 +648,12 @@ mod tests {
     use pyrefly_types::callable::FuncMetadata;
     use pyrefly_types::callable::Function;
     use pyrefly_types::callable::FunctionKind;
+    use pyrefly_types::heap::TypeHeap;
     use ruff_python_ast::name::Name;
 
     use super::*;
 
-    fn make_function_type(module_name: &str, func_name: &str) -> Type {
+    fn make_function_type(heap: &TypeHeap, module_name: &str, func_name: &str) -> Type {
         let module = Module::new(
             ModuleName::from_str(module_name),
             ModulePath::filesystem(PathBuf::from(format!("{module_name}.pyi"))),
@@ -665,22 +667,24 @@ mod tests {
             })),
             flags: FuncFlags::default(),
         };
-        Type::Function(Box::new(Function {
-            signature: Callable::ellipsis(Type::None),
+        heap.mk_function(Function {
+            signature: Callable::ellipsis(heap.mk_none()),
             metadata,
-        }))
+        })
     }
 
     #[test]
     fn fallback_uses_function_metadata() {
-        let ty = make_function_type("numpy", "arange");
+        let heap = TypeHeap::new();
+        let ty = make_function_type(&heap, "numpy", "arange");
         let fallback = fallback_hover_name_from_type(&ty);
         assert_eq!(fallback.as_deref(), Some("arange"));
     }
 
     #[test]
     fn fallback_recurses_through_type_wrapper() {
-        let ty = Type::Type(Box::new(make_function_type("pkg.subpkg", "run")));
+        let heap = TypeHeap::new();
+        let ty = heap.mk_type(make_function_type(&heap, "pkg.subpkg", "run"));
         let fallback = fallback_hover_name_from_type(&ty);
         assert_eq!(fallback.as_deref(), Some("run"));
     }

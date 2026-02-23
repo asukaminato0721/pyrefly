@@ -6,6 +6,7 @@
  */
 
 use std::io::Write;
+use std::sync::Arc;
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -14,6 +15,8 @@ use lsp_types::ServerInfo;
 use pyrefly_util::telemetry::Telemetry;
 
 use crate::commands::util::CommandExitStatus;
+use crate::lsp::non_wasm::external_references::ExternalReferences;
+use crate::lsp::non_wasm::module_helpers::PathRemapper;
 use crate::lsp::non_wasm::server::Connection;
 use crate::lsp::non_wasm::server::capabilities;
 use crate::lsp::non_wasm::server::initialize_finish;
@@ -56,11 +59,17 @@ pub struct LspArgs {
     pub(crate) build_system_blocking: bool,
 }
 
+/// Run LSP server with optional path remapping.
+/// When a path remapper is provided, go-to-definition will use the remapped
+/// paths for URIs, allowing navigation to source files instead of installed
+/// package files.
 pub fn run_lsp(
     connection: Connection,
     args: LspArgs,
     server_info: Option<ServerInfo>,
+    path_remapper: Option<PathRemapper>,
     telemetry: &impl Telemetry,
+    external_references: Arc<dyn ExternalReferences>,
 ) -> anyhow::Result<()> {
     if let Some(initialize_params) =
         initialize_connection(&connection, args.indexing_mode, server_info)?
@@ -71,7 +80,9 @@ pub fn run_lsp(
             args.indexing_mode,
             args.workspace_indexing_limit,
             args.build_system_blocking,
+            path_remapper,
             telemetry,
+            external_references,
         )?;
     }
     Ok(())
@@ -93,10 +104,15 @@ fn initialize_connection(
 }
 
 impl LspArgs {
+    /// Run LSP with optional path remapping.
+    /// When a path remapper is provided, go-to-definition will navigate to
+    /// remapped source files instead of installed package files.
     pub fn run(
         self,
         version: &str,
+        path_remapper: Option<PathRemapper>,
         telemetry: &impl Telemetry,
+        external_references: Arc<dyn ExternalReferences>,
     ) -> anyhow::Result<CommandExitStatus> {
         // Note that we must have our logging only write out to stderr.
         eprintln!("starting generic LSP server");
@@ -110,7 +126,14 @@ impl LspArgs {
             version: Some(version.to_owned()),
         };
 
-        run_lsp(connection, self, Some(server_info), telemetry)?;
+        run_lsp(
+            connection,
+            self,
+            Some(server_info),
+            path_remapper,
+            telemetry,
+            external_references,
+        )?;
         io_threads.join()?;
         // We have shut down gracefully.
         // Use writeln! instead of eprintln! to avoid panicking if stderr is closed.
