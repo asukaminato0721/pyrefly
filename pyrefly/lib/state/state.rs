@@ -2016,6 +2016,42 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    /// Return the forward dependencies for each module in `handles`, filtered to
+    /// only include dependencies that also appear in `handles`.
+    /// Each entry maps a module's absolute filesystem path to the list of absolute
+    /// paths of its direct dependencies. Bundled typeshed and in-memory modules are
+    /// excluded.
+    pub fn get_dependency_graph(&self, handles: &[Handle]) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        // Build a set of module names → filesystem paths for the handles the
+        // caller cares about (i.e. the project files from the config globs).
+        let mut included: HashMap<ModuleName, PathBuf> = HashMap::with_capacity(handles.len());
+        for handle in handles {
+            if let ModulePathDetails::FileSystem(path) = handle.path().details() {
+                included.insert(handle.module(), path.to_path_buf());
+            }
+        }
+        let mut graph: Vec<(PathBuf, Vec<PathBuf>)> = Vec::with_capacity(included.len());
+        for handle in handles {
+            if let Some(entry_path) = included.get(&handle.module()) {
+                let module_data = self.get_module(handle);
+                let deps: Vec<PathBuf> = module_data
+                    .deps
+                    .read()
+                    .iter()
+                    .flat_map(|(_, resolution)| match resolution {
+                        ImportResolution::Resolved(map) => map
+                            .iter_keys()
+                            .filter_map(|h| included.get(&h.module()).cloned())
+                            .collect(),
+                        ImportResolution::Failed(_) => Vec::new(),
+                    })
+                    .collect();
+                graph.push((entry_path.clone(), deps));
+            }
+        }
+        graph
+    }
+
     pub fn get_exports(&self, handle: &Handle) -> Arc<SmallMap<Name, ExportLocation>> {
         let module_data = self.get_module(handle);
         self.lookup_export(&module_data)
