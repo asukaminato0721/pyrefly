@@ -6,10 +6,13 @@
  */
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use dupe::Dupe;
+use pyrefly_build::handle::Handle;
 use pyrefly_config::args::ConfigOverrideArgs;
 use pyrefly_config::finder::ConfigFinder;
 use pyrefly_python::module::Module;
@@ -114,13 +117,18 @@ pub struct ReportArgs {
     /// Configuration override options
     #[command(flatten)]
     config_override: ConfigOverrideArgs,
+
+    /// When enabled, `.py` files are skipped if a corresponding `.pyi`
+    /// file is also present in the set of files to check.
+    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    prefer_stubs: bool,
 }
 
 impl ReportArgs {
     pub fn run(self) -> anyhow::Result<CommandExitStatus> {
         self.config_override.validate()?;
         let (files_to_check, config_finder) = self.files.resolve(self.config_override)?;
-        Self::run_inner(files_to_check, config_finder)
+        Self::run_inner(files_to_check, config_finder, self.prefer_stubs)
     }
 
     /// Helper to extract all parameters from Parameters struct
@@ -439,9 +447,20 @@ impl ReportArgs {
         classes
     }
 
+    /// Returns the set of `.py` paths that should be skipped because a
+    /// corresponding `.pyi` file also appears in `handles`.
+    fn py_paths_shadowed_by_pyi(handles: &[Handle]) -> HashSet<PathBuf> {
+        handles
+            .iter()
+            .filter(|h| h.path().is_interface())
+            .map(|h| h.path().as_path().with_extension("py"))
+            .collect()
+    }
+
     fn run_inner(
         files_to_check: Box<dyn Includes>,
         config_finder: ConfigFinder,
+        prefer_stubs: bool,
     ) -> anyhow::Result<CommandExitStatus> {
         let expanded_file_list = config_finder.checkpoint(files_to_check.files())?;
         let state = State::new(config_finder);
@@ -464,10 +483,20 @@ impl ReportArgs {
 
         let mut report: HashMap<String, FileReport> = HashMap::new();
         transaction.run(handles.as_slice(), Require::Everything);
-        for handle in handles {
-            if let Some(bindings) = transaction.get_bindings(&handle)
-                && let Some(module) = transaction.get_module_info(&handle)
-                && let Some(answers) = transaction.get_answers(&handle)
+
+        let shadowed = if prefer_stubs {
+            Self::py_paths_shadowed_by_pyi(&handles)
+        } else {
+            HashSet::new()
+        };
+        for handle in &handles {
+            if shadowed.contains(handle.path().as_path()) {
+                continue;
+            }
+
+            if let Some(bindings) = transaction.get_bindings(handle)
+                && let Some(module) = transaction.get_module_info(handle)
+                && let Some(answers) = transaction.get_answers(handle)
             {
                 let line_count = module.lined_buffer().line_index().line_count();
                 let functions = Self::parse_functions(&module, bindings.dupe());
@@ -499,9 +528,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use dupe::Dupe;
+    use pyrefly_build::handle::Handle;
     use pyrefly_python::module::Module;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
+    use pyrefly_python::sys_info::SysInfo;
 
     use super::*;
     use crate::state::require::Require;
@@ -747,5 +779,41 @@ class Child(Base):
         assert_eq!(base.incomplete_attributes.len(), 1);
         assert_eq!(base.incomplete_attributes[0].name, "base_method");
         assert_eq!(base.incomplete_attributes[0].declared_in, "test.Base");
+    }
+
+    /// When both test.py and test.pyi exist, the .py file is shadowed.
+    #[test]
+    fn test_pyi_shadows_py_in_report() {
+        let sys_info = SysInfo::default();
+        let py_handle = Handle::new(
+            ModuleName::from_str("test"),
+            ModulePath::memory(PathBuf::from("test.py")),
+            sys_info.dupe(),
+        );
+        let py_handle2 = Handle::new(
+            ModuleName::from_str("test2"),
+            ModulePath::memory(PathBuf::from("test2.py")),
+            sys_info.dupe(),
+        );
+        let pyi_handle = Handle::new(
+            ModuleName::from_str("test"),
+            ModulePath::memory(PathBuf::from("test.pyi")),
+            sys_info.dupe(),
+        );
+        let handles = vec![py_handle, py_handle2, pyi_handle];
+        let shadowed = ReportArgs::py_paths_shadowed_by_pyi(&handles);
+
+        assert!(
+            shadowed.contains(PathBuf::from("test.py").as_path()),
+            "test.py should be shadowed when test.pyi exists"
+        );
+        assert!(
+            !shadowed.contains(PathBuf::from("test.pyi").as_path()),
+            "test.pyi should not be shadowed"
+        );
+        assert!(
+            !shadowed.contains(PathBuf::from("test2.py").as_path()),
+            "test2.py should not be shadowed"
+        );
     }
 }
