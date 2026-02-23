@@ -744,16 +744,12 @@ impl Answers {
     pub fn get_chosen_overload_trace(&self, range: TextRange) -> Option<Type> {
         let lock = self.trace.as_ref()?.lock();
         match lock.overloaded_callees.get(&range)? {
-            OverloadedCallee::Resolved { callable } => {
-                Some(self.deep_force(self.heap().mk_callable_from(callable.as_type())))
-            }
+            OverloadedCallee::Resolved { callable } => Some(self.deep_force(callable.as_type())),
             OverloadedCallee::Candidates {
                 closest,
                 is_closest_chosen,
                 ..
-            } if *is_closest_chosen => {
-                Some(self.deep_force(self.heap().mk_callable_from(closest.as_type())))
-            }
+            } if *is_closest_chosen => Some(self.deep_force(closest.as_type())),
             _ => None,
         }
     }
