@@ -104,6 +104,16 @@ struct ParamTypeResult {
     is_unannotated: bool,
 }
 
+/// Result of resolving function parameters and paramspec.
+struct FunctionParamsResult {
+    /// The resolved function parameters.
+    params: Vec<Param>,
+    /// The paramspec quantified type, if any.
+    paramspec: Option<Quantified>,
+    /// Maps parameter names to their resolved types for unannotated parameters.
+    resolved_param_types: SmallMap<Name, Type>,
+}
+
 struct ParentParamHints {
     posonly: VecDeque<Type>,
     positional: VecDeque<Type>,
@@ -473,7 +483,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         } else if flags.is_staticmethod {
             self_type = None;
         }
-        let (params, paramspec, resolved_param_types) = self.get_params_and_paramspec(
+        let FunctionParamsResult {
+            params,
+            paramspec,
+            resolved_param_types,
+        } = self.get_params_and_paramspec(
             def,
             stub_or_impl,
             &mut self_type,
@@ -868,7 +882,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         decorator_param_hints: &mut Option<DecoratorParamHints>,
         parent_param_hints: &mut Option<ParentParamHints>,
         errors: &ErrorCollector,
-    ) -> (Vec<Param>, Option<Quantified>, SmallMap<Name, Type>) {
+    ) -> FunctionParamsResult {
         let mut paramspec_args = None;
         let mut paramspec_kwargs = None;
         let mut resolved_param_types = SmallMap::new();
@@ -1103,7 +1117,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .collect();
             None
         };
-        (params, paramspec, resolved_param_types)
+        FunctionParamsResult {
+            params,
+            paramspec,
+            resolved_param_types,
+        }
     }
 
     fn check_top_level_function_decorator(
