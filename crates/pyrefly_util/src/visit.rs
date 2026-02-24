@@ -10,6 +10,7 @@
 
 use std::any;
 use std::any::Any;
+use std::marker::PhantomData;
 
 use compact_str::CompactString;
 use const_str;
@@ -147,6 +148,16 @@ visit_nothing!(CompactString);
 
 // We can't visit `str` on its own, so this is atomic.
 visit_nothing!(Box<str>);
+
+impl<T: 'static, To: 'static> Visit<To> for PhantomData<T> {
+    const RECURSE_CONTAINS: bool = false;
+    fn recurse<'a>(&'a self, _: &mut dyn FnMut(&'a To)) {}
+}
+
+impl<T: 'static, To: 'static> VisitMut<To> for PhantomData<T> {
+    const RECURSE_CONTAINS: bool = false;
+    fn recurse_mut(&mut self, _: &mut dyn FnMut(&mut To)) {}
+}
 
 // Pyrefly types that have nothing inside
 visit_nothing!(Name);
@@ -377,6 +388,8 @@ impl<To: 'static, V: VisitMut<To>> VisitMut<To> for OrderedMap<Name, V> {
 
 #[cfg(test)]
 mod tests {
+    use std::marker::PhantomData;
+
     use pyrefly_derive::Visit;
     use pyrefly_derive::VisitMut;
     use static_assertions::const_assert;
@@ -447,6 +460,13 @@ mod tests {
     #[derive(Visit, VisitMut, PartialEq, Eq, Debug)]
     struct Generic<T>(T);
 
+    #[derive(Visit, VisitMut, PartialEq, Eq, Debug)]
+    enum WithLifetime<'t> {
+        #[allow(dead_code)]
+        Unused(PhantomData<&'t ()>),
+        Value(i32),
+    }
+
     #[test]
     fn test_visit_derive() {
         let mut info = (
@@ -471,6 +491,11 @@ mod tests {
         const_assert!(!<Foo as Visit<u8>>::VISIT_CONTAINS);
         const_assert!(<Generic<i32> as Visit<i32>>::VISIT_CONTAINS);
         const_assert!(!<Generic<i32> as Visit<u8>>::VISIT_CONTAINS);
+
+        let x: WithLifetime<'static> = WithLifetime::Value(42);
+        let mut collect = Vec::new();
+        x.visit(&mut |v: &i32| collect.push(*v));
+        assert_eq!(&collect, &[42]);
     }
 
     #[test]
