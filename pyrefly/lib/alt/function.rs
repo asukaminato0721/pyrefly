@@ -463,7 +463,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         } else if flags.is_staticmethod {
             self_type = None;
         }
-        let (params, paramspec) = self.get_params_and_paramspec(
+        let (params, paramspec, resolved_param_types) = self.get_params_and_paramspec(
             def,
             stub_or_impl,
             &mut self_type,
@@ -491,7 +491,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             paramspec,
             stub_or_impl,
             defining_cls,
-            resolved_param_types: SmallMap::new(),
+            resolved_param_types,
         })
     }
 
@@ -787,6 +787,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     /// Determine the type and required-ness of a parameter.
+    /// Returns (type, required, is_unannotated) where is_unannotated indicates
+    /// whether the parameter lacked a type annotation.
     fn get_param_type_and_requiredness(
         &self,
         name: &Identifier,
@@ -795,10 +797,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self_type: &mut Option<Type>,
         hint: Option<Type>,
         errors: &ErrorCollector,
-    ) -> (Type, Required) {
+    ) -> (Type, Required, bool) {
         // We only want to use self for the first param, so take & replace with None
         let self_type = std::mem::take(self_type);
-        let (ty, mut required) = match self.bindings().get_function_param(name) {
+        let (ty, mut required, is_unannotated) = match self.bindings().get_function_param(name) {
             FunctionParameter::Annotated(idx) => {
                 // If the parameter is annotated, we check the default value against the annotation
                 let param_ty = self.get_idx(*idx).annotation.get_type().clone();
@@ -812,7 +814,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     stub_or_impl,
                     errors,
                 );
-                (param_ty, required)
+                (param_ty, required, false)
             }
             FunctionParameter::Unannotated(var, _, _) => {
                 let required = self.get_requiredness(default, None, stub_or_impl, errors);
@@ -833,7 +835,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         ),
                     );
                 }
-                (self.solver().force_var(*var), required)
+                (self.solver().force_var(*var), required, true)
             }
         };
         if let Required::Optional(Some(default)) = required {
@@ -842,9 +844,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // want to promote literals while inferring the type.
             required = Required::Optional(Some(default.explicit_literals()));
         }
-        (ty, required)
+        (ty, required, is_unannotated)
     }
 
+    /// Returns (params, paramspec, resolved_param_types) where resolved_param_types
+    /// contains the resolved types for unannotated parameters.
     fn get_params_and_paramspec(
         &self,
         def: &FunctionDefData,
@@ -853,9 +857,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         decorator_param_hints: &mut Option<DecoratorParamHints>,
         parent_param_hints: &mut Option<ParentParamHints>,
         errors: &ErrorCollector,
-    ) -> (Vec<Param>, Option<Quantified>) {
+    ) -> (Vec<Param>, Option<Quantified>, SmallMap<Name, Type>) {
         let mut paramspec_args = None;
         let mut paramspec_kwargs = None;
+        let mut resolved_param_types = SmallMap::new();
         let mut params = Vec::with_capacity(def.parameters.len());
         params.extend(def.parameters.posonlyargs.iter().map(|x| {
             let decorator_hint = decorator_param_hints
@@ -868,7 +873,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .as_mut()
                     .and_then(|hint| hint.take_posonly())
             };
-            let (ty, required) = self.get_param_type_and_requiredness(
+            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -876,6 +881,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 decorator_hint.or(parent_hint),
                 errors,
             );
+            if is_unannotated {
+                resolved_param_types.insert(x.parameter.name.id.clone(), ty.clone());
+            }
             Param::PosOnly(Some(x.parameter.name.id.clone()), ty, required)
         }));
 
@@ -895,7 +903,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .as_mut()
                     .and_then(|hint| hint.take_positional())
             };
-            let (ty, required) = self.get_param_type_and_requiredness(
+            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -903,6 +911,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 decorator_hint.or(parent_hint),
                 errors,
             );
+            if is_unannotated {
+                resolved_param_types.insert(x.parameter.name.id.clone(), ty.clone());
+            }
 
             // If the parameter begins but does not end with "__", it is a positional-only parameter.
             // See: https://typing.python.org/en/latest/spec/historical.html#positional-only-parameters
@@ -930,7 +941,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_vararg());
-            let (ty, _) = self.get_param_type_and_requiredness(
+            let (ty, _, is_unannotated) = self.get_param_type_and_requiredness(
                 &x.name,
                 None,
                 stub_or_impl,
@@ -938,6 +949,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 parent_hint,
                 errors,
             );
+            if is_unannotated {
+                resolved_param_types.insert(x.name.id.clone(), ty.clone());
+            }
             if let Type::Args(q) = &ty {
                 paramspec_args = Some(q.clone());
             }
@@ -960,7 +974,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_kwonly(&x.parameter.name));
-            let (ty, required) = self.get_param_type_and_requiredness(
+            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -968,13 +982,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 parent_hint,
                 errors,
             );
+            if is_unannotated {
+                resolved_param_types.insert(x.parameter.name.id.clone(), ty.clone());
+            }
             Param::KwOnly(x.parameter.name.id.clone(), ty, required)
         }));
         if let Some(x) = &def.parameters.kwarg {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_kwargs());
-            let (ty, _) = self.get_param_type_and_requiredness(
+            let (ty, _, is_unannotated) = self.get_param_type_and_requiredness(
                 &x.name,
                 None,
                 stub_or_impl,
@@ -982,6 +999,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 parent_hint,
                 errors,
             );
+            if is_unannotated {
+                resolved_param_types.insert(x.name.id.clone(), ty.clone());
+            }
             if let Type::Kwargs(q) = &ty {
                 paramspec_kwargs = Some(q.clone());
             }
@@ -1056,7 +1076,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .collect();
             None
         };
-        (params, paramspec)
+        (params, paramspec, resolved_param_types)
     }
 
     fn check_top_level_function_decorator(
