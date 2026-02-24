@@ -94,6 +94,16 @@ fn is_class_property_decorator_type(ty: &Type) -> bool {
     }
 }
 
+/// Result of resolving a function parameter's type and requiredness.
+struct ParamTypeResult {
+    /// The resolved type of the parameter.
+    ty: Type,
+    /// Whether the parameter is required or optional.
+    required: Required,
+    /// Whether the parameter lacked a type annotation (was unannotated).
+    is_unannotated: bool,
+}
+
 struct ParentParamHints {
     posonly: VecDeque<Type>,
     positional: VecDeque<Type>,
@@ -787,8 +797,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     /// Determine the type and required-ness of a parameter.
-    /// Returns (type, required, is_unannotated) where is_unannotated indicates
-    /// whether the parameter lacked a type annotation.
     fn get_param_type_and_requiredness(
         &self,
         name: &Identifier,
@@ -797,7 +805,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self_type: &mut Option<Type>,
         hint: Option<Type>,
         errors: &ErrorCollector,
-    ) -> (Type, Required, bool) {
+    ) -> ParamTypeResult {
         // We only want to use self for the first param, so take & replace with None
         let self_type = std::mem::take(self_type);
         let (ty, mut required, is_unannotated) = match self.bindings().get_function_param(name) {
@@ -843,7 +851,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // want to promote literals while inferring the type.
             required = Required::Optional(Some(default.explicit_literals()));
         }
-        (ty, required, is_unannotated)
+        ParamTypeResult {
+            ty,
+            required,
+            is_unannotated,
+        }
     }
 
     /// Returns (params, paramspec, resolved_param_types) where resolved_param_types
@@ -872,7 +884,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .as_mut()
                     .and_then(|hint| hint.take_posonly())
             };
-            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
+            let ParamTypeResult {
+                ty,
+                required,
+                is_unannotated,
+            } = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -902,7 +918,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .as_mut()
                     .and_then(|hint| hint.take_positional())
             };
-            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
+            let ParamTypeResult {
+                ty,
+                required,
+                is_unannotated,
+            } = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -940,7 +960,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_vararg());
-            let (ty, _, is_unannotated) = self.get_param_type_and_requiredness(
+            let ParamTypeResult {
+                ty, is_unannotated, ..
+            } = self.get_param_type_and_requiredness(
                 &x.name,
                 None,
                 stub_or_impl,
@@ -973,7 +995,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_kwonly(&x.parameter.name));
-            let (ty, required, is_unannotated) = self.get_param_type_and_requiredness(
+            let ParamTypeResult {
+                ty,
+                required,
+                is_unannotated,
+            } = self.get_param_type_and_requiredness(
                 &x.parameter.name,
                 x.default.as_deref(),
                 stub_or_impl,
@@ -990,7 +1016,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_kwargs());
-            let (ty, _, is_unannotated) = self.get_param_type_and_requiredness(
+            let ParamTypeResult {
+                ty, is_unannotated, ..
+            } = self.get_param_type_and_requiredness(
                 &x.name,
                 None,
                 stub_or_impl,
