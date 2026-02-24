@@ -7253,3 +7253,49 @@ def foo(x: str):
         )]
     }
 );
+
+call_graph_testcase!(
+    test_function_alias,
+    TEST_MODULE_NAME,
+    r#"
+import xml.etree.ElementTree as ET
+
+def foo(data: str):
+    ET.fromstring(data)
+"#,
+    &|context: &ModuleContext| {
+        vec![(
+            "test.foo",
+            vec![
+                (
+                    "5:5-5:18",
+                    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                        if_called: CallCallees {
+                            call_targets: vec![],
+                            init_targets: vec![],
+                            new_targets: vec![],
+                            higher_order_parameters: HashMap::new(),
+                            unresolved: Unresolved::True(
+                                UnresolvedReason::UnsupportedFunctionTarget,
+                            ),
+                        },
+                        property_setters: vec![],
+                        property_getters: vec![],
+                        global_targets: vec![get_global_ref(
+                            "xml.etree.ElementTree",
+                            "fromstring",
+                            context,
+                        )],
+                        is_attribute: true,
+                    }),
+                ),
+                (
+                    "5:5-5:24",
+                    // TODO(T225700656): Support aliases
+                    // fromstring is defined as an alias, `fromstring = XML` in the source.
+                    unresolved_expression_callees(UnresolvedReason::UnsupportedFunctionTarget),
+                ),
+            ],
+        )]
+    }
+);
