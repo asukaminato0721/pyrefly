@@ -2466,7 +2466,12 @@ impl<'a> Transaction<'a> {
         Some(identifier_context?.identifier.range)
     }
 
-    pub fn find_local_references(&self, handle: &Handle, position: TextSize) -> Vec<TextRange> {
+    pub fn find_local_references(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+        include_declaration: bool,
+    ) -> Vec<TextRange> {
         self.find_definition(
             handle,
             position,
@@ -2484,7 +2489,13 @@ impl<'a> Transaction<'a> {
                  docstring_range: _,
                  ..
              }| {
-                self.local_references_from_definition(handle, metadata, definition_range, &module)
+                self.local_references_from_definition(
+                    handle,
+                    metadata,
+                    definition_range,
+                    &module,
+                    include_declaration,
+                )
             },
         )
         .concat()
@@ -2535,6 +2546,7 @@ impl<'a> Transaction<'a> {
         definition_metadata: DefinitionMetadata,
         definition_name: &Name,
         definition_range: TextRange,
+        include_declaration: bool,
     ) -> Option<Vec<TextRange>> {
         let mut references = match definition_metadata {
             DefinitionMetadata::Attribute => self.local_attribute_references_from_local_definition(
@@ -2567,7 +2579,9 @@ impl<'a> Transaction<'a> {
             ]
             .concat(),
         };
-        references.push(definition_range);
+        if include_declaration {
+            references.push(definition_range);
+        }
         Some(references)
     }
 
@@ -2577,6 +2591,7 @@ impl<'a> Transaction<'a> {
         definition_metadata: DefinitionMetadata,
         definition_range: TextRange,
         module: &Module,
+        include_declaration: bool,
     ) -> Option<Vec<TextRange>> {
         let mut references = if handle.path() != module.path() {
             self.local_references_from_external_definition(handle, definition_range, module)?
@@ -2587,6 +2602,7 @@ impl<'a> Transaction<'a> {
                 definition_metadata,
                 &definition_name,
                 definition_range,
+                include_declaration,
             )?
         };
         references.sort_by_key(|range| range.start());
@@ -3226,6 +3242,7 @@ impl<'a> CancellableTransaction<'a> {
         sys_info: &SysInfo,
         definition_kind: DefinitionMetadata,
         definition: TextRangeWithModule,
+        include_declaration: bool,
     ) -> Result<Vec<(Module, Vec<TextRange>)>, Cancelled> {
         let results = self.process_rdeps_with_definition(
             sys_info,
@@ -3241,6 +3258,7 @@ impl<'a> CancellableTransaction<'a> {
                         definition_kind.clone(),
                         patched_definition.range,
                         &patched_definition.module,
+                        include_declaration,
                     )
                     .unwrap_or_default();
                 if !references.is_empty()
