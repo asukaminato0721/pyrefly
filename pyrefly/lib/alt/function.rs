@@ -816,7 +816,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 );
                 (param_ty, required, false)
             }
-            FunctionParameter::Unannotated(var, _, _) => {
+            FunctionParameter::Unannotated(var, _, _, _) => {
                 let required = self.get_requiredness(default, None, stub_or_impl, errors);
                 // If this is the first parameter and there is a self type, solve to `Self`.
                 // We only try to solve the first param for now. Other unannotated params

@@ -1633,6 +1633,7 @@ impl<'a> BindingsBuilder<'a> {
                     self.solver.fresh_parameter(self.uniques),
                     undecorated_idx,
                     target,
+                    name.id.clone(),
                 ),
             })),
         );

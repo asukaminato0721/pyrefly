@@ -1593,7 +1593,7 @@ impl IsAsync {
 #[derive(Clone, Debug)]
 pub enum FunctionParameter {
     Annotated(Idx<KeyAnnotation>),
-    Unannotated(Var, Idx<KeyUndecoratedFunction>, AnnotationTarget),
+    Unannotated(Var, Idx<KeyUndecoratedFunction>, AnnotationTarget, Name),
 }
 
 /// Is the body of this function stubbed out (contains nothing but `...`)?
@@ -2310,7 +2310,8 @@ impl DisplayWith<Bindings> for Binding {
                 "FunctionParameter({})",
                 match x.as_ref() {
                     FunctionParameter::Annotated(k) => ctx.display(*k).to_string(),
-                    FunctionParameter::Unannotated(x, k, _) => format!("{x}, {}", ctx.display(*k)),
+                    FunctionParameter::Unannotated(x, k, _, _) =>
+                        format!("{x}, {}", ctx.display(*k)),
                 }
             ),
             Self::SuperInstance(x) => match &x.0 {
