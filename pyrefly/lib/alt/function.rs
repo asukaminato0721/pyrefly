@@ -491,6 +491,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             paramspec,
             stub_or_impl,
             defining_cls,
+            resolved_param_types: SmallMap::new(),
         })
     }
 

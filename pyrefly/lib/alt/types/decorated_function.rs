@@ -32,6 +32,7 @@ use ruff_python_ast::Identifier;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use starlark_map::small_map::SmallMap;
 
 use crate::alt::answers::Answers;
 use crate::alt::answers::LookupAnswer;
@@ -54,6 +55,9 @@ pub struct UndecoratedFunction {
     pub paramspec: Option<Quantified>,
     pub stub_or_impl: FunctionStubOrImpl,
     pub defining_cls: Option<Class>,
+    /// Maps parameter names to their resolved types - used to connect
+    /// FunctionParameter and KeyUndecoratedFunction.
+    pub resolved_param_types: SmallMap<Name, Type>,
 }
 
 /// A value that combines the metadata of a function def and also provides the type of the function
@@ -122,6 +126,7 @@ impl UndecoratedFunction {
             paramspec: None,
             stub_or_impl: FunctionStubOrImpl::Stub,
             defining_cls: None,
+            resolved_param_types: SmallMap::new(),
         }
     }
 
