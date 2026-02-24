@@ -396,18 +396,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         ));
                     }
                 }
-                // Check for out-of-scope TypeVars in annotations.
-                // In-scope TypeVars are replaced with Quantified by LegacyTParamCollector,
-                // so any remaining raw TypeVars are out of scope.
                 if let Some(ty) = &ann.ty {
-                    // Consume TypeVars that are legitimately scoped inside Callables,
-                    // then check for remaining out-of-scope ones.
-                    let ty_with_callables_wrapped = self.wrap_callable_legacy_typevars(ty.clone());
-                    self.check_raw_legacy_type_variables(
-                        &ty_with_callables_wrapped,
-                        x.range(),
-                        errors,
-                    );
+                    self.check_legacy_typevar_scoping(ty, x.range(), errors);
                 }
                 Arc::new(AnnotationWithTarget {
                     target: target.clone(),
@@ -4331,6 +4321,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             });
         });
         tparams
+    }
+
+    /// Check that a resolved type does not contain out-of-scope legacy TypeVars.
+    fn check_legacy_typevar_scoping(&self, ty: &Type, range: TextRange, errors: &ErrorCollector) {
+        let wrapped = self.wrap_callable_legacy_typevars(ty.clone());
+        self.check_raw_legacy_type_variables(&wrapped, range, errors);
     }
 
     /// Check for raw legacy type variables in a resolved annotation type.
