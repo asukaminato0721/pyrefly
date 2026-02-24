@@ -3712,7 +3712,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         finalize(&annotation.target, self.heap.mk_any_implicit())
                     })
             }
-            FunctionParameter::Unannotated(var, function_idx, target, param_name) => {
+            FunctionParameter::Unannotated(function_idx, target, param_name) => {
                 // Get the resolved UndecoratedFunction - this ensures the function has been solved
                 // and resolved_param_types has been populated.
                 let undecorated = self.get_idx(*function_idx);
@@ -3723,12 +3723,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .get(param_name)
                     .cloned()
                     .unwrap_or_else(|| {
-                        // Fallback to force_var for safety, though this should never happen
-                        self.solver().force_var(*var)
+                        // Fallback to Any for safety, though this should never happen
+                        self.heap.mk_any_implicit()
                     });
-                // Keep the force_var call to ensure the Var is still resolved (will be removed
-                // in a later commit when we eliminate Variable::Parameter entirely)
-                self.solver().force_var(*var);
                 finalize(target, ty)
             }
         }

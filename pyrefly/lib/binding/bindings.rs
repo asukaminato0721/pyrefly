@@ -1629,12 +1629,7 @@ impl<'a> BindingsBuilder<'a> {
             Key::Definition(ShortIdentifier::new(name)),
             Binding::FunctionParameter(Box::new(match annot {
                 Some(annot) => FunctionParameter::Annotated(annot),
-                None => FunctionParameter::Unannotated(
-                    self.solver.fresh_parameter(self.uniques),
-                    undecorated_idx,
-                    target,
-                    name.id.clone(),
-                ),
+                None => FunctionParameter::Unannotated(undecorated_idx, target, name.id.clone()),
             })),
         );
         self.scopes.add_parameter_to_current_static(name, annot);

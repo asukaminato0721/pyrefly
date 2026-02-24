@@ -816,26 +816,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 );
                 (param_ty, required, false)
             }
-            FunctionParameter::Unannotated(var, _, _, _) => {
+            FunctionParameter::Unannotated(_, _, _) => {
                 let required = self.get_requiredness(default, None, stub_or_impl, errors);
-                // If this is the first parameter and there is a self type, solve to `Self`.
-                // We only try to solve the first param for now. Other unannotated params
-                // are also Var. If a default value of type T is provided, it will resolve to Any | T.
-                // Otherwise, it will be forced to Any
-                if let Some(ty) = self_type {
-                    self.solver().solve_parameter(*var, ty);
+                // If this is the first parameter and there is a self type, resolve to `Self`.
+                // We only try to resolve the first param for now. Other unannotated params
+                // resolve to Any. If a default value of type T is provided, it will resolve to Any | T.
+                // Otherwise, it will be Any.
+                let ty = if let Some(ty) = self_type {
+                    ty.clone()
                 } else if let Some(hint) = hint {
-                    self.solver().solve_parameter(*var, hint);
+                    hint.clone()
                 } else if let Required::Optional(Some(default_ty)) = &required {
-                    self.solver().solve_parameter(
-                        *var,
-                        self.union(
-                            self.heap.mk_any_implicit(),
-                            default_ty.clone().promote_implicit_literals(self.stdlib),
-                        ),
-                    );
-                }
-                (self.solver().force_var(*var), required, true)
+                    self.union(
+                        self.heap.mk_any_implicit(),
+                        default_ty.clone().promote_implicit_literals(self.stdlib),
+                    )
+                } else {
+                    self.heap.mk_any_implicit()
+                };
+                (ty, required, true)
             }
         };
         if let Required::Optional(Some(default)) = required {
