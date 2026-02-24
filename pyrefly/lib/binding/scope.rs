@@ -390,13 +390,13 @@ impl Static {
         let mut all_wildcards = Vec::with_capacity(d.import_all.len());
         for (m, range) in d.import_all {
             if let Some(wildcards) = lookup.get_wildcard(m) {
-                all_wildcards.push((range, wildcards))
+                all_wildcards.push((m, range, wildcards))
             }
         }
 
         // Try and avoid rehashing while we insert, with a little bit of spare space
         let capacity_guess =
-            d.definitions.len() + all_wildcards.iter().map(|x| x.1.len()).sum::<usize>();
+            d.definitions.len() + all_wildcards.iter().map(|x| x.2.len()).sum::<usize>();
         self.0.reserve(((capacity_guess * 5) / 4) + 25);
 
         for (name, definition) in d.definitions.into_iter_hashed() {
@@ -407,9 +407,15 @@ impl Static {
                 StaticStyle::of_definition(name.as_ref(), definition, scopes, get_annotation_idx);
             self.upsert(name, range, style);
         }
-        for (range, wildcard) in all_wildcards {
+        for (module, range, wildcard) in all_wildcards {
+            // Builtins are a fallback, so they should never shadow an existing definition.
+            let skip_existing =
+                module == ModuleName::builtins() || module == ModuleName::extra_builtins();
             for name in wildcard.iter_hashed() {
                 // TODO: semantics of import * and global var with same name
+                if skip_existing && self.0.get_hashed(name).is_some() {
+                    continue;
+                }
                 self.upsert(name.cloned(), range, StaticStyle::MergeableImport)
             }
         }

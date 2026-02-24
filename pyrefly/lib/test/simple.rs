@@ -197,6 +197,21 @@ assert_type(y, Literal[1])
 );
 
 testcase!(
+    test_shadow_builtin_zip,
+    r#"
+from typing import assert_type, Iterator
+
+def zip(*args) -> list[int]:
+    return []
+
+def f(a: list[int], b: list[int]):
+    return reversed(zip(a, b))
+
+assert_type(f([1], [2]), Iterator[int])
+"#,
+);
+
+testcase!(
     test_unordered_defs,
     r#"
 def f() -> int:
