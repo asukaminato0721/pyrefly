@@ -3712,14 +3712,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         finalize(&annotation.target, self.heap.mk_any_implicit())
                     })
             }
-            FunctionParameter::Unannotated(var, function_idx, target, _param_name) => {
-                // It's important that we force the undecorated function binding before reading
-                // from this var. Solving the undecorated function binding pins the type of the var,
-                // either to a concrete type or to any. Without this we can have non-determinism
-                // where the reader can observe an unresolved var or a resolved type, depending on
-                // the order of solved bindings.
-                self.get_idx(*function_idx);
-                let ty = self.solver().force_var(*var);
+            FunctionParameter::Unannotated(var, function_idx, target, param_name) => {
+                // Get the resolved UndecoratedFunction - this ensures the function has been solved
+                // and resolved_param_types has been populated.
+                let undecorated = self.get_idx(*function_idx);
+                // Look up the type from resolved_param_types. This should always succeed since
+                // we populate it for all unannotated parameters during function solving.
+                let ty = undecorated
+                    .resolved_param_types
+                    .get(param_name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Fallback to force_var for safety, though this should never happen
+                        self.solver().force_var(*var)
+                    });
+                // Keep the force_var call to ensure the Var is still resolved (will be removed
+                // in a later commit when we eliminate Variable::Parameter entirely)
+                self.solver().force_var(*var);
                 finalize(target, ty)
             }
         }
