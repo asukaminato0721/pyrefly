@@ -14,6 +14,11 @@
 //! Currently this is a pass-through factory that returns boxed types, allowing
 //! incremental migration of construction sites before switching to arena allocation.
 
+use std::sync::LazyLock;
+
+use pyrefly_util::uniques::Unique;
+use pyrefly_util::uniques::UniqueFactory;
+
 use crate::callable::Callable;
 use crate::callable::Function;
 use crate::callable::Param;
@@ -42,16 +47,29 @@ use crate::types::SuperObj;
 use crate::types::Type;
 use crate::types::Union;
 
+/// Global factory for producing unique heap identifiers.
+static HEAP_UNIQUE_FACTORY: LazyLock<UniqueFactory> = LazyLock::new(UniqueFactory::new);
+
 /// A factory for constructing types.
 ///
 /// Currently returns boxed types; will be backed by an arena in the future.
+/// Each TypeHeap has a unique identifier for debugging and tracking purposes.
 #[derive(Debug)]
-pub struct TypeHeap(());
+pub struct TypeHeap {
+    unique: Unique,
+}
 
 impl TypeHeap {
-    /// Create a new type heap.
+    /// Create a new type heap with a unique identifier.
     pub fn new() -> Self {
-        Self(())
+        Self {
+            unique: HEAP_UNIQUE_FACTORY.fresh(),
+        }
+    }
+
+    /// Get the unique identifier for this heap.
+    pub fn unique(&self) -> Unique {
+        self.unique
     }
 
     /// Allocate a type in the heap.
