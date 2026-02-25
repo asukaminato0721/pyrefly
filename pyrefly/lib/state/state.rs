@@ -137,8 +137,6 @@ enum ChangedExports {
     NoChange,
     /// Specific exports changed (either names or class indices)
     Changed(SmallSet<ChangedExport>),
-    /// Invalidate all dependents (too complex to track)
-    InvalidateAll,
 }
 
 /// Tracks fine-grained dependency on a single exported name.
@@ -233,7 +231,6 @@ impl ModuleDeps {
     fn should_invalidate(&self, changed_exports: &ChangedExports) -> bool {
         match changed_exports {
             ChangedExports::NoChange => false,
-            ChangedExports::InvalidateAll => true,
             ChangedExports::Changed(changed) => {
                 // If wildcard is set, invalidate on any change (same as old DependsOn::All)
                 if self.wildcard {
@@ -920,10 +917,15 @@ impl<'a> Transaction<'a> {
                 // Check at both the Exports step (for wildcard set changes) and
                 // the Solutions step (for type changes).
                 let changed_exports: ChangedExports = if todo == Step::Solutions {
-                    let new_solutions = module_data.state.get_solutions();
-                    match (old_data.solutions.as_ref(), new_solutions.as_ref()) {
-                        (Some(old), Some(new)) => {
-                            let changed = old.changed_exports(new);
+                    // Invariant: we just computed Solutions, so new solutions
+                    // is always present at this point.
+                    let new_solutions = module_data
+                        .state
+                        .get_solutions()
+                        .expect("new solutions must exist after computing Solutions");
+                    match old_data.solutions.as_ref() {
+                        Some(old) => {
+                            let changed = old.changed_exports(&new_solutions);
                             if changed.is_empty() {
                                 ChangedExports::NoChange
                             } else {
@@ -935,25 +937,29 @@ impl<'a> Transaction<'a> {
                                 ChangedExports::Changed(changed)
                             }
                         }
-                        (Some(_old), None) => ChangedExports::InvalidateAll, // Had solutions, now don't
-                        (None, _) => ChangedExports::NoChange, // No old solutions = no change to propagate
+                        None => ChangedExports::NoChange, // No old solutions = no change to propagate
                     }
                 } else if todo == Step::Exports {
                     // Check if exports changed at the Exports step.
                     // This detects both wildcard set changes and definition name changes.
                     // Wildcard changes affect `from M import *`.
                     // Name existence changes affect `from M import name`.
-                    let new_exports = module_data.state.get_exports();
-                    match (old_data.exports.as_ref(), new_exports.as_ref()) {
-                        (Some(old), Some(new)) => {
+                    // Invariant: we just computed Exports, so new exports is
+                    // always present at this point.
+                    let new_exports = module_data
+                        .state
+                        .get_exports()
+                        .expect("new exports must exist after computing Exports");
+                    match old_data.exports.as_ref() {
+                        Some(old) => {
                             let mut changed_set: SmallSet<ChangedExport> = SmallSet::new();
                             // Check for definition name changes (added/removed names)
-                            for name in old.changed_names(new) {
+                            for name in old.changed_names(&new_exports) {
                                 changed_set.insert(ChangedExport::NameExistence(name));
                             }
 
                             // Check for metadata changes (is_reexport, implicitly_imported_submodule, deprecation, special_export)
-                            for name in old.changed_metadata_names(new) {
+                            for name in old.changed_metadata_names(&new_exports) {
                                 changed_set.insert(ChangedExport::Metadata(name));
                             }
 
@@ -968,8 +974,7 @@ impl<'a> Transaction<'a> {
                                 ChangedExports::Changed(changed_set)
                             }
                         }
-                        (Some(_), None) => ChangedExports::InvalidateAll,
-                        (None, _) => ChangedExports::NoChange,
+                        None => ChangedExports::NoChange,
                     }
                 } else {
                     ChangedExports::NoChange
@@ -1464,25 +1469,12 @@ impl<'a> Transaction<'a> {
             // a mutable dependency cycle (e.g., A depends on B depends on A, and exports
             // keep oscillating).
             let has_cycle = changed.iter().any(|(module, changed_exports)| {
-                match seen_exports.get(module) {
-                    None | Some(ChangedExports::NoChange) => false,
-                    Some(ChangedExports::InvalidateAll) => {
-                        // We previously saw InvalidateAll, so any new change is dominated
-                        true
-                    }
-                    Some(ChangedExports::Changed(seen_names)) => {
-                        // Check if the new changes overlap with previously seen exports
-                        match changed_exports {
-                            ChangedExports::InvalidateAll => {
-                                // InvalidateAll dominates any previous specific names
-                                !seen_names.is_empty()
-                            }
-                            ChangedExports::Changed(new_names) => {
-                                new_names.iter().any(|n| seen_names.contains(n))
-                            }
-                            ChangedExports::NoChange => false,
-                        }
-                    }
+                match (seen_exports.get(module), changed_exports) {
+                    (
+                        Some(ChangedExports::Changed(seen_names)),
+                        ChangedExports::Changed(new_names),
+                    ) => new_names.iter().any(|n| seen_names.contains(n)),
+                    _ => false,
                 }
             });
 
@@ -1505,14 +1497,7 @@ impl<'a> Transaction<'a> {
                         e.insert(changed_exports.clone());
                     }
                     starlark_map::small_map::Entry::Occupied(mut e) => {
-                        let existing = e.get_mut();
-                        match (existing, changed_exports) {
-                            (ChangedExports::InvalidateAll, _) => {
-                                // Already tracking all, nothing to do
-                            }
-                            (existing, ChangedExports::InvalidateAll) => {
-                                *existing = ChangedExports::InvalidateAll;
-                            }
+                        match (e.get_mut(), changed_exports) {
                             (ChangedExports::NoChange, new) => {
                                 *e.get_mut() = new.clone();
                             }
