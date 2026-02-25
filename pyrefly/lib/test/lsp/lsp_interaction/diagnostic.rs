@@ -1493,6 +1493,65 @@ fn test_untyped_import_diagnostic_does_not_show_non_recommended_packages() {
     interaction.shutdown().unwrap();
 }
 
+/// Test that cross-file diagnostics are produced even when indexing is disabled.
+/// Because dependencies are lazily computed, and do not necessarily reach Step::Solutions,
+/// when a dependency is changed, we need to invalidate based on the difference between
+/// the old Step::Answers data and the new Step::Solutions data.
+///
+/// Because background indexing computes project files to Step::Solutions, this test
+/// requires indexing to be disabled, to ensure the initial dependency state is Step::Answers.
+#[test]
+fn test_cross_file_diagnostic_no_indexing() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("cross_file_method_change");
+    // Indexing must be disabled to reproduce.
+    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::None);
+    interaction.set_root(root_path.clone());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+    let foo_path = root_path.join("foo.py");
+    let bar_path = root_path.join("bar.py");
+    let foo_contents = std::fs::read_to_string(&foo_path).unwrap();
+
+    // Open both files and verify initial empty diagnostics
+    interaction.client.did_open("foo.py");
+    interaction
+        .client
+        .diagnostic("foo.py")
+        .expect_response(json!({"items": [], "kind": "full"}))
+        .expect("Failed to receive initial diagnostics for foo");
+
+    interaction.client.did_open("bar.py");
+    interaction
+        .client
+        .diagnostic("bar.py")
+        .expect_response(json!({"items": [], "kind": "full"}))
+        .expect("Failed to receive initial diagnostics for bar");
+
+    // Change foo.py: is_skipped now takes str instead of Path.
+    let new_foo_contents = foo_contents.replace("path: Path", "path: str");
+    interaction.client.did_change("foo.py", &new_foo_contents);
+    std::fs::write(&foo_path, &new_foo_contents).unwrap();
+    interaction.client.did_save("foo.py");
+
+    // bar.py should now have a diagnostic because it passes Path("test") where str is expected.
+    // The server pushes publishDiagnostics after the recheck. We use "eventual" here because
+    // an intermediate 0-error notification may arrive if the did_change is processed before
+    // the did_save triggers the full disk-based recheck.
+    interaction
+        .client
+        .expect_publish_diagnostics_eventual_error_count(bar_path.clone(), 1)
+        .expect("Failed to receive cross-file diagnostic for bar after foo signature change");
+
+    interaction.shutdown().unwrap();
+}
+
 #[test]
 fn test_untyped_import_diagnostic_shows_error_for_recommended_packages() {
     let test_files_root = get_test_files_root();

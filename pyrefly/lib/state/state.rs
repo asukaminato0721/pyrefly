@@ -1038,10 +1038,11 @@ impl<'a> Transaction<'a> {
                 if todo == Step::Solutions {
                     // Take old data saved during reset_for_rebuild (swap clears slot).
                     let old_exports = guard.take_old_exports();
+                    let old_answers = guard.take_old_answers();
                     let old_solutions = guard.take_old_solutions();
 
                     // Exports diffing: compare old vs new exports.
-                    if let Some(old_exp) = old_exports.as_ref() {
+                    if let Some(old_exp) = old_exports {
                         let new_exports = module_data
                             .state
                             .get_exports()
@@ -1050,12 +1051,21 @@ impl<'a> Transaction<'a> {
                     }
 
                     // Solutions diffing: compare old vs new solutions.
-                    if let Some(old_sol) = old_solutions.as_ref() {
-                        let new_solutions = module_data
-                            .state
-                            .get_solutions()
-                            .expect("solutions must exist after computing Solutions");
+                    let new_solutions = module_data
+                        .state
+                        .get_solutions()
+                        .expect("solutions must exist after computing Solutions");
+                    if let Some(old_sol) = old_solutions {
                         old_sol.changed_exports(&new_solutions, &mut changed);
+                    } else if let Some(old_ans) = old_answers {
+                        // Old solutions were None but old exports existed — module
+                        // was previously computed to Answers but not Solutions.
+                        // Diff new solutions against old answers.
+                        new_solutions.changed_exports_vs_answers(
+                            &old_ans.0,
+                            &old_ans.1,
+                            &mut changed,
+                        );
                     }
                 }
                 if !changed.is_empty() {

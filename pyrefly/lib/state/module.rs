@@ -264,7 +264,6 @@ impl ComputeGuard<'_> {
     }
 
     /// Take old answers saved before rebuild for diffing. Clears the slot.
-    #[allow(dead_code)]
     pub fn take_old_answers(&self) -> Option<Arc<(Bindings, Arc<Answers>)>> {
         self.state.steps.old_answers.swap(None)
     }

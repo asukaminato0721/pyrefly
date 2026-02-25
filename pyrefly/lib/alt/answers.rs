@@ -412,6 +412,67 @@ impl Solutions {
         });
     }
 
+    /// Record exports that changed between new solutions (self) and old answers
+    /// (bindings + answers) into `changed`. This is used when the old solutions
+    /// were None but old answers exist — e.g., the module was previously only
+    /// computed up to Answers and is now computed to Solutions for the first time.
+    ///
+    /// If a calculation in old answers was never forced, we skip it — nothing
+    /// could have depended on it, so there's no change to propagate.
+    pub fn changed_exports_vs_answers(
+        &self,
+        old_bindings: &Bindings,
+        old_answers: &Answers,
+        changed: &mut ModuleChanges,
+    ) {
+        fn check_table_vs_answers<K: Keyed>(
+            new_solutions: &SolutionsEntry<K>,
+            old_bindings: &Bindings,
+            old_answers: &Answers,
+            ctx: &mut TypeEqCtx,
+            changed: &mut ModuleChanges,
+        ) where
+            SolutionsTable: TableKeyed<K, Value = SolutionsEntry<K>>,
+            BindingTable: TableKeyed<K, Value = BindingEntry<K>>,
+            AnswerTable: TableKeyed<K, Value = AnswerEntry<K>>,
+        {
+            if !K::EXPORTED {
+                return;
+            }
+
+            for (k, new_val) in new_solutions {
+                let Some(anykey) = k.try_to_anykey() else {
+                    continue;
+                };
+                let hashed_k = Hashed::new(k);
+                match old_bindings.key_to_idx_hashed_opt::<K>(hashed_k) {
+                    Some(idx) => {
+                        // Key existed in old answers — compare values.
+                        match old_answers.get_idx::<K>(idx) {
+                            Some(old_val) if !old_val.type_eq(new_val, ctx) => {
+                                changed.add_key(anykey);
+                            }
+                            // None means the old answer was never computed, so
+                            // no downstream module ever depended on this value.
+                            // No change to propagate.
+                            _ => {}
+                        }
+                    }
+                    None => {
+                        // Key didn't exist in old bindings — new export, treat as changed.
+                        changed.add_key_existence(anykey);
+                    }
+                }
+            }
+        }
+
+        let mut ctx = TypeEqCtx::default();
+
+        table_for_each!(self.table, |x| {
+            check_table_vs_answers(x, old_bindings, old_answers, &mut ctx, changed);
+        });
+    }
+
     pub fn get_index(&self) -> Option<Arc<Mutex<Index>>> {
         let index = self.index.as_ref()?;
         Some(index.dupe())
