@@ -4944,30 +4944,7 @@
       "stop_line": 14
     }
   ],
-  "directives_version_platform.py": [
-    {
-      "code": -2,
-      "column": 17,
-      "concise_description": "`Literal['']` is not assignable to `int`",
-      "description": "`Literal['']` is not assignable to `int`",
-      "line": 40,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 19,
-      "stop_line": 40
-    },
-    {
-      "code": -2,
-      "column": 17,
-      "concise_description": "`Literal['']` is not assignable to `int`",
-      "description": "`Literal['']` is not assignable to `int`",
-      "line": 45,
-      "name": "bad-assignment",
-      "severity": "error",
-      "stop_column": 19,
-      "stop_line": 45
-    }
-  ],
+  "directives_version_platform.py": [],
   "enums_behaviors.py": [
     {
       "code": -2,
