@@ -7299,3 +7299,38 @@ def foo(data: str):
         )]
     }
 );
+
+call_graph_testcase!(
+    test_attribute_callable,
+    TEST_MODULE_NAME,
+    r#"
+from typing import Optional
+import weakref
+
+class A:
+    def __init__(self, x: Optional[weakref.ReferenceType[str]]):
+        self.x: Optional[weakref.ReferenceType[str]] = x
+"#,
+    &|context: &ModuleContext| {
+        let weakref_call_target = vec![
+            create_call_target("weakref.ReferenceType.__call__", TargetType::AllOverrides)
+                .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                .with_implicit_dunder_call(true)
+                .with_receiver_class_for_test("weakref.ReferenceType", context),
+        ];
+        vec![(
+            "test.A.__init__",
+            vec![
+                (
+                    "7:9-7:15",
+                    // TODO(T225700656): This should have is_attribute = true
+                    attribute_access_callable_callees(weakref_call_target.clone()),
+                ),
+                (
+                    "7:56-7:57|identifier|x",
+                    regular_identifier_callees(weakref_call_target),
+                ),
+            ],
+        )]
+    }
+);
