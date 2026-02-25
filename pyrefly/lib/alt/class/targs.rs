@@ -753,7 +753,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         tparams
             .iter()
             .skip(param_idx)
-            .map(|x| self.get_tparam_default(x, checked_targs, name_to_idx))
+            .map(|x| {
+                // A TypeVarTuple with no remaining args captures zero types when
+                // the specialization is otherwise valid. In error recovery (not
+                // enough args for non-defaulted params), keep the gradual type
+                // to avoid cascading errors.
+                if all_remaining_params_can_be_empty && x.is_type_var_tuple() {
+                    self.heap.mk_concrete_tuple(Vec::new())
+                } else {
+                    self.get_tparam_default(x, checked_targs, name_to_idx)
+                }
+            })
             .collect()
     }
 }

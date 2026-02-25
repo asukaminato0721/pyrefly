@@ -344,7 +344,6 @@ func2((0,), (0.0,))  # E: Argument `tuple[float]` is not assignable to parameter
 );
 
 testcase!(
-    bug = "conformance: TypeVarTuple specialized with empty tuple should simplify correctly",
     test_typevartuple_specialization_empty,
     r#"
 from typing import TypeVarTuple, assert_type
@@ -354,12 +353,11 @@ Ts = TypeVarTuple("Ts")
 IntTuple = tuple[int, *Ts]
 
 def func4(a: IntTuple[()]):
-    assert_type(a, tuple[int])  # E: assert_type(tuple[int, *tuple[Any, ...]], tuple[int]) failed
+    assert_type(a, tuple[int])
 "#,
 );
 
 testcase!(
-    bug = "conformance: TypeVarTuple generic alias with single type arg should simplify correctly",
     test_typevartuple_specialization_single_arg,
     r#"
 from typing import TypeVar, TypeVarTuple, assert_type
@@ -370,7 +368,7 @@ Ts = TypeVarTuple("Ts")
 VariadicTuple = tuple[T, *Ts]
 
 def func6(b: VariadicTuple[float]):
-    assert_type(b, tuple[float])  # E: assert_type(tuple[float, *tuple[Any, ...]], tuple[float]) failed
+    assert_type(b, tuple[float])
 "#,
 );
 

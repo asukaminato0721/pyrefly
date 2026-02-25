@@ -132,9 +132,7 @@
   "generics_typevartuple_concat.py": [],
   "generics_typevartuple_overloads.py": [],
   "generics_typevartuple_specialization.py": [
-    "Line 110: Expected 1 errors",
-    "Line 51: Unexpected errors ['assert_type(tuple[int, *tuple[Any, ...]], tuple[int]) failed']",
-    "Line 94: Unexpected errors ['assert_type(tuple[float, *tuple[Any, ...]], tuple[float]) failed']"
+    "Line 110: Expected 1 errors"
   ],
   "generics_typevartuple_unpack.py": [],
   "generics_upper_bound.py": [],
