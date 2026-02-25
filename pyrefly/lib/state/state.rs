@@ -42,7 +42,6 @@ use pyrefly_util::lock::RwLock;
 use pyrefly_util::locked_map::LockedMap;
 use pyrefly_util::no_hash::BuildNoHash;
 use pyrefly_util::prelude::VecExt;
-use pyrefly_util::small_map1::SmallMap1;
 use pyrefly_util::task_heap::CancellationHandle;
 use pyrefly_util::task_heap::Cancelled;
 use pyrefly_util::task_heap::TaskHeap;
@@ -101,8 +100,6 @@ use crate::state::epoch::Epoch;
 use crate::state::errors::Errors;
 use crate::state::load::FileContents;
 use crate::state::load::Load;
-use crate::state::loader::FindError;
-use crate::state::loader::Finding;
 use crate::state::loader::FindingOrError;
 use crate::state::loader::LoaderFindCache;
 use crate::state::memory::MemoryFiles;
@@ -310,17 +307,6 @@ impl AnyExportedKey {
     }
 }
 
-/// Represents a resolved or failed import.
-#[derive(Debug, Clone)]
-enum ImportResolution {
-    /// Successfully resolved import - maps module name to handle(s) with optional dependency tracking.
-    /// `None` means the import was resolved for caching only (used during Exports phase).
-    /// `Some(ModuleDep)` means the import is tracked for fine-grained invalidation (used during Solutions phase).
-    Resolved(SmallMap1<Handle, ModuleDep>),
-    /// Failed import - stores the error for incremental invalidation.
-    Failed(FindError),
-}
-
 /// `ModuleData` is a snapshot of `ArcId<ModuleDataMut>` in the main state.
 /// The snapshot is readonly most of the times. It will only be overwritten with updated information
 /// from `Transaction` when we decide to commit a `Transaction` into the main state.
@@ -329,9 +315,8 @@ struct ModuleData {
     handle: Handle,
     config: ArcId<ConfigFile>,
     state: ModuleState,
-    /// The dependencies of this module, including both resolved and failed imports.
-    /// Most modules exist in exactly one place, but it can be possible to load the same module multiple times with different paths.
-    deps: HashMap<ModuleName, ImportResolution, BuildNoHash>,
+    imports: HashMap<ModuleName, FindingOrError<ModulePath>, BuildNoHash>,
+    deps: HashMap<Handle, ModuleDep>,
     rdeps: HashSet<Handle>,
 }
 
@@ -340,13 +325,13 @@ struct ModuleDataMut {
     handle: Handle,
     config: RwLock<ArcId<ConfigFile>>,
     state: ModuleStateMut,
-    /// The dependencies of this module, including both resolved and failed imports.
-    /// Invariant: If `h1` depends on `h2` then we must have both of:
-    /// data[h1].deps[h2.module] == ImportResolution::Resolved(set) where set.contains(h2)
-    /// data[h2].rdeps.contains(h1)
-    ///
-    /// To ensure that is atomic, we always modify the rdeps while holding the deps write lock.
-    deps: RwLock<HashMap<ModuleName, ImportResolution, BuildNoHash>>,
+    /// Import resolution cache: module names from import statements → resolved paths.
+    /// Only contains deps that were resolved via `find_import`.
+    imports: RwLock<HashMap<ModuleName, FindingOrError<ModulePath>, BuildNoHash>>,
+    /// All forward dependencies keyed by Handle.
+    /// Invariant: If deps contains h2, then h2.rdeps.contains(self.handle).
+    /// To ensure atomicity, rdeps is modified while holding the deps write lock.
+    deps: RwLock<HashMap<Handle, ModuleDep>>,
     /// The reverse dependencies of this module. This is used to invalidate on change.
     /// Note that if we are only running once, e.g. on the command line, this isn't valuable.
     /// But we create it anyway for simplicity, since it doesn't seem to add much overhead.
@@ -360,6 +345,7 @@ impl ModuleData {
             handle: self.handle.dupe(),
             config: RwLock::new(self.config.dupe()),
             state: self.state.clone_for_mutation(),
+            imports: RwLock::new(self.imports.clone()),
             deps: RwLock::new(self.deps.clone()),
             rdeps: Mutex::new(self.rdeps.clone()),
         }
@@ -372,6 +358,7 @@ impl ModuleDataMut {
             handle,
             config: RwLock::new(config),
             state: ModuleStateMut::new(require, now),
+            imports: Default::default(),
             deps: Default::default(),
             rdeps: Default::default(),
         }
@@ -384,9 +371,11 @@ impl ModuleDataMut {
             handle,
             config,
             state,
+            imports,
             deps,
             rdeps,
         } = self;
+        let imports = mem::take(&mut *imports.write());
         let deps = mem::take(&mut *deps.write());
         let rdeps = mem::take(&mut *rdeps.lock());
         let state = state.take_and_freeze();
@@ -394,28 +383,16 @@ impl ModuleDataMut {
             handle: handle.dupe(),
             config: config.read().dupe(),
             state,
+            imports,
             deps,
             rdeps,
         }
     }
 
     /// Look up how this module depends on a specific source handle.
-    /// Returns the `ModuleDep` if this module imports from `source_handle`, or `None` if not found.
-    fn get_depends_on(
-        &self,
-        source_module: ModuleName,
-        source_handle: &Handle,
-    ) -> Option<ModuleDep> {
-        let deps_guard = self.deps.read();
-        deps_guard
-            .get(&source_module)
-            .and_then(|resolution| match resolution {
-                ImportResolution::Resolved(handles_map) => handles_map
-                    .into_iter()
-                    .find(|(h, _)| *h == source_handle)
-                    .map(|(_, d)| d.clone()),
-                ImportResolution::Failed(_) => None,
-            })
+    /// Returns the `ModuleDep` if this module depends on `source_handle`, or `None` if not found.
+    fn get_depends_on(&self, source_handle: &Handle) -> Option<ModuleDep> {
+        self.deps.read().get(source_handle).cloned()
     }
 }
 
@@ -793,30 +770,27 @@ impl<'a> Transaction<'a> {
 
         let dirty = guard.take_dirty();
 
-        // Helper: rebuild and clear deps/rdeps.
+        // Helper: rebuild and clear imports/deps/rdeps.
         let rebuild = |clear_ast: bool| {
             if let Some(subscriber) = &self.data.subscriber {
                 subscriber.start_work(&module_data.handle);
             }
+            let mut imports_lock = module_data.imports.write();
             let mut deps_lock = module_data.deps.write();
+            let _imports = mem::take(&mut *imports_lock);
             let deps = mem::take(&mut *deps_lock);
             guard.rebuild(clear_ast, self.data.now);
-            if !deps.is_empty() {
-                for resolution in deps.values() {
-                    if let ImportResolution::Resolved(handles_map) = resolution {
-                        for (dep_handle, _depends_on) in handles_map {
-                            let removed = self
-                                .get_module(dep_handle)
-                                .rdeps
-                                .lock()
-                                .remove(&module_data.handle);
-                            assert!(removed);
-                        }
-                    }
-                }
+            for dep_handle in deps.keys() {
+                let removed = self
+                    .get_module(dep_handle)
+                    .rdeps
+                    .lock()
+                    .remove(&module_data.handle);
+                assert!(removed);
             }
-            // Make sure we hold deps write lock while mutating rdeps
+            // Hold both locks until after rdeps are updated
             drop(deps_lock);
+            drop(imports_lock);
         };
 
         if dirty.require() {
@@ -878,41 +852,13 @@ impl<'a> Transaction<'a> {
             let loader = self.get_cached_loader(&module_data.config.read());
             let mut is_dirty = false;
 
-            // Check dependencies for changes
-            for (module_name, resolution) in module_data.deps.read().iter() {
-                match resolution {
-                    ImportResolution::Resolved(handles) => {
-                        // Check if any of the resolved imports have changed
-                        for (dependency_handle, _) in handles {
-                            match loader.find_import(
-                                dependency_handle.module(),
-                                Some(module_data.handle.path()),
-                            ) {
-                                FindingOrError::Finding(path)
-                                    if &path.finding == dependency_handle.path() => {}
-                                _ => {
-                                    is_dirty = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    ImportResolution::Failed(import_failure) => {
-                        // Check if failed imports now succeed or have different errors
-                        match loader.find_import(*module_name, Some(module_data.handle.path())) {
-                            // If we can now resolve an import, we need to rebuild
-                            FindingOrError::Finding(_) => {
-                                is_dirty = true;
-                            }
-                            // If the error changes, we need to rebuild
-                            FindingOrError::Error(error) if error != *import_failure => {
-                                is_dirty = true;
-                            }
-                            FindingOrError::Error(_) => {}
-                        }
-                    }
-                }
-                if is_dirty {
+            // Only check imports (not all deps), since only import-statement deps
+            // need `find_import` re-validation. The cached value is the same type
+            // returned by `find_import`, so we just compare for equality.
+            for (module_name, cached) in module_data.imports.read().iter() {
+                let fresh = loader.find_import(*module_name, Some(module_data.handle.path()));
+                if *cached != fresh {
+                    is_dirty = true;
                     break;
                 }
             }
@@ -1097,11 +1043,10 @@ impl<'a> Transaction<'a> {
                     let mut dirtied = Vec::new();
                     // We clone so we drop the lock immediately
                     let rdeps: Vec<Handle> = module_data.rdeps.lock().iter().cloned().collect();
-                    let our_module = module_data.handle.module();
                     for rdep_handle in rdeps.iter() {
                         let rdep_module = self.get_module(rdep_handle);
                         let should_invalidate = rdep_module
-                            .get_depends_on(our_module, &module_data.handle)
+                            .get_depends_on(&module_data.handle)
                             .is_none_or(|d| d.should_invalidate(&changed_exports));
                         if !should_invalidate {
                             continue;
@@ -1962,13 +1907,7 @@ impl<'a> Transaction<'a> {
                     .deps
                     .read()
                     .iter()
-                    .flat_map(|(_, resolution)| match resolution {
-                        ImportResolution::Resolved(map) => map
-                            .iter_keys()
-                            .filter_map(|h| included.get(&h.module()).cloned())
-                            .collect(),
-                        ImportResolution::Failed(_) => Vec::new(),
-                    })
+                    .flat_map(|(h, _)| included.get(&h.module()).cloned())
                     .collect();
                 graph.push((entry_path.clone(), deps));
             }
@@ -2005,111 +1944,58 @@ impl<'a> TransactionHandle<'a> {
         path: Option<&ModulePath>,
         dep: ModuleDep,
     ) -> FindingOrError<ArcId<ModuleDataMut>> {
-        let cached = {
-            let deps_read = self.module_data.deps.read();
-            if let Some(ImportResolution::Resolved(handles)) = deps_read.get(&module)
-                && path.is_none_or(|path| path == handles.first().0.path())
-            {
-                Some(handles.first().0.dupe())
-            } else {
-                None
+        let handle = match path {
+            Some(path) => {
+                // Explicit path — already resolved. Bypass imports entirely.
+                FindingOrError::new_finding(Handle::new(
+                    module,
+                    path.dupe(),
+                    self.module_data.handle.sys_info().dupe(),
+                ))
+            }
+            None => {
+                // No path — needs find_import. Check imports cache first.
+                let imports_read = self.module_data.imports.read();
+                let path = match imports_read.get(&module) {
+                    Some(path) => path.dupe(),
+                    None => {
+                        drop(imports_read);
+                        let finding = self
+                            .transaction
+                            .get_cached_loader(&self.module_data.config.read())
+                            .find_import(module, Some(self.module_data.handle.path()));
+                        self.module_data
+                            .imports
+                            .write()
+                            .insert(module, finding.dupe());
+                        finding
+                    }
+                };
+                path.map(|path| {
+                    Handle::new(
+                        module,
+                        path.dupe(),
+                        self.module_data.handle.sys_info().dupe(),
+                    )
+                })
             }
         };
 
-        if let Some(handle) = cached {
-            // Only acquire write lock if we actually have new dependencies to add.
-            // This avoids lock contention on the hot path when the same import is
-            // looked up repeatedly with no new dependency information.
-            // First check with read lock if merge is needed
-            let needs_merge = {
-                let deps_read = self.module_data.deps.read();
-                if let Some(ImportResolution::Resolved(handles)) = deps_read.get(&module)
-                    && let Some(_existing) = handles.get(&handle)
-                {
-                    // Check if dep has any dependencies that aren't already tracked
-                    !dep.names.is_empty()
-                        || dep.wildcard
-                        || !dep.classes.is_empty()
-                        || !dep.type_aliases.is_empty()
-                } else {
-                    true
+        handle.map(|handle| {
+            let res = self.transaction.get_imported_module(&handle);
+            let mut deps = self.module_data.deps.write();
+            match deps.entry(handle) {
+                Entry::Occupied(mut e) => {
+                    e.get_mut().merge_in_place(dep);
                 }
-            };
-            if needs_merge {
-                let mut write = self.module_data.deps.write();
-                if let Some(ImportResolution::Resolved(handles)) = write.get_mut(&module)
-                    && let Some(existing) = handles.get_mut(&handle)
-                {
-                    existing.merge_in_place(dep);
-                }
-            }
-            return FindingOrError::new_finding(self.transaction.get_imported_module(&handle));
-        }
-
-        let handle = self
-            .transaction
-            .import_handle(&self.module_data.handle, module, path);
-
-        match handle {
-            FindingOrError::Finding(finding) => {
-                let handle = finding.finding;
-                let error = finding.error;
-                let res = self.transaction.get_imported_module(&handle);
-
-                let mut write = self.module_data.deps.write();
-                let did_insert = match write.entry(module) {
-                    Entry::Vacant(e) => {
-                        e.insert(ImportResolution::Resolved(SmallMap1::new(
-                            handle,
-                            dep.clone(),
-                        )));
-                        true
-                    }
-                    Entry::Occupied(mut e) => {
-                        match e.get_mut() {
-                            ImportResolution::Resolved(handles) => {
-                                if let Some(existing) = handles.get_mut(&handle) {
-                                    existing.merge_in_place(dep);
-                                    false
-                                } else {
-                                    handles.insert(handle, dep.clone());
-                                    true
-                                }
-                            }
-                            ImportResolution::Failed(_) => {
-                                // A prior lookup (without explicit path) failed, but this lookup
-                                // (with explicit path) succeeded. This can happen when an import
-                                // is first resolved via search paths (fails) and later via an
-                                // explicit path (e.g., from bundled typeshed). Upgrade to Resolved.
-                                e.insert(ImportResolution::Resolved(SmallMap1::new(
-                                    handle,
-                                    dep.clone(),
-                                )));
-                                true
-                            }
-                        }
-                    }
-                };
-                if did_insert {
+                Entry::Vacant(e) => {
+                    e.insert(dep);
                     let inserted = res.rdeps.lock().insert(self.module_data.handle.dupe());
                     assert!(inserted);
                 }
-                // Make sure we hold the deps write lock until after we insert into rdeps.
-                drop(write);
-                FindingOrError::Finding(Finding {
-                    finding: res,
-                    error,
-                })
             }
-            FindingOrError::Error(err) => {
-                // Store the failed import so we can retry it when the config changes
-                self.module_data
-                    .deps
-                    .write()
-                    .insert(module, ImportResolution::Failed(err.dupe()));
-                FindingOrError::Error(err)
-            }
-        }
+            res
+        })
     }
 
     /// Helper to get exports for a module with the correct lookup context.
