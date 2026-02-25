@@ -120,7 +120,6 @@ use crate::state::require::Require;
 use crate::state::require::RequireLevels;
 use crate::state::steps::Context;
 use crate::state::steps::Step;
-use crate::state::steps::Steps;
 use crate::state::steps::StepsMut;
 use crate::state::subscriber::Subscriber;
 use crate::types::callable::Deprecation;
@@ -1029,33 +1028,34 @@ impl<'a> Transaction<'a> {
                 recursion_limit_config: config.recursion_limit_config(),
             };
 
-            let mut old_data = Steps::default();
-            guard.compute(todo, &mut old_data, &ctx);
+            guard.compute(todo, &ctx);
             {
                 let mut load_result = None;
                 // Compute which exports changed for fine-grained invalidation.
-                // Check at both the Exports step (for wildcard set changes) and
-                // the Solutions step (for type changes).
+                // All diffing is done at the Solutions step, using old data
+                // saved during reset_for_rebuild().
                 let mut changed = ModuleChanges::default();
                 if todo == Step::Solutions {
-                    // Invariant: we just computed Solutions, so new solutions
-                    // is always present at this point.
-                    let new_solutions = module_data
-                        .state
-                        .get_solutions()
-                        .expect("new solutions must exist after computing Solutions");
-                    if let Some(old) = old_data.solutions.as_ref() {
-                        old.changed_exports(&new_solutions, &mut changed);
+                    // Take old data saved during reset_for_rebuild (swap clears slot).
+                    let old_exports = guard.take_old_exports();
+                    let old_solutions = guard.take_old_solutions();
+
+                    // Exports diffing: compare old vs new exports.
+                    if let Some(old_exp) = old_exports.as_ref() {
+                        let new_exports = module_data
+                            .state
+                            .get_exports()
+                            .expect("exports must exist after computing Solutions");
+                        old_exp.changed_exports(&new_exports, ctx.lookup, &mut changed);
                     }
-                } else if todo == Step::Exports {
-                    // Invariant: we just computed Exports, so new exports is
-                    // always present at this point.
-                    let new_exports = module_data
-                        .state
-                        .get_exports()
-                        .expect("new exports must exist after computing Exports");
-                    if let Some(old) = old_data.exports.as_ref() {
-                        old.changed_exports(&new_exports, ctx.lookup, &mut changed);
+
+                    // Solutions diffing: compare old vs new solutions.
+                    if let Some(old_sol) = old_solutions.as_ref() {
+                        let new_solutions = module_data
+                            .state
+                            .get_solutions()
+                            .expect("solutions must exist after computing Solutions");
+                        old_sol.changed_exports(&new_solutions, &mut changed);
                     }
                 }
                 if !changed.is_empty() {
@@ -1850,10 +1850,9 @@ impl<'a> Transaction<'a> {
                     .strict_callable_subtyping(m.handle.path().as_path()),
                 recursion_limit_config: config.recursion_limit_config(),
             };
-            let mut old = Steps::default();
             while let Some(step) = alt.next_step() {
                 let start = Instant::now();
-                alt.compute(step, &mut old, &ctx);
+                alt.compute(step, &ctx);
                 write(&step, start)?;
                 if step == Step::Exports {
                     let start = Instant::now();
