@@ -1184,6 +1184,44 @@ fn test_publish_diagnostics_version_numbers_only_go_up() {
     interaction.shutdown().unwrap();
 }
 
+/// Verifies that closing a file in the default `openFilesOnly` mode clears its diagnostics.
+/// After `did_close`, the server should publish an empty diagnostics array for that URI.
+/// This serves as a regression control: workspace diagnostics mode will NOT clear on close.
+#[test]
+fn test_did_close_clears_diagnostics_in_open_files_only_mode() {
+    let test_files_root = get_test_files_root();
+    let root = test_files_root.path();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Open a file with a type error and verify diagnostics are published.
+    let file = "type_errors.py";
+    interaction.client.did_open(file);
+    interaction
+        .client
+        .expect_publish_diagnostics_eventual_error_count(root.join(file), 1)
+        .unwrap();
+
+    // Close the file and assert that publishDiagnostics with zero diagnostics is received.
+    // We use `eventual` rather than `must` because in-flight rechecks may produce
+    // intermediate non-empty notifications before the close is fully processed.
+    interaction.client.did_close(file);
+    interaction
+        .client
+        .expect_publish_diagnostics_eventual_error_count(root.join(file), 0)
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
 #[test]
 fn test_missing_source_for_stubs_diagnostic() {
     let test_files_root = get_test_files_root();
