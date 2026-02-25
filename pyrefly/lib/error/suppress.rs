@@ -27,11 +27,13 @@ use tracing::info;
 
 use crate::error::error::Error;
 
-/// Regex to match pyrefly/type ignore comments with optional error codes and trailing semicolon.
-/// Preserves any following comments (e.g., "# pyrefly: ignore [x]; # other" -> "# other").
+/// Regex to match pyrefly/type ignore comments with optional error codes and trailing text.
+/// Consumes all non-`#` characters after the ignore pattern, so trailing comment text is
+/// removed, but a separate `# ...` comment is preserved
+/// (e.g., "# pyrefly: ignore [x] # other" -> "# other").
 static IGNORE_COMMENT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"#\s*pyrefly:\s*ignore\s*(\[[^\]]*\])?\s*;?\s*|#\s*type:\s*ignore\s*(\[[^\]]*\])?\s*;?\s*",
+        r"#\s*pyrefly:\s*ignore\s*(\[[^\]]*\])?\s*(?:;\s*)?[^#]*|#\s*type:\s*ignore\s*(\[[^\]]*\])?\s*(?:;\s*)?[^#]*",
     )
     .unwrap()
 });
@@ -1046,6 +1048,30 @@ a: int = "" # pyrefly: ignore [bad-assignment]
         let input = "def g() -> str:\r\n    return \"hello\" # pyrefly: ignore [bad-return]\r\n";
         let want = "def g() -> str:\r\n    return \"hello\"\r\n";
         assert_remove_ignores(input, want, 1);
+    }
+
+    #[test]
+    fn test_remove_unused_ignore_with_trailing_comment_text() {
+        // Trailing text after the ignore pattern must be consumed, not left behind as bare
+        // code. A separate `# ...` comment should be preserved.
+        // Uses distinct statements to avoid unreachable-code errors from multiple returns.
+        let input = r#"
+def f() -> int:
+    # pyrefly: ignore what I said
+    x = 1
+    # pyrefly: ignore [missing-import] this should also work
+    y = 2
+    # pyrefly: ignore # this should be preserved
+    return x + y
+"#;
+        let want = r#"
+def f() -> int:
+    x = 1
+    y = 2
+    # this should be preserved
+    return x + y
+"#;
+        assert_remove_ignores(input, want, 3);
     }
 
     #[test]
