@@ -1270,4 +1270,188 @@ y = "# pyrefly: ignore [bad-assignment]"
 "##,
         );
     }
+
+    #[test]
+    fn test_suppress_inside_multiline_fstring() {
+        // Bug: suppression comment is placed inside the f-string instead of being
+        // skipped. There is no valid place for a comment inside a multi-line string.
+        let input = r#"
+def foo() -> str:
+    return f"""
+result: {1 + "a"}
+"""
+"#;
+        assert_suppress_errors(
+            input,
+            r#"
+def foo() -> str:
+    return f"""
+# pyrefly: ignore [unsupported-operation]
+result: {1 + "a"}
+"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_inside_multiline_fstring_variable() {
+        // Bug: suppression comment is placed inside the f-string instead of being skipped.
+        let input = r#"
+def bar() -> None:
+    x = f"""
+value: {1 + "a"}
+"""
+"#;
+        assert_suppress_errors(
+            input,
+            r#"
+def bar() -> None:
+    x = f"""
+# pyrefly: ignore [unsupported-operation]
+value: {1 + "a"}
+"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_inside_multiline_fstring_multiple_errors() {
+        // Bug: multiple suppression comments are placed inside the f-string.
+        let input = r#"
+def baz() -> str:
+    return f"""
+a: {1 + "x"}
+b: {1 + "y"}
+"""
+"#;
+        assert_suppress_errors(
+            input,
+            r#"
+def baz() -> str:
+    return f"""
+# pyrefly: ignore [unsupported-operation]
+a: {1 + "x"}
+# pyrefly: ignore [unsupported-operation]
+b: {1 + "y"}
+"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_single_line_triple_quoted_string() {
+        // Error on the same line as the triple-quote opening should work normally.
+        assert_suppress_errors(
+            r#"
+x: int = """hello"""
+"#,
+            r#"
+# pyrefly: ignore [bad-assignment]
+x: int = """hello"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_multiline_fstring_error_on_opening_line() {
+        // Error on the opening line of a multi-line f-string. The suppression
+        // goes above the statement, which is outside the string.
+        assert_suppress_errors(
+            r#"
+def foo() -> str:
+    return f"""{1 + "a"}
+rest
+"""
+"#,
+            r#"
+def foo() -> str:
+    # pyrefly: ignore [unsupported-operation]
+    return f"""{1 + "a"}
+rest
+"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_single_line_triple_quoted_fstring() {
+        // Single-line triple-quoted f-string. The suppress comment goes above
+        // the line, which works correctly.
+        assert_suppress_errors(
+            r#"
+x: str = f"""{1 + "a"}"""
+"#,
+            r#"
+# pyrefly: ignore [unsupported-operation]
+x: str = f"""{1 + "a"}"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_inside_and_outside_multiline_fstring() {
+        // Bug: suppression inside the f-string is placed as string content.
+        // The suppression outside the f-string should work correctly.
+        assert_suppress_errors(
+            r#"
+def foo() -> str:
+    x: int = "not an int"
+    return f"""
+result: {1 + "a"}
+"""
+"#,
+            r#"
+def foo() -> str:
+    # pyrefly: ignore [bad-assignment]
+    x: int = "not an int"
+    return f"""
+# pyrefly: ignore [unsupported-operation]
+result: {1 + "a"}
+"""
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_inside_multiline_fstring_single_quotes() {
+        // Bug: same as double-quote variant — suppression comment is placed
+        // inside the f-string. Tests that the single-quote triple-string
+        // variant is also handled.
+        assert_suppress_errors(
+            r#"
+def foo() -> str:
+    return f'''
+result: {1 + "a"}
+'''
+"#,
+            r#"
+def foo() -> str:
+    return f'''
+# pyrefly: ignore [unsupported-operation]
+result: {1 + "a"}
+'''
+"#,
+        );
+    }
+
+    #[test]
+    fn test_suppress_multiline_fstring_error_on_closing_line() {
+        // Bug: suppression comment is placed inside the f-string, even though
+        // the error is on the closing line.
+        assert_suppress_errors(
+            r#"
+def foo() -> str:
+    return f"""
+text
+result: {1 + "a"}"""
+"#,
+            r#"
+def foo() -> str:
+    return f"""
+text
+# pyrefly: ignore [unsupported-operation]
+result: {1 + "a"}"""
+"#,
+        );
+    }
 }
