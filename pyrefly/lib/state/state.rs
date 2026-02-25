@@ -22,6 +22,7 @@ use std::sync::RwLockReadGuard;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use dupe::Dupe;
 use dupe::OptionDupedExt;
@@ -407,6 +408,7 @@ impl<'a> TransactionData<'a> {
                     state_lock_blocked,
                     ..Default::default()
                 }),
+                ad_hoc_solve_recorder: None,
                 readable,
             })
         } else {
@@ -423,6 +425,10 @@ impl<'a> TransactionData<'a> {
 pub struct Transaction<'a> {
     data: TransactionData<'a>,
     stats: Mutex<TelemetryTransactionStats>,
+    /// Optional callback that logs each ad-hoc solve event the instant it completes.
+    /// When set, each call to `ad_hoc_solve` immediately invokes this recorder with the
+    /// operation label, start time, and duration, rather than batching stats for later.
+    ad_hoc_solve_recorder: Option<Box<dyn Fn(&'static str, Instant, Duration) + Send + Sync + 'a>>,
     readable: RwLockReadGuard<'a, StateData>,
 }
 
@@ -432,6 +438,7 @@ impl<'a> Transaction<'a> {
         let Transaction {
             data,
             stats,
+            ad_hoc_solve_recorder: _,
             readable,
         } = self;
         drop(readable);
@@ -441,6 +448,15 @@ impl<'a> Transaction<'a> {
 
     pub fn set_subscriber(&mut self, subscriber: Option<Box<dyn Subscriber>>) {
         self.data.subscriber = subscriber;
+    }
+
+    /// Sets a callback that will be invoked immediately each time an ad-hoc solve completes,
+    /// recording the operation label, start time, and duration as a telemetry event.
+    pub fn set_ad_hoc_solve_recorder(
+        &mut self,
+        recorder: Box<dyn Fn(&'static str, Instant, Duration) + Send + Sync + 'a>,
+    ) {
+        self.ad_hoc_solve_recorder = Some(recorder);
     }
 
     pub fn get_solutions(&self, handle: &Handle) -> Option<Arc<Solutions>> {
@@ -1533,6 +1549,7 @@ impl<'a> Transaction<'a> {
     pub(crate) fn ad_hoc_solve<R: Sized, F: FnOnce(AnswersSolver<TransactionHandle>) -> R>(
         &self,
         handle: &Handle,
+        label: &'static str,
         solve: F,
     ) -> Option<R> {
         let module_data = self.get_module(handle);
@@ -1556,7 +1573,12 @@ impl<'a> Transaction<'a> {
             &thread_state,
             answers.1.heap(),
         );
+        let start = Instant::now();
         let result = solve(solver);
+        let duration = start.elapsed();
+        if let Some(recorder) = &self.ad_hoc_solve_recorder {
+            recorder(label, start, duration);
+        }
         Some(result)
     }
 
@@ -2322,6 +2344,7 @@ impl State {
                 state_lock_blocked,
                 ..Default::default()
             }),
+            ad_hoc_solve_recorder: None,
             data: TransactionData {
                 state: self,
                 stdlib,
@@ -2389,6 +2412,7 @@ impl State {
                 Transaction {
                     readable,
                     stats,
+                    ad_hoc_solve_recorder: _,
                     data:
                         TransactionData {
                             stdlib,
