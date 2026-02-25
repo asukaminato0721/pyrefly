@@ -1354,3 +1354,18 @@ r8 = accepts_callable(Class8)
 assert_type(r8([""], [""]), Class8[str])  # E: assert_type(Class8[Any], Class8[str]) failed
 "#,
 );
+
+testcase!(
+    test_callable_instance_with_unknown_base,
+    r#"
+class MyModel(BaseClass):  # E: Could not find name `BaseClass`
+    pass
+
+class Pipeline:
+    def __init__(self) -> None:
+        self.model = MyModel()
+
+    def run(self, data: object) -> object:
+        return self.model(data)
+"#,
+);

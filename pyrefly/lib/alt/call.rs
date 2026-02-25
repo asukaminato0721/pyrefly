@@ -333,15 +333,27 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 } else {
                     self.instance_as_dunder_call(&cls)
                 };
-                maybe_dunder_call.map_or(CallTargetLookup::Error(vec![]), |ty| {
-                    let is_self_recursive = matches!(&ty, Type::ClassType(inner) if inner == &cls)
-                        || matches!(&ty, Type::SelfType(inner) if inner.class_object() == cls.class_object());
-                    if is_self_recursive {
-                        CallTargetLookup::CircularCall
-                    } else {
-                        self.as_call_target_impl(ty, quantified)
+                match maybe_dunder_call {
+                    Some(ty) => {
+                        let is_self_recursive = matches!(&ty, Type::ClassType(inner) if inner == &cls)
+                            || matches!(&ty, Type::SelfType(inner) if inner.class_object() == cls.class_object());
+                        if is_self_recursive {
+                            CallTargetLookup::CircularCall
+                        } else {
+                            self.as_call_target_impl(ty, quantified)
+                        }
                     }
-                })
+                    // If the class has an unknown base (e.g. inherits from an
+                    // unresolved name), it might have inherited `__call__` from
+                    // that base, so treat it as callable with implicit Any.
+                    None if self
+                        .get_metadata_for_class(cls.class_object())
+                        .has_base_any() =>
+                    {
+                        CallTargetLookup::Ok(Box::new(CallTarget::Any(AnyStyle::Implicit)))
+                    }
+                    None => CallTargetLookup::Error(vec![]),
+                }
             }
             Type::SelfType(cls) => {
                 // Ignoring `quantified` is okay here because Self is not a valid typevar bound.
