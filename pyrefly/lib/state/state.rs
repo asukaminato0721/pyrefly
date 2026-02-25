@@ -73,8 +73,15 @@ use crate::alt::traits::Solve;
 use crate::binding::binding::AnyExportedKey;
 use crate::binding::binding::ChangedExport;
 use crate::binding::binding::Exported;
+use crate::binding::binding::KeyAbstractClassCheck;
+use crate::binding::binding::KeyClassBaseType;
+use crate::binding::binding::KeyClassField;
+use crate::binding::binding::KeyClassMetadata;
+use crate::binding::binding::KeyClassMro;
+use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyTParams;
+use crate::binding::binding::KeyVariance;
 use crate::binding::binding::Keyed;
 use crate::binding::bindings::BindingEntry;
 use crate::binding::bindings::BindingTable;
@@ -149,7 +156,7 @@ pub struct NameDep {
 
 /// Per-module dependency tracking for fine-grained incremental invalidation.
 #[derive(Debug, Clone, Default)]
-pub struct ModuleDep {
+pub struct ModuleDeps {
     /// Per-name dependencies. Presence implies existence dependency.
     pub names: SmallMap<Name, NameDep>,
     /// Do we depend on the wildcard export set?
@@ -160,101 +167,63 @@ pub struct ModuleDep {
     pub type_aliases: SmallSet<TypeAliasIndex>,
 }
 
-impl ModuleDep {
-    /// Create a dependency on a name's type.
-    pub fn name_type(name: Name) -> Self {
-        let mut names = SmallMap::new();
-        names.insert(
-            name,
-            NameDep {
-                metadata: false,
-                type_: true,
-            },
-        );
-        Self {
-            names,
-            wildcard: false,
-            classes: SmallSet::new(),
-            type_aliases: SmallSet::new(),
-        }
-    }
+// A single dependency, passed during lookup. Can be merged into ModuleDeps.
+pub enum ModuleDep {
+    // Depend on the existence of a module
+    Exists,
+    // Depend on the TypeEq result of an exported key
+    Key(AnyExportedKey),
+    // Depend on the existence of an exported name, not necessarily it's type
+    // Currently unused, but we should use this in LookupExport
+    #[allow(unused)]
+    NameExists(Name),
+    // Depend on metadata (deprecation, docstring) of an exported name
+    NameMetadata(Name),
+    // Depend on the set of wildcard exported names
+    Wildcard,
+}
 
-    /// Create a dependency on a name's metadata.
-    pub fn name_metadata(name: Name) -> Self {
-        let mut names = SmallMap::new();
-        names.insert(
-            name,
-            NameDep {
-                metadata: true,
-                type_: false,
-            },
-        );
-        Self {
-            names,
-            wildcard: false,
-            classes: SmallSet::new(),
-            type_aliases: SmallSet::new(),
-        }
-    }
-
-    /// Create a dependency on the wildcard export set.
-    pub fn wildcard_dep() -> Self {
-        Self {
-            names: SmallMap::new(),
-            wildcard: true,
-            classes: SmallSet::new(),
-            type_aliases: SmallSet::new(),
-        }
-    }
-
-    /// Create a dependency on a specific class.
-    pub fn class_dep(class: ClassDefIndex) -> Self {
-        let mut classes = SmallSet::new();
-        classes.insert(class);
-        Self {
-            names: SmallMap::new(),
-            wildcard: false,
-            classes,
-            type_aliases: SmallSet::new(),
-        }
-    }
-
-    /// Create a dependency on a specific type alias
-    pub fn type_alias_dep(type_alias: TypeAliasIndex) -> Self {
-        let mut type_aliases = SmallSet::new();
-        type_aliases.insert(type_alias);
-        Self {
-            names: SmallMap::new(),
-            wildcard: false,
-            classes: SmallSet::new(),
-            type_aliases,
-        }
-    }
-
-    /// Create a dependency with no dependencies (just module existence).
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    /// Merge another `ModuleDep` into this one, mutating in place.
-    pub fn merge_in_place(&mut self, mut other: ModuleDep) {
-        // SmallMap doesn't support drain; take ownership by replacing with an empty map
-        let mut other_names = SmallMap::new();
-        std::mem::swap(&mut other_names, &mut other.names);
-
-        for (name, dep) in other_names {
-            if let Some(existing) = self.names.get_mut(&name) {
-                existing.metadata |= dep.metadata;
-                existing.type_ |= dep.type_;
-            } else {
-                self.names.insert(name, dep);
+impl ModuleDeps {
+    pub fn add_key(&mut self, key: AnyExportedKey) {
+        match key {
+            AnyExportedKey::KeyExport(k) => {
+                self.names.entry(k.0).or_default().type_ = true;
+            }
+            AnyExportedKey::KeyTypeAlias(k) => {
+                self.type_aliases.insert(k.0);
+            }
+            AnyExportedKey::KeyTParams(KeyTParams(c))
+            | AnyExportedKey::KeyClassBaseType(KeyClassBaseType(c))
+            | AnyExportedKey::KeyClassField(KeyClassField(c, _))
+            | AnyExportedKey::KeyClassSynthesizedFields(KeyClassSynthesizedFields(c))
+            | AnyExportedKey::KeyVariance(KeyVariance(c))
+            | AnyExportedKey::KeyClassMetadata(KeyClassMetadata(c))
+            | AnyExportedKey::KeyClassMro(KeyClassMro(c))
+            | AnyExportedKey::KeyAbstractClassCheck(KeyAbstractClassCheck(c)) => {
+                self.classes.insert(c);
             }
         }
+    }
 
-        self.classes.extend(other.classes);
-        self.type_aliases.extend(other.type_aliases);
+    pub fn add_dep(&mut self, dep: ModuleDep) {
+        match dep {
+            ModuleDep::Exists => {}
+            ModuleDep::Key(key) => self.add_key(key),
+            ModuleDep::NameExists(name) => {
+                self.names.entry(name).or_default();
+            }
+            ModuleDep::NameMetadata(name) => {
+                self.names.entry(name).or_default().metadata = true;
+            }
+            ModuleDep::Wildcard => {
+                self.wildcard = true;
+            }
+        }
+    }
 
-        self.wildcard |= other.wildcard;
+    pub fn with_dep(mut self, dep: ModuleDep) -> Self {
+        self.add_dep(dep);
+        self
     }
 
     /// Check if this dependency should be invalidated given a set of changed exports.
@@ -288,25 +257,6 @@ impl ModuleDep {
     }
 }
 
-impl AnyExportedKey {
-    /// Convert this exported key to a `ModuleDep`.
-    /// `KeyExport` maps to a name type dependency, all class-related keys map to class dependencies.
-    pub fn to_module_dep(&self) -> ModuleDep {
-        match self {
-            AnyExportedKey::KeyExport(k) => ModuleDep::name_type(k.0.clone()),
-            AnyExportedKey::KeyTParams(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyClassBaseType(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyClassField(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyClassSynthesizedFields(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyVariance(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyClassMetadata(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyClassMro(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyAbstractClassCheck(k) => ModuleDep::class_dep(k.0),
-            AnyExportedKey::KeyTypeAlias(k) => ModuleDep::type_alias_dep(k.0),
-        }
-    }
-}
-
 /// `ModuleData` is a snapshot of `ArcId<ModuleDataMut>` in the main state.
 /// The snapshot is readonly most of the times. It will only be overwritten with updated information
 /// from `Transaction` when we decide to commit a `Transaction` into the main state.
@@ -316,7 +266,7 @@ struct ModuleData {
     config: ArcId<ConfigFile>,
     state: ModuleState,
     imports: HashMap<ModuleName, FindingOrError<ModulePath>, BuildNoHash>,
-    deps: HashMap<Handle, ModuleDep>,
+    deps: HashMap<Handle, ModuleDeps>,
     rdeps: HashSet<Handle>,
 }
 
@@ -331,7 +281,7 @@ struct ModuleDataMut {
     /// All forward dependencies keyed by Handle.
     /// Invariant: If deps contains h2, then h2.rdeps.contains(self.handle).
     /// To ensure atomicity, rdeps is modified while holding the deps write lock.
-    deps: RwLock<HashMap<Handle, ModuleDep>>,
+    deps: RwLock<HashMap<Handle, ModuleDeps>>,
     /// The reverse dependencies of this module. This is used to invalidate on change.
     /// Note that if we are only running once, e.g. on the command line, this isn't valuable.
     /// But we create it anyway for simplicity, since it doesn't seem to add much overhead.
@@ -391,7 +341,7 @@ impl ModuleDataMut {
 
     /// Look up how this module depends on a specific source handle.
     /// Returns the `ModuleDep` if this module depends on `source_handle`, or `None` if not found.
-    fn get_depends_on(&self, source_handle: &Handle) -> Option<ModuleDep> {
+    fn get_depends_on(&self, source_handle: &Handle) -> Option<ModuleDeps> {
         self.deps.read().get(source_handle).cloned()
     }
 }
@@ -1986,10 +1936,10 @@ impl<'a> TransactionHandle<'a> {
             let mut deps = self.module_data.deps.write();
             match deps.entry(handle) {
                 Entry::Occupied(mut e) => {
-                    e.get_mut().merge_in_place(dep);
+                    e.get_mut().add_dep(dep);
                 }
                 Entry::Vacant(e) => {
-                    e.insert(dep);
+                    e.insert(ModuleDeps::default().with_dep(dep));
                     let inserted = res.rdeps.lock().insert(self.module_data.handle.dupe());
                     assert!(inserted);
                 }
@@ -2017,10 +1967,13 @@ impl<'a> TransactionHandle<'a> {
 
 impl<'a> LookupExport for TransactionHandle<'a> {
     fn export_exists(&self, module: ModuleName, name: &Name) -> bool {
+        // TODO: This should be ModuleDep::NameExists instead
+        // but tests fail.
+        let dep = ModuleDep::Key(AnyExportedKey::KeyExport(KeyExport(name.clone())));
         self.with_exports(
             module,
             |exports, lookup| exports.exports(lookup).contains_key(name),
-            ModuleDep::name_type(name.clone()),
+            dep,
         )
         .unwrap_or(false)
     }
@@ -2029,12 +1982,12 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         self.with_exports(
             module,
             |exports, lookup| exports.wildcard(lookup),
-            ModuleDep::wildcard_dep(),
+            ModuleDep::Wildcard,
         )
     }
 
     fn module_exists(&self, module: ModuleName) -> FindingOrError<()> {
-        self.get_module(module, None, ModuleDep::none())
+        self.get_module(module, None, ModuleDep::Exists)
             .map(|module_data| {
                 self.transaction.lookup_export(&module_data);
             })
@@ -2044,7 +1997,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
         self.with_exports(
             module,
             |exports, _lookup| exports.is_submodule_imported_implicitly(name),
-            ModuleDep::name_metadata(name.clone()),
+            ModuleDep::NameMetadata(name.clone()),
         )
         .unwrap_or(false)
     }
@@ -2059,7 +2012,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     .cloned()
                     .collect::<SmallSet<Name>>()
             },
-            ModuleDep::none(),
+            ModuleDep::Exists,
         )
     }
 
@@ -2073,7 +2026,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                 }) => Some(d.clone()),
                 _ => None,
             },
-            ModuleDep::name_metadata(name.clone()),
+            ModuleDep::NameMetadata(name.clone()),
         )?
     }
 
@@ -2086,7 +2039,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     Some(ExportLocation::OtherModule(..))
                 )
             },
-            ModuleDep::name_metadata(name.clone()),
+            ModuleDep::NameMetadata(name.clone()),
         )
         .unwrap_or(false)
     }
@@ -2114,7 +2067,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                         Some(Ok((*other_module, original_name.clone())))
                     }
                 },
-                ModuleDep::name_type(name.clone()),
+                ModuleDep::NameMetadata(name.clone()),
             )??;
 
             match next {
@@ -2138,7 +2091,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                 }) => *docstring_range,
                 _ => None,
             },
-            ModuleDep::name_metadata(name.clone()),
+            ModuleDep::NameMetadata(name.clone()),
         )?
     }
 
@@ -2160,7 +2113,7 @@ impl<'a> LookupExport for TransactionHandle<'a> {
                     }
                     None => Err(false),
                 },
-                ModuleDep::name_metadata(name.clone()),
+                ModuleDep::NameMetadata(name.clone()),
             );
 
             match next {
@@ -2193,7 +2146,7 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
         // The unwrap is safe because we must have said there were no exports,
         // so no one can be trying to get at them
         let module_data = self
-            .get_module(module, path, k.to_anykey().to_module_dep())
+            .get_module(module, path, ModuleDep::Key(k.to_anykey()))
             .finding()
             .unwrap();
         let res = self.transaction.lookup_answer(module_data, k, thread_state);
@@ -2225,7 +2178,7 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
         // Look up the target module. Use default ModuleDep since cross-module
         // commits don't establish new dependencies.
         let module_data = match self
-            .get_module(module, Some(path), ModuleDep::default())
+            .get_module(module, Some(path), ModuleDep::Exists)
             .finding()
         {
             Some(data) => data,
