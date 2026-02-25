@@ -592,11 +592,17 @@ fn apply_diagnostic_markup(value: &mut Value) {
     }
 }
 
+/// Escape markdown special characters in a diagnostic message, preserving
+/// backtick-delimited code spans. If backticks are unbalanced (odd count),
+/// all backticks are escaped as literals instead of being treated as code
+/// span delimiters.
 fn format_diagnostic_message_for_markdown(message: &str) -> String {
+    let balanced_backticks = message.chars().filter(|&c| c == '`').count() % 2 == 0;
+
     let mut out = String::with_capacity(message.len());
     let mut in_code_span = false;
     for ch in message.chars() {
-        if ch == '`' {
+        if ch == '`' && balanced_backticks {
             in_code_span = !in_code_span;
             out.push(ch);
             continue;
@@ -606,7 +612,7 @@ fn format_diagnostic_message_for_markdown(message: &str) -> String {
             continue;
         }
         match ch {
-            '\\' | '*' | '_' | '[' | ']' => {
+            '\\' | '*' | '_' | '[' | ']' | '`' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -625,6 +631,39 @@ mod tests {
         let input = "__init__ *args **kwargs list[int] `list[int]`";
         let expected = "\\_\\_init\\_\\_ \\*args \\*\\*kwargs list\\[int\\] `list[int]`";
         assert_eq!(format_diagnostic_message_for_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_format_no_special_characters() {
+        assert_eq!(
+            format_diagnostic_message_for_markdown("hello world"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_format_empty_string() {
+        assert_eq!(format_diagnostic_message_for_markdown(""), "");
+    }
+
+    #[test]
+    fn test_format_unmatched_backtick() {
+        // Odd backtick count: all backticks are escaped, no code spans.
+        let input = "Expected `int got *args";
+        let expected = "Expected \\`int got \\*args";
+        assert_eq!(format_diagnostic_message_for_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_format_multiple_code_spans() {
+        let input = "`Foo` and `Bar` are incompatible";
+        let expected = "`Foo` and `Bar` are incompatible";
+        assert_eq!(format_diagnostic_message_for_markdown(input), expected);
+    }
+
+    #[test]
+    fn test_format_only_special_characters() {
+        assert_eq!(format_diagnostic_message_for_markdown("***"), "\\*\\*\\*");
     }
 }
 
