@@ -6,7 +6,10 @@
  */
 
 use lsp_types::DocumentDiagnosticReportResult;
+use lsp_types::PublishDiagnosticsParams;
 use lsp_types::Url;
+use lsp_types::notification::Notification as _;
+use lsp_types::notification::PublishDiagnostics;
 use pyrefly_util::stdlib::register_stdlib_paths;
 use serde_json::json;
 
@@ -1424,4 +1427,68 @@ fn test_untyped_import_diagnostic_shows_error_for_recommended_packages() {
         .unwrap();
 
     interaction.shutdown().unwrap();
+}
+
+/// Verifies that in the default `openFilesOnly` mode, diagnostics are NOT published for
+/// files that exist on disk but have not been opened via `did_open`.
+///
+/// Uses the shutdown response as a fence: a single `expect_message` records all
+/// `publishDiagnostics` URIs and terminates when the shutdown response arrives.
+/// After that, asserts none of the recorded URIs target the non-open file.
+#[test]
+fn test_no_diagnostics_for_non_open_files_in_open_files_only_mode() {
+    let test_files_root = get_test_files_root();
+    let root = test_files_root.path();
+    let non_open_file = root.join("type_errors.py");
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(Some(
+                json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
+            )),
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Open a different file to trigger indexing. type_errors.py is on disk but not opened.
+    interaction.client.did_open("text_document.py");
+
+    // Send shutdown and use the response as a fence. The matcher records every
+    // publishDiagnostics URI it sees and only terminates on the shutdown response,
+    // ensuring no messages are silently consumed.
+    let shutdown_handle = interaction.client.send_shutdown();
+    let shutdown_id = shutdown_handle.id.clone();
+    let mut diagnostics_uris: Vec<Url> = Vec::new();
+    interaction
+        .client
+        .expect_message(
+            "shutdown response, recording all publishDiagnostics URIs",
+            |msg| {
+                if let Message::Notification(n) = &msg
+                    && n.method == PublishDiagnostics::METHOD
+                {
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(n.params.clone()).unwrap();
+                    diagnostics_uris.push(params.uri.clone());
+                }
+                if let Message::Response(r) = &msg
+                    && r.id == shutdown_id
+                {
+                    return Some(Ok(()));
+                }
+                None
+            },
+        )
+        .unwrap();
+    interaction.client.send_exit();
+
+    // Assert that no publishDiagnostics was received for the non-open file.
+    assert!(
+        !diagnostics_uris
+            .iter()
+            .any(|uri| uri.to_file_path().unwrap() == non_open_file),
+        "Received unexpected publishDiagnostics for non-open file: {}",
+        non_open_file.display()
+    );
 }
