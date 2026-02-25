@@ -80,6 +80,7 @@ use crate::error::collector::ErrorCollector;
 use crate::types::annotation::Annotation;
 use crate::types::class::Class;
 use crate::types::type_info::TypeInfo;
+use crate::types::types::AnyStyle;
 use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
@@ -209,22 +210,14 @@ impl<Ans: LookupAnswer> Solve<Ans> for KeyExport {
         )
     }
 
-    fn create_recursive(answers: &AnswersSolver<Ans>, binding: &Self::Value) -> Var {
-        answers.create_recursive(&binding.0)
-    }
-
-    fn promote_recursive(_heap: &TypeHeap, x: Var) -> Self::Answer {
-        Type::Var(x)
-    }
-
-    fn record_recursive(
-        answers: &AnswersSolver<Ans>,
-        range: TextRange,
-        answer: Arc<Type>,
-        recursive: Var,
-        errors: &ErrorCollector,
-    ) -> Arc<Type> {
-        Arc::new(answers.record_recursive(range, answer.as_ref().clone(), recursive, errors))
+    fn promote_recursive(_heap: &TypeHeap, _: Var) -> Self::Answer {
+        // KeyExport delegates to the underlying Key via solve_binding, so the
+        // Key handles its own recursion-breaking with a Var in the correct
+        // module's solver. KeyExport does not need its own placeholder Var;
+        // returning Unknown here avoids leaking a Var across module boundaries
+        // in iterative-fixpoint SCC solving (where cross-module back-edges on
+        // KeyExport would otherwise return a Type::Var from a foreign solver).
+        Type::Any(AnyStyle::Implicit)
     }
 }
 
