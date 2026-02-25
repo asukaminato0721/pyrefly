@@ -847,9 +847,15 @@ fn function_last_expressions<'a>(
             }
             Stmt::If(x) => {
                 let mut last_test = None;
+                let mut any_branch_processed = false;
                 for (test, body) in sys_info.pruned_if_branches(x) {
+                    any_branch_processed = true;
                     last_test = test;
                     f(sys_info, body, res)?;
+                }
+                if !any_branch_processed {
+                    // All branches were pruned, so the code falls through
+                    return None;
                 }
                 if last_test.is_some() {
                     // The if/elif chain has no else clause, so it's not syntactically exhaustive.
