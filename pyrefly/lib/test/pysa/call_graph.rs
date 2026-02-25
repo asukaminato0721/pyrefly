@@ -1293,7 +1293,13 @@ def foo(c_or_d: C | D, c_or_e: C | E):
                 ),
                 (
                     "14:7-14:17",
-                    property_getter_callees(/* property_getters */ property_getters_c_or_e),
+                    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                        if_called: CallCallees::empty(),
+                        property_setters: vec![],
+                        property_getters: property_getters_c_or_e,
+                        global_targets: vec![],
+                        is_attribute: true,
+                    }),
                 ),
             ],
         )]
@@ -7323,8 +7329,19 @@ class A:
             vec![
                 (
                     "7:9-7:15",
-                    // TODO(T225700656): This should have is_attribute = true
-                    attribute_access_callable_callees(weakref_call_target.clone()),
+                    ExpressionCallees::AttributeAccess(AttributeAccessCallees {
+                        if_called: CallCallees {
+                            call_targets: weakref_call_target.clone(),
+                            init_targets: vec![],
+                            new_targets: vec![],
+                            higher_order_parameters: HashMap::new(),
+                            unresolved: Unresolved::False,
+                        },
+                        property_setters: vec![],
+                        property_getters: vec![],
+                        global_targets: vec![],
+                        is_attribute: true,
+                    }),
                 ),
                 (
                     "7:56-7:57|identifier|x",

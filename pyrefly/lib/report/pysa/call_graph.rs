@@ -2677,35 +2677,6 @@ impl<'a> CallGraphVisitor<'a> {
         }
     }
 
-    // Resolve the attribute access via `__getattr__`
-    fn resolve_magic_dunder_attr(
-        &self,
-        attribute: &Name,
-        receiver_type: Option<&Type>,
-        callee_expr: Option<AnyNodeRef>, // This is `base.attribute`
-        callee_range: TextRange,
-    ) -> AttributeAccessCallees<FunctionRef> {
-        let DunderAttrCallees { callees, .. } = self.call_targets_from_magic_dunder_attr(
-            /* base */ receiver_type,
-            /* attribute */ Some(attribute),
-            callee_range,
-            callee_expr,
-            /* unknown_callee_as_direct_call */ true,
-            "resolve_magic_dunder_attr",
-            /* exclude_object_methods */ false,
-        );
-        // Treat attribute accesses that are not callables as regular attributes.
-        let is_attribute = callees.call_targets.is_empty() && *attribute != dunder::CLASS;
-        AttributeAccessCallees {
-            if_called: callees,
-            // Property getters and setters are always found via the normal attribute lookup
-            property_setters: vec![],
-            property_getters: vec![],
-            global_targets: vec![],
-            is_attribute,
-        }
-    }
-
     fn resolve_attribute_access(
         &self,
         base: &Expr,
@@ -2792,27 +2763,19 @@ impl<'a> CallGraphVisitor<'a> {
                 })
         });
 
-        let functions_from_go_to_def = go_to_definitions
-            .into_iter()
-            .filter_map(|definition| {
-                FunctionNode::exported_function_from_definition_item_with_docstring(
+        let (functions_from_go_to_def, unused_go_to_definitions): (Vec<_>, Vec<_>) =
+            go_to_definitions.into_iter().partition_map(|definition| {
+                let function = FunctionNode::exported_function_from_definition_item_with_docstring(
                     &definition,
                     /* skip_property_getter */ is_assignment_lhs,
                     self.module_context,
-                )
-            })
-            .map(|(function, context)| function.as_function_ref(&context))
-            .collect::<Vec<_>>();
-
-        if global_targets.is_empty() && functions_from_go_to_def.is_empty() {
-            // Fall back to using the callee type.
-            return self.resolve_magic_dunder_attr(
-                attribute,
-                receiver_type.as_ref(),
-                callee_expr,
-                callee_range,
-            );
-        }
+                );
+                match function {
+                    Some((function, context)) => Either::Left(function.as_function_ref(&context)),
+                    None => Either::Right(definition),
+                }
+            });
+        let has_non_function_definitions = !unused_go_to_definitions.is_empty();
 
         let (property_callees, non_property_callees): (Vec<FunctionRef>, Vec<FunctionRef>) =
             functions_from_go_to_def
@@ -2833,13 +2796,17 @@ impl<'a> CallGraphVisitor<'a> {
 
         let unknown_callee_as_direct_call = true;
         let if_called = if non_property_callees.is_empty() {
-            // If a property returns a callable, we can resolve its callees using the attribute access type.
-            self.resolve_callees_from_expression_type(
-                /* expression */ callee_expr,
-                /* expression_type */ callee_type,
-                return_type,
-                /* expression_suffix */ callee_expr_suffix,
-            )
+            // Fall back to using the callee type.
+            let DunderAttrCallees { callees, .. } = self.call_targets_from_magic_dunder_attr(
+                /* base */ receiver_type.as_ref(),
+                /* attribute */ Some(attribute),
+                callee_range,
+                callee_expr,
+                /* unknown_callee_as_direct_call */ true,
+                "resolve_attribute_access",
+                /* exclude_object_methods */ false,
+            );
+            callees
         } else {
             CallCallees {
                 call_targets: non_property_callees
@@ -2865,8 +2832,10 @@ impl<'a> CallGraphVisitor<'a> {
             }
         };
         AttributeAccessCallees {
-            // Don't treat attributes that are functions (those are usually methods) as "regular" attributes so we don't propagate taint from the base to the attribute
-            is_attribute: (if_called.is_empty() && !has_property_callees)
+            // Don't treat attributes that are functions (those are usually methods) as "regular"
+            // attributes so we don't propagate taint from the base to the attribute.
+            is_attribute: has_non_function_definitions
+                || (if_called.is_empty() && !has_property_callees)
                 || !global_targets.is_empty(),
             if_called,
             property_setters: property_setters
