@@ -41,6 +41,7 @@ use pyrefly_util::lock::Mutex;
 use pyrefly_util::lock::RwLock;
 use pyrefly_util::locked_map::LockedMap;
 use pyrefly_util::no_hash::BuildNoHash;
+use pyrefly_util::prelude::VecExt;
 use pyrefly_util::small_map1::SmallMap1;
 use pyrefly_util::task_heap::CancellationHandle;
 use pyrefly_util::task_heap::Cancelled;
@@ -277,37 +278,8 @@ impl ModuleDep {
         }
     }
 
-    /// Compute which exports to propagate to this dependent based on what changed.
-    ///
-    /// This uses the same matching logic as `should_invalidate` but filters the set
-    /// rather than short-circuiting. We keep them separate because `should_invalidate`
-    /// can return early (better for the common case), while this must compute the
-    /// full filtered set for transitive propagation.
-    fn propagate_exports(&self, changed_exports: &ChangedExports) -> ChangedExports {
-        match changed_exports {
-            ChangedExports::NoChange => ChangedExports::NoChange,
-            ChangedExports::InvalidateAll => ChangedExports::InvalidateAll,
-            ChangedExports::Changed(changed) => {
-                // If wildcard is set, propagate all changes (same as old DependsOn::All)
-                if self.wildcard {
-                    return ChangedExports::Changed(changed.clone());
-                }
-                let propagated: SmallSet<ChangedExport> = changed
-                    .iter()
-                    .filter(|change| self.matches_change(change))
-                    .cloned()
-                    .collect();
-                if propagated.is_empty() {
-                    ChangedExports::NoChange
-                } else {
-                    ChangedExports::Changed(propagated)
-                }
-            }
-        }
-    }
-
     /// Check if a single changed export matches this dependency.
-    /// Used by both `should_invalidate` and `propagate_exports`.
+    /// Used by `should_invalidate`.
     fn matches_change(&self, change: &ChangedExport) -> bool {
         match change {
             ChangedExport::Name(name) => self.names.get(name).is_some_and(|d| d.type_),
@@ -1523,75 +1495,30 @@ impl<'a> Transaction<'a> {
     /// Transitively invalidate all modules in the dependency chain of the changed modules.
     ///
     /// Unlike the single-level invalidation in `demand`, this follows the entire rdeps
-    /// chain using a worklist algorithm. It propagates changed export names through the
-    /// dependency graph, only invalidating modules that import (directly or transitively)
-    /// the names that changed.
+    /// chain using a BFS worklist algorithm. Every module that transitively depends on
+    /// any of the changed modules is marked dirty.
     ///
     /// This is called from `run_internal` when a mutable dependency cycle is detected
     /// (i.e., the same module changes twice in one run), as a fallback to ensure all
     /// cyclic modules reach a stable state.
-    fn invalidate_rdeps(&mut self, changed: &[(ArcId<ModuleDataMut>, ChangedExports)]) {
-        let mut changed_exports: SmallMap<Handle, ChangedExports> = changed
-            .iter()
-            .map(|(m, exports)| (m.handle.dupe(), exports.clone()))
-            .collect();
+    fn invalidate_rdeps(&mut self, mut follow: Vec<ArcId<ModuleDataMut>>) {
+        // All modules discovered so far (to avoid revisiting).
+        let mut dirty: SmallMap<Handle, ArcId<ModuleDataMut>> =
+            follow.iter().map(|m| (m.handle.dupe(), m.dupe())).collect();
 
-        // Those that I have yet to follow
-        let mut follow: Vec<(Handle, ChangedExports)> = changed
-            .iter()
-            .map(|(m, exports)| (m.handle.dupe(), exports.clone()))
-            .collect();
-
-        // Those that I know are dirty
-        let mut dirty: SmallMap<Handle, ArcId<ModuleDataMut>> = changed
-            .iter()
-            .map(|(m, _)| (m.handle.dupe(), m.dupe()))
-            .collect();
-
-        while let Some((handle, item_changed_exports)) = follow.pop() {
-            let module = self.get_module(&handle);
-            let module_name = handle.module();
+        while let Some(module) = follow.pop() {
             let rdeps: Vec<Handle> = module.rdeps.lock().iter().cloned().collect();
 
             for rdep_handle in rdeps {
                 let hashed_rdep = Hashed::new(&rdep_handle);
 
-                let rdep_module = self.get_module(&rdep_handle);
-                let propagated = rdep_module
-                    .get_depends_on(module_name, &handle)
-                    .map_or(ChangedExports::InvalidateAll, |d| {
-                        d.propagate_exports(&item_changed_exports)
-                    });
-                if matches!(&propagated, ChangedExports::NoChange) {
-                    continue; // Nothing to propagate
-                }
-
                 if dirty.contains_key_hashed(hashed_rdep) {
-                    // Already marked dirty, merge the propagated names into existing
-                    if let Some(existing) = changed_exports.get_mut(&rdep_handle) {
-                        match (&propagated, &*existing) {
-                            (ChangedExports::InvalidateAll, _) => {
-                                *existing = ChangedExports::InvalidateAll
-                            }
-                            (_, ChangedExports::InvalidateAll) => {} // Already invalidating all
-                            (ChangedExports::Changed(new), ChangedExports::Changed(old)) => {
-                                let mut merged = old.clone();
-                                merged.extend(new.iter().cloned());
-                                *existing = ChangedExports::Changed(merged);
-                            }
-                            (ChangedExports::Changed(_), ChangedExports::NoChange) => {
-                                *existing = propagated.clone();
-                            }
-                            (ChangedExports::NoChange, _) => {} // Nothing to merge
-                        }
-                    }
                     continue;
                 }
 
                 let m = self.get_module(&rdep_handle);
                 dirty.insert_hashed(hashed_rdep.cloned(), m.dupe());
-                changed_exports.insert(rdep_handle.dupe(), propagated.clone());
-                follow.push((rdep_handle, propagated));
+                follow.push(m.dupe());
             }
         }
         self.stats.lock().cycle_rdeps += dirty.len();
@@ -1638,14 +1565,16 @@ impl<'a> Transaction<'a> {
             if changed.is_empty() {
                 return Ok(());
             }
-            for (module, changed_exports) in &changed {
-                let dominated = match seen_exports.get(module) {
-                    None => false,
+            // Check for cycle: any module with overlapping export changes indicates
+            // a mutable dependency cycle (e.g., A depends on B depends on A, and exports
+            // keep oscillating).
+            let has_cycle = changed.iter().any(|(module, changed_exports)| {
+                match seen_exports.get(module) {
+                    None | Some(ChangedExports::NoChange) => false,
                     Some(ChangedExports::InvalidateAll) => {
                         // We previously saw InvalidateAll, so any new change is dominated
                         true
                     }
-                    Some(ChangedExports::NoChange) => false,
                     Some(ChangedExports::Changed(seen_names)) => {
                         // Check if the new changes overlap with previously seen exports
                         match changed_exports {
@@ -1659,28 +1588,23 @@ impl<'a> Transaction<'a> {
                             ChangedExports::NoChange => false,
                         }
                     }
-                };
-
-                if dominated {
-                    debug!(
-                        "Mutable dependency cycle detected: module `{}` has overlapping export changes. \
-                         Previously seen: {:?}, now: {:?}. Invalidating cycle.",
-                        module.handle.module(),
-                        seen_exports.get(module),
-                        changed_exports
-                    );
-                    // We are in a cycle of mutual dependencies, so give up.
-                    // Just invalidate everything in the cycle and recompute it all.
-                    // Use coarse-grained invalidation to ensure all cyclic modules reach stable state
-                    let coarse_grained_changed: Vec<_> = changed
-                        .iter()
-                        .map(|(m, _)| (m.dupe(), ChangedExports::InvalidateAll))
-                        .collect();
-                    self.invalidate_rdeps(&coarse_grained_changed);
-                    return self.run_step(handles, require);
                 }
+            });
 
-                // Merge the new exports into our tracking set
+            if has_cycle {
+                debug!(
+                    "Mutable dependency cycle detected: overlapping export changes. \
+                     Invalidating cycle."
+                );
+                // We are in a cycle of mutual dependencies, so give up.
+                // Just invalidate everything in the cycle and recompute it all.
+                // Use coarse-grained invalidation to ensure all cyclic modules reach stable state
+                self.invalidate_rdeps(changed.into_map(|(m, _)| m));
+                return self.run_step(handles, require);
+            }
+
+            // No cycle detected. Merge the new exports into our tracking set.
+            for (module, changed_exports) in &changed {
                 match seen_exports.entry(module.dupe()) {
                     starlark_map::small_map::Entry::Vacant(e) => {
                         e.insert(changed_exports.clone());
@@ -1718,11 +1642,7 @@ impl<'a> Transaction<'a> {
              This may indicate an unexpected dependency pattern. Forcing invalidation."
         );
         let changed = mem::take(&mut *self.data.changed.lock());
-        let coarse_grained_changed: Vec<_> = changed
-            .iter()
-            .map(|(m, _)| (m.dupe(), ChangedExports::InvalidateAll))
-            .collect();
-        self.invalidate_rdeps(&coarse_grained_changed);
+        self.invalidate_rdeps(changed.into_map(|(m, _)| m));
         self.run_step(handles, require)
     }
 
