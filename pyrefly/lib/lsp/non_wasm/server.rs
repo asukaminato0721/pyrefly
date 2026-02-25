@@ -3586,15 +3586,15 @@ impl Server {
                 let start = Instant::now();
                 if let Some(refactors) = $call {
                     push_refactor_actions(refactors);
-                    record_code_action_telemetry(
-                        $name,
-                        start,
-                        &server_state,
-                        telemetry,
-                        activity_key,
-                        file_stats,
-                    );
                 }
+                record_code_action_telemetry(
+                    $name,
+                    start,
+                    &server_state,
+                    telemetry,
+                    activity_key,
+                    file_stats,
+                );
             }};
         }
         timed_refactor_action!(
