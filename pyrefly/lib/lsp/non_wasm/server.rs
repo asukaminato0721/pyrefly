@@ -2765,7 +2765,9 @@ impl Server {
         let mut transaction = self
             .state
             .new_committable_transaction(Require::Exports, None);
+        let validate_start = Instant::now();
         transaction.as_mut().run(&handles, Require::Indexing);
+        telemetry.set_validate_duration(validate_start.elapsed());
         self.state.commit_transaction(transaction, Some(telemetry));
         // After we finished a recheck asynchronously, we immediately send `RecheckFinished` to
         // the main event loop of the server. As a result, the server can do a revalidation of
@@ -2803,7 +2805,9 @@ impl Server {
             let mut transaction = self
                 .state
                 .new_committable_transaction(Require::Exports, None);
+            let validate_start = Instant::now();
             transaction.as_mut().run(&handles, Require::Indexing);
+            telemetry.set_validate_duration(validate_start.elapsed());
             self.state.commit_transaction(transaction, Some(telemetry));
             // After we finished a recheck asynchronously, we immediately send `RecheckFinished` to
             // the main event loop of the server. As a result, the server can do a revalidation of
