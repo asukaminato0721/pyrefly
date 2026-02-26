@@ -19,8 +19,10 @@ use ruff_python_ast::Decorator;
 use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
+use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprName;
+use ruff_python_ast::ExprStarred;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Operator;
 use ruff_python_ast::Pattern;
@@ -190,8 +192,8 @@ impl DunderAllEntry {
 
     fn as_list(x: &Expr) -> Vec<Self> {
         match x {
-            Expr::List(x) => x.elts.iter().filter_map(DunderAllEntry::as_item).collect(),
-            Expr::Tuple(x) => x.elts.iter().filter_map(DunderAllEntry::as_item).collect(),
+            Expr::List(x) => x.elts.iter().flat_map(DunderAllEntry::as_elts).collect(),
+            Expr::Tuple(x) => x.elts.iter().flat_map(DunderAllEntry::as_elts).collect(),
             Expr::Attribute(ExprAttribute { value, attr, .. })
                 if let Expr::Name(name) = &**value
                     && attr.id == dunder::ALL =>
@@ -201,7 +203,28 @@ impl DunderAllEntry {
                     ModuleName::from_name(&name.id),
                 )]
             }
+            Expr::BinOp(ExprBinOp {
+                left,
+                op: Operator::Add,
+                right,
+                ..
+            }) => {
+                let mut result = Self::as_list(left);
+                result.extend(Self::as_list(right));
+                result
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Handle a single element inside a list/tuple literal in `__all__`.
+    /// For starred expressions like `*foo.__all__`, delegates to `as_list` to
+    /// recursively resolve the unpacked value. For everything else, tries
+    /// `as_item` (which handles string literals).
+    fn as_elts(x: &Expr) -> Vec<Self> {
+        match x {
+            Expr::Starred(ExprStarred { value, .. }) => Self::as_list(value),
+            _ => Self::as_item(x).into_iter().collect(),
         }
     }
 
@@ -1036,6 +1059,52 @@ from _collections_abc import __all__ as __all__
                 ModuleName::from_str("_collections_abc")
             )]
         );
+    }
+
+    #[test]
+    fn test_all_binop_add_two_lists() {
+        let defs = calculate_unranged_definitions_with_defaults(
+            r#"
+a = 1
+b = 2
+__all__ = ["a"] + ["b"]
+"#,
+        );
+        assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
+        let loc = TextRange::default();
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
+        let b = &DunderAllEntry::Name(loc, Name::new_static("b"));
+        assert_eq!(defs.dunder_all.entries.map(|x| x), vec![a, b]);
+    }
+
+    #[test]
+    fn test_all_binop_add_with_module() {
+        let defs = calculate_unranged_definitions_with_defaults(
+            r#"
+a = 1
+__all__ = ["a"] + foo.__all__
+"#,
+        );
+        assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
+        let loc = TextRange::default();
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
+        let foo = &DunderAllEntry::Module(loc, ModuleName::from_str("foo"));
+        assert_eq!(defs.dunder_all.entries.map(|x| x), vec![a, foo]);
+    }
+
+    #[test]
+    fn test_all_starred_in_list() {
+        let defs = calculate_unranged_definitions_with_defaults(
+            r#"
+a = 1
+__all__ = [*foo.__all__, "a"]
+"#,
+        );
+        assert_eq!(defs.dunder_all.kind, DunderAllKind::Specified);
+        let loc = TextRange::default();
+        let foo = &DunderAllEntry::Module(loc, ModuleName::from_str("foo"));
+        let a = &DunderAllEntry::Name(loc, Name::new_static("a"));
+        assert_eq!(defs.dunder_all.entries.map(|x| x), vec![foo, a]);
     }
 
     #[test]
