@@ -12,23 +12,29 @@ use dupe::Dupe;
 use pyrefly_types::class::Class;
 #[cfg(test)]
 use pyrefly_types::class::ClassType;
+use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::quantified::Quantified;
+use pyrefly_types::type_alias::TypeAliasData;
+use pyrefly_types::type_var::Restriction;
+use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::types::Type;
 use pyrefly_types::types::Union;
 use serde::Serialize;
 
 use crate::report::pysa::ModuleContext;
 use crate::report::pysa::class::ClassRef;
+use crate::report::pysa::context::ModuleAnswersContext;
 use crate::types::display::TypeDisplayContext;
 
 /// Modifier that was stripped from a type to extract the underlying class.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[allow(dead_code)]
 pub enum TypeModifier {
-    Optional,          // Optional[T]
-    Coroutine,         // Coroutine[<...>]
-    Awaitable,         // Awaitable[T]
-    TypeVariableBound, // TypeVar(.., bound=T)
-    Type,              // type[T]
+    Optional,               // Optional[T]
+    Coroutine,              // Coroutine[<...>]
+    Awaitable,              // Awaitable[T]
+    TypeVariableBound,      // TypeVar(.., bound=T)
+    TypeVariableConstraint, // TypeVar("T", ..., ...)
+    Type,                   // type[T]
 }
 
 /// A class reference along with the modifiers that were stripped to extract it.
@@ -76,7 +82,7 @@ impl ClassNamesFromType {
         ClassNamesFromType {
             classes: vec![ClassWithModifiers::new(ClassRef::from_class(
                 class,
-                context.module_ids,
+                context.module_ids(),
             ))],
             is_exhaustive: true,
         }
@@ -116,6 +122,14 @@ impl ClassNamesFromType {
         self.prepend_modifier(TypeModifier::Coroutine)
     }
 
+    pub fn prepend_typevar_bound(self) -> ClassNamesFromType {
+        self.prepend_modifier(TypeModifier::TypeVariableBound)
+    }
+
+    pub fn prepend_typevar_constraint(self) -> ClassNamesFromType {
+        self.prepend_modifier(TypeModifier::TypeVariableConstraint)
+    }
+
     pub fn prepend_modifier(mut self, modifier: TypeModifier) -> ClassNamesFromType {
         for class in &mut self.classes {
             class.modifiers.insert(0, modifier);
@@ -142,10 +156,10 @@ pub fn string_for_type(type_: &Type) -> String {
     ctx.display(type_).to_string()
 }
 
-fn strip_self_type(mut ty: Type) -> Type {
+fn strip_self_type(heap: &TypeHeap, mut ty: Type) -> Type {
     ty.transform_mut(&mut |t| {
         if let Type::SelfType(cls) = t {
-            *t = Type::ClassType(cls.clone());
+            *t = heap.mk_class_type(cls.clone());
         }
     });
     ty
@@ -155,10 +169,10 @@ fn strip_optional(type_: &Type) -> Option<&Type> {
     match type_ {
         Type::Union(box Union {
             members: elements, ..
-        }) if elements.len() == 2 && elements[0] == Type::None => Some(&elements[1]),
+        }) if elements.len() == 2 && elements[0].is_none() => Some(&elements[1]),
         Type::Union(box Union {
             members: elements, ..
-        }) if elements.len() == 2 && elements[1] == Type::None => Some(&elements[0]),
+        }) if elements.len() == 2 && elements[1].is_none() => Some(&elements[0]),
         _ => None,
     }
 }
@@ -166,7 +180,7 @@ fn strip_optional(type_: &Type) -> Option<&Type> {
 fn strip_awaitable<'a>(type_: &'a Type, context: &ModuleContext) -> Option<&'a Type> {
     match type_ {
         Type::ClassType(class_type)
-            if class_type.class_object() == context.stdlib.awaitable_object()
+            if class_type.class_object() == context.answers_context.stdlib.awaitable_object()
                 && class_type.targs().as_slice().len() == 1 =>
         {
             Some(&class_type.targs().as_slice()[0])
@@ -178,7 +192,7 @@ fn strip_awaitable<'a>(type_: &'a Type, context: &ModuleContext) -> Option<&'a T
 fn strip_coroutine<'a>(type_: &'a Type, context: &ModuleContext) -> Option<&'a Type> {
     match type_ {
         Type::ClassType(class_type)
-            if class_type.class_object() == context.stdlib.coroutine_object()
+            if class_type.class_object() == context.answers_context.stdlib.coroutine_object()
                 && class_type.targs().as_slice().len() >= 3 =>
         {
             Some(&class_type.targs().as_slice()[2])
@@ -187,10 +201,30 @@ fn strip_coroutine<'a>(type_: &'a Type, context: &ModuleContext) -> Option<&'a T
     }
 }
 
+enum TypeVariableRestriction {
+    Bound(Type),
+    Constraints(Vec<Type>),
+}
+
+fn strip_typevar(type_: &Type) -> Option<TypeVariableRestriction> {
+    match type_ {
+        Type::Quantified(quantified) if Quantified::is_type_var(quantified) => {
+            match &quantified.restriction {
+                Restriction::Bound(type_) => Some(TypeVariableRestriction::Bound(type_.clone())),
+                Restriction::Constraints(constraints) => {
+                    Some(TypeVariableRestriction::Constraints(constraints.clone()))
+                }
+                Restriction::Unrestricted => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn has_superclass(class: &Class, want: &Class, context: &ModuleContext) -> bool {
     context
-        .transaction
-        .ad_hoc_solve(&context.handle, |solver| {
+        .resolver
+        .with_solver("pysa_has_superclass", |solver| {
             solver.type_order().has_superclass(class, want)
         })
         .unwrap()
@@ -206,9 +240,19 @@ fn is_scalar_type(get: &Type, want: &Class, context: &ModuleContext) -> bool {
     if let Some(inner) = strip_coroutine(get, context) {
         return is_scalar_type(inner, want, context);
     }
+    if let Some(type_variable_restriction) = strip_typevar(get) {
+        return match type_variable_restriction {
+            TypeVariableRestriction::Bound(inner) => is_scalar_type(&inner, want, context),
+            TypeVariableRestriction::Constraints(inners) => inners
+                .iter()
+                .any(|inner| is_scalar_type(inner, want, context)),
+        };
+    }
     match get {
         Type::ClassType(class_type) => has_superclass(class_type.class_object(), want, context),
-        Type::TypeAlias(alias) => is_scalar_type(&alias.as_type(), want, context),
+        Type::TypeAlias(box TypeAliasData::Value(alias)) => {
+            is_scalar_type(&alias.as_type(), want, context)
+        }
         _ => false,
     }
 }
@@ -223,6 +267,19 @@ fn get_classes_of_type(type_: &Type, context: &ModuleContext) -> ClassNamesFromT
     if let Some(inner) = strip_coroutine(type_, context) {
         return get_classes_of_type(inner, context).prepend_coroutine();
     }
+    if let Some(type_variable_restriction) = strip_typevar(type_) {
+        return match type_variable_restriction {
+            TypeVariableRestriction::Bound(inner) => {
+                get_classes_of_type(&inner, context).prepend_typevar_bound()
+            }
+            TypeVariableRestriction::Constraints(inners) => inners
+                .iter()
+                .map(|inner| get_classes_of_type(inner, context).prepend_typevar_constraint())
+                .reduce(|acc, next| acc.join_with(next))
+                .unwrap()
+                .sort_and_dedup(),
+        };
+    }
     // No need to strip ReadOnly[], it is already stripped by pyrefly.
     match type_ {
         Type::ClassType(class_type) => {
@@ -235,7 +292,29 @@ fn get_classes_of_type(type_: &Type, context: &ModuleContext) -> ClassNamesFromT
             ClassNamesFromType::from_class(class_type.class_object(), context)
                 .prepend_modifier(TypeModifier::Type)
         }
-        Type::Tuple(_) => ClassNamesFromType::from_class(context.stdlib.tuple_object(), context),
+        Type::Type(box Type::Union(box Union {
+            members: elements, ..
+        })) if !elements.is_empty() => elements
+            .iter()
+            .map(|inner| match inner {
+                Type::ClassType(class_type) => {
+                    ClassNamesFromType::from_class(class_type.class_object(), context)
+                        .prepend_modifier(TypeModifier::Type)
+                }
+                _ => ClassNamesFromType::not_a_class(),
+            })
+            .reduce(|acc, next| acc.join_with(next))
+            .expect("expected at least one element in union")
+            .sort_and_dedup(),
+        Type::Tuple(_) => {
+            ClassNamesFromType::from_class(context.answers_context.stdlib.tuple_object(), context)
+        }
+        Type::TypedDict(TypedDict::TypedDict(inner)) => {
+            ClassNamesFromType::from_class(inner.class_object(), context)
+        }
+        Type::TypedDict(TypedDict::Anonymous(_)) => {
+            ClassNamesFromType::from_class(context.answers_context.stdlib.dict_object(), context)
+        }
         Type::Union(box Union {
             members: elements, ..
         }) if !elements.is_empty() => elements
@@ -244,16 +323,18 @@ fn get_classes_of_type(type_: &Type, context: &ModuleContext) -> ClassNamesFromT
             .reduce(|acc, next| acc.join_with(next))
             .unwrap()
             .sort_and_dedup(),
-        Type::TypeAlias(alias) => get_classes_of_type(&alias.as_type(), context),
+        Type::TypeAlias(box TypeAliasData::Value(alias)) => {
+            get_classes_of_type(&alias.as_type(), context)
+        }
         _ => ClassNamesFromType::not_a_class(),
     }
 }
 
 /// Apply normalization to a type before exporting it to Pysa.
-pub fn preprocess_type(type_: &Type, context: &ModuleContext) -> Type {
+pub fn preprocess_type(type_: &Type, context: &ModuleAnswersContext) -> Type {
     // Promote `Literal[..]` into `str` or `int`.
-    let type_ = type_.clone().promote_literals(&context.stdlib);
-    strip_self_type(type_)
+    let type_ = type_.clone().promote_implicit_literals(&context.stdlib);
+    strip_self_type(context.answers.heap(), type_)
 }
 
 impl PysaType {
@@ -296,7 +377,7 @@ impl PysaType {
     }
 
     pub fn from_type(type_: &Type, context: &ModuleContext) -> PysaType {
-        let type_ = preprocess_type(type_, context);
+        let type_ = preprocess_type(type_, &context.answers_context);
         let string = string_for_type(&type_);
 
         PysaType {
@@ -353,16 +434,32 @@ pub struct ScalarTypeProperties {
 
 impl ScalarTypeProperties {
     pub fn from_type(type_: &Type, context: &ModuleContext) -> ScalarTypeProperties {
-        let type_ = preprocess_type(type_, context);
+        let type_ = preprocess_type(type_, &context.answers_context);
         Self::from_preprocessed_type(&type_, context)
     }
 
     fn from_preprocessed_type(type_: &Type, context: &ModuleContext) -> ScalarTypeProperties {
         ScalarTypeProperties {
-            is_bool: is_scalar_type(type_, context.stdlib.bool().class_object(), context),
-            is_int: is_scalar_type(type_, context.stdlib.int().class_object(), context),
-            is_float: is_scalar_type(type_, context.stdlib.float().class_object(), context),
-            is_enum: is_scalar_type(type_, context.stdlib.enum_class().class_object(), context),
+            is_bool: is_scalar_type(
+                type_,
+                context.answers_context.stdlib.bool().class_object(),
+                context,
+            ),
+            is_int: is_scalar_type(
+                type_,
+                context.answers_context.stdlib.int().class_object(),
+                context,
+            ),
+            is_float: is_scalar_type(
+                type_,
+                context.answers_context.stdlib.float().class_object(),
+                context,
+            ),
+            is_enum: is_scalar_type(
+                type_,
+                context.answers_context.stdlib.enum_class().class_object(),
+                context,
+            ),
         }
     }
 
