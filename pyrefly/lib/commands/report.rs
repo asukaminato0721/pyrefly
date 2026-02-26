@@ -44,6 +44,7 @@ use crate::binding::binding::KeyExport;
 use crate::binding::binding::ReturnTypeKind;
 use crate::binding::bindings::Bindings;
 use crate::commands::check::Handles;
+use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
 use crate::export::exports::ExportLocation;
@@ -134,9 +135,12 @@ pub struct ReportArgs {
 }
 
 impl ReportArgs {
-    pub fn run(self) -> anyhow::Result<CommandExitStatus> {
+    pub fn run(
+        self,
+        wrapper: Option<ConfigConfigurerWrapper>,
+    ) -> anyhow::Result<CommandExitStatus> {
         self.config_override.validate()?;
-        let (files_to_check, config_finder) = self.files.resolve(self.config_override)?;
+        let (files_to_check, config_finder) = self.files.resolve(self.config_override, wrapper)?;
         Self::run_inner(files_to_check, config_finder, self.prefer_stubs)
     }
 

@@ -1262,6 +1262,7 @@ impl LspInteraction {
                 None,
                 &NoTelemetry,
                 Arc::new(NoExternalReferences),
+                None,
             );
             finish_server.notify_finished();
         });

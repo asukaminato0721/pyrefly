@@ -356,7 +356,7 @@ impl TspInteraction {
 
         // Spawn the server thread and store its handle
         let thread_handle = thread::spawn(move || {
-            run_tsp(conn_server, args, &NoTelemetry)
+            run_tsp(conn_server, args, &NoTelemetry, None)
                 .map(|_| ())
                 .map_err(|e| std::io::Error::other(e.to_string()))
         });

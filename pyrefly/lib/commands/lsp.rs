@@ -13,6 +13,7 @@ use clap::ValueEnum;
 use lsp_types::ServerInfo;
 use pyrefly_util::telemetry::Telemetry;
 
+use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::util::CommandExitStatus;
 use crate::lsp::non_wasm::external_references::ExternalReferences;
 use crate::lsp::non_wasm::module_helpers::PathRemapper;
@@ -70,6 +71,7 @@ pub fn run_lsp(
     path_remapper: Option<PathRemapper>,
     telemetry: &impl Telemetry,
     external_references: Arc<dyn ExternalReferences>,
+    wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
     if let Some(initialize_info) =
         initialize_connection(&connection, args.indexing_mode, server_info)?
@@ -83,6 +85,7 @@ pub fn run_lsp(
             path_remapper,
             telemetry,
             external_references,
+            wrapper,
         )?;
     }
     Ok(())
@@ -113,6 +116,7 @@ impl LspArgs {
         path_remapper: Option<PathRemapper>,
         telemetry: &impl Telemetry,
         external_references: Arc<dyn ExternalReferences>,
+        wrapper: Option<ConfigConfigurerWrapper>,
     ) -> anyhow::Result<CommandExitStatus> {
         // Note that we must have our logging only write out to stderr.
         eprintln!("starting generic LSP server");
@@ -133,6 +137,7 @@ impl LspArgs {
             path_remapper,
             telemetry,
             external_references,
+            wrapper,
         )?;
         io_threads.join()?;
         // We have shut down gracefully.

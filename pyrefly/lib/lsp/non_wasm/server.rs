@@ -233,6 +233,7 @@ use crate::alt::types::class_metadata::ClassMro;
 use crate::binding::binding::BindingClass;
 use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyClassMro;
+use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::config::config::ConfigFile;
 use crate::error::error::Error;
@@ -1194,6 +1195,7 @@ pub fn lsp_loop(
     path_remapper: Option<PathRemapper>,
     telemetry: &impl Telemetry,
     external_references: Arc<dyn ExternalReferences>,
+    wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
     info!("Reading messages");
     let lsp_queue = LspQueue::new();
@@ -1209,6 +1211,7 @@ pub fn lsp_loop(
         from,
         path_remapper,
         external_references,
+        wrapper,
     );
     std::thread::scope(|scope| {
         // Spawn the event processing loop on a thread with a large stack
@@ -2132,6 +2135,7 @@ impl Server {
         surface: Option<String>,
         path_remapper: Option<PathRemapper>,
         external_references: Arc<dyn ExternalReferences>,
+        wrapper: Option<ConfigConfigurerWrapper>,
     ) -> Self {
         let folders = if let Some(capability) = &initialize_params.capabilities.workspace
             && let Some(true) = capability.workspace_folders
@@ -2147,7 +2151,7 @@ impl Server {
 
         let workspaces = Arc::new(Workspaces::new(Workspace::default(), &folders));
 
-        let config_finder = Workspaces::config_finder(workspaces.dupe());
+        let config_finder = Workspaces::config_finder(workspaces.dupe(), wrapper);
 
         // Parse commentFoldingRanges from initialization options, defaults to false
         let comment_folding_ranges = initialize_params

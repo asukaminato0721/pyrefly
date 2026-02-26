@@ -27,6 +27,7 @@ use tracing::error;
 use tracing::info;
 
 use crate::commands::config_finder::ConfigConfigurer;
+use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::config_finder::standard_config_finder;
 use crate::config::config::ConfigFile;
 use crate::config::environment::environment::PythonEnvironment;
@@ -337,8 +338,12 @@ impl Workspaces {
         f(workspace.unwrap_or((None, &default_workspace)))
     }
 
-    pub fn config_finder(workspaces: Arc<Workspaces>) -> ConfigFinder {
-        standard_config_finder(Arc::new(WorkspaceConfigConfigurer(workspaces)))
+    pub fn config_finder(
+        workspaces: Arc<Workspaces>,
+        wrapper: Option<ConfigConfigurerWrapper>,
+    ) -> ConfigFinder {
+        let configure: Arc<dyn ConfigConfigurer> = Arc::new(WorkspaceConfigConfigurer(workspaces));
+        standard_config_finder(configure, wrapper)
     }
 
     pub fn roots(&self) -> Vec<PathBuf> {
