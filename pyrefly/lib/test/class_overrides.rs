@@ -830,6 +830,22 @@ class Child2(Parent):
 );
 
 testcase!(
+    test_unannotated_empty_tuple_attribute_override,
+    r#"
+from typing import Any, assert_type
+
+class Foo:
+    x = ()
+
+class Bar(Foo):
+    x = ("feature_x",)
+
+assert_type(Foo.x, tuple[Any, ...])
+assert_type(Bar.x, tuple[Any, ...])
+    "#,
+);
+
+testcase!(
     test_unannotated_none_attribute_with_annotation_ok,
     r#"
 from typing import Optional

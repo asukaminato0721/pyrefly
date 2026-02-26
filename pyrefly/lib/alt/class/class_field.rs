@@ -38,6 +38,7 @@ use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
+use ruff_python_ast::ExprTuple;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -1983,6 +1984,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             (None, Expr::NoneLiteral(_)) => {
                 self.error(errors, x.range(), ErrorInfo::Kind(ErrorKind::UnannotatedAttribute), "This expression is implicitly inferred to be `Any | None`. Please provide an explicit type annotation.".to_owned());
                 self.union(self.heap.mk_none(), self.heap.mk_any_implicit())
+            }
+            // We interpret `self.foo = ()` to mean the type of foo is an arbitrary-length tuple,
+            // since an empty tuple base attr almost always means to hold a tuple of something in
+            // derived classes. We exclude `__match_args__` because its value is semantically
+            // significant: `__match_args__ = ()` means "no positional match arguments" and
+            // should have type `tuple[()]`, not `tuple[Any, ...]`.
+            (None, Expr::Tuple(ExprTuple { elts, .. }))
+                if elts.is_empty() && *name != dunder::MATCH_ARGS =>
+            {
+                self.error(errors, x.range(), ErrorInfo::Kind(ErrorKind::UnannotatedAttribute), "This expression is implicitly inferred to be `tuple[Any, ...]`. Please provide an explicit type annotation.".to_owned());
+                self.heap.mk_unbounded_tuple(self.heap.mk_any_implicit())
             }
             (None, _) => self.expr_infer(x, errors),
         };
