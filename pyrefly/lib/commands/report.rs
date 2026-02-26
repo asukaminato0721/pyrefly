@@ -50,16 +50,9 @@ use crate::export::exports::ExportLocation;
 use crate::state::require::Require;
 use crate::state::state::State;
 
-/// Location information for code elements
+/// Location of a code element (start of its declaration)
 #[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 struct Location {
-    start: Position,
-    end: Position,
-}
-
-/// Position with line and column
-#[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-struct Position {
     line: usize,
     column: usize,
 }
@@ -162,24 +155,11 @@ impl ReportArgs {
         all_params
     }
 
-    /// Helper to convert byte offset to line and column position
-    fn offset_to_position(module: &Module, offset: ruff_text_size::TextSize) -> Position {
-        let location = module.lined_buffer().line_index().source_location(
-            offset,
-            module.lined_buffer().contents(),
-            ruff_source_file::PositionEncoding::Utf8,
-        );
-        Position {
-            line: location.line.get(),
-            column: location.character_offset.get(),
-        }
-    }
-
-    /// Helper to convert a text range to a Location
     fn range_to_location(module: &Module, range: TextRange) -> Location {
+        let pos = module.lined_buffer().display_pos(range.start(), None);
         Location {
-            start: Self::offset_to_position(module, range.start()),
-            end: Self::offset_to_position(module, range.end()),
+            line: pos.line_within_file().get() as usize,
+            column: pos.column().get() as usize,
         }
     }
 
@@ -207,20 +187,13 @@ impl ReportArgs {
                 if let Some(comment_start) = line.find('#') {
                     let line_number = line_idx + 1; // 1-indexed
                     let start_col = comment_start + 1; // 1-indexed column
-                    let end_col = line.len();
 
                     suppressions.push(Suppression {
                         kind: "ignore".to_owned(),
                         codes,
                         location: Location {
-                            start: Position {
-                                line: line_number,
-                                column: start_col,
-                            },
-                            end: Position {
-                                line: line_number,
-                                column: end_col,
-                            },
+                            line: line_number,
+                            column: start_col,
                         },
                     });
                 }
@@ -679,12 +652,12 @@ z = 3  # pyrefly: ignore[code1, code2]
         // Suppression with single error code
         assert_eq!(suppressions[0].kind, "ignore");
         assert_eq!(suppressions[0].codes, vec!["error-code"]);
-        assert_eq!(suppressions[0].location.start.line, 2);
+        assert_eq!(suppressions[0].location.line, 2);
 
         // Suppression with multiple error codes
         assert_eq!(suppressions[1].kind, "ignore");
         assert_eq!(suppressions[1].codes, vec!["code1", "code2"]);
-        assert_eq!(suppressions[1].location.start.line, 4);
+        assert_eq!(suppressions[1].location.line, 4);
     }
 
     #[test]
@@ -725,12 +698,12 @@ class SomeClass:
         // T (TypeVar) on line 5
         assert_eq!(variables[0].name, "test.T");
         assert_eq!(variables[0].annotation, None);
-        assert_eq!(variables[0].location.start.line, 5, "T should be on line 5");
+        assert_eq!(variables[0].location.line, 5, "T should be on line 5");
 
         // x has no annotation on line 6
         assert_eq!(variables[1].name, "test.x");
         assert_eq!(variables[1].annotation, None);
-        assert_eq!(variables[1].location.start.line, 6, "x should be on line 6");
+        assert_eq!(variables[1].location.line, 6, "x should be on line 6");
 
         // y has a Callable[[int], int] annotation on line 7
         assert_eq!(variables[2].name, "test.y");
@@ -738,12 +711,12 @@ class SomeClass:
             variables[2].annotation,
             Some("Callable[[int], int]".to_owned())
         );
-        assert_eq!(variables[2].location.start.line, 7, "y should be on line 7");
+        assert_eq!(variables[2].location.line, 7, "y should be on line 7");
 
         // z has a str annotation on line 8
         assert_eq!(variables[3].name, "test.z");
         assert_eq!(variables[3].annotation, Some("str".to_owned()));
-        assert_eq!(variables[3].location.start.line, 8, "z should be on line 8");
+        assert_eq!(variables[3].location.line, 8, "z should be on line 8");
 
         // Functions and classes should NOT appear as variables
         assert!(
