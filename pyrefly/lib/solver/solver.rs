@@ -788,6 +788,19 @@ impl Solver {
         vs.0.iter().any(|v| lock.contains_key(v))
     }
 
+    /// Returns true if the given type is a Var that points to a partial
+    /// (PartialQuantified or PartialContained) variable.
+    pub fn is_partial(&self, ty: &Type) -> bool {
+        if let Type::Var(v) = ty {
+            matches!(
+                *self.variables.lock().get(*v),
+                Variable::PartialQuantified(_) | Variable::PartialContained(_)
+            )
+        } else {
+            false
+        }
+    }
+
     /// Called after a quantified function has been called. Given `def f[T](x: int): list[T]`,
     /// after the generic has completed.
     /// If `infer_with_first_use` is true, the variable `T` will be have like an
