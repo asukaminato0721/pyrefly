@@ -1098,6 +1098,6 @@ class CustomCoercer(Generic[_Deserialized, _Serialized]):
         def __getitem__(
             self,
             key: type[_Deserialized],
-        ) -> type[CustomCoercer[_Deserialized, _Serialized]]: ...
+        ) -> type["CustomCoercer[_Deserialized, _Serialized]"]: ...
 "#,
 );
