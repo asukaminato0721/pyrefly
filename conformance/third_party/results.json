@@ -1,9 +1,9 @@
 {
   "total": 138,
-  "pass": 121,
-  "fail": 17,
+  "pass": 122,
+  "fail": 16,
   "pass_rate": 0.88,
-  "differences": 49,
+  "differences": 48,
   "passing": [
     "aliases_explicit.py",
     "aliases_newtype.py",
@@ -74,6 +74,7 @@
     "generics_typevartuple_callable.py",
     "generics_typevartuple_concat.py",
     "generics_typevartuple_overloads.py",
+    "generics_typevartuple_specialization.py",
     "generics_typevartuple_unpack.py",
     "generics_upper_bound.py",
     "generics_variance.py",
@@ -141,7 +142,6 @@
     "generics_self_basic.py": 2,
     "generics_self_usage.py": 2,
     "generics_typevartuple_basic.py": 1,
-    "generics_typevartuple_specialization.py": 1,
     "protocols_modules.py": 1,
     "qualifiers_annotated.py": 6,
     "qualifiers_final_annotation.py": 5

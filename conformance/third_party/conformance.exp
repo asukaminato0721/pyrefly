@@ -7274,6 +7274,17 @@
     },
     {
       "code": -2,
+      "column": 1,
+      "concise_description": "Unpacked argument cannot be used for type parameter T",
+      "description": "Unpacked argument cannot be used for type parameter T",
+      "line": 110,
+      "name": "bad-unpacking",
+      "severity": "error",
+      "stop_column": 36,
+      "stop_line": 110
+    },
+    {
+      "code": -2,
       "column": 26,
       "concise_description": "Only one unbounded type is allowed to be unpacked",
       "description": "Only one unbounded type is allowed to be unpacked",

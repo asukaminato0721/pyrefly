@@ -390,12 +390,22 @@ def func11(a: TA10, b: TA9[*tuple[int, ...], str]):
 );
 
 testcase!(
-    bug = "Conformance: We should not be able to specialize IntTupleGeneric",
     test_typevartuple_specialization_unbounded_no_tvt,
     r#"
 from typing import TypeVar
 T = TypeVar("T")
 IntTupleGeneric = tuple[int, T]
-x: IntTupleGeneric[*tuple[float, ...]]
+x: IntTupleGeneric[*tuple[float, ...]]  # E: Unpacked argument cannot be used for type parameter T
+"#,
+);
+
+testcase!(
+    test_type_var_tuple_wrong_specialization,
+    r#"
+from typing import TypeVar
+T = TypeVar("T")
+T2 = TypeVar("T2")
+IntTupleGeneric = tuple[int, T, T2]
+x: IntTupleGeneric[*tuple[float, ...]]  # E: Unpacked argument cannot be used for type parameter T # E: Expected 2 type arguments for `IntTupleGeneric`, got 1
 "#,
 );

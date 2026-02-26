@@ -360,6 +360,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let nargs = targs.len();
         let mut checked_targs = Vec::new();
         let mut targ_idx = 0;
+        // Whether a TypeVarTuple consumed an unbounded tuple unpack and rolled
+        // back the arg index.
+        let mut tvt_consumed_unbounded = false;
         let mut name_to_idx = SmallMap::new();
         for (param_idx, param) in tparams.iter().enumerate() {
             if let Some(arg) = targs.get(targ_idx) {
@@ -403,6 +406,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             )
                         {
                             targ_idx = new_targ_idx - 1;
+                            tvt_consumed_unbounded = true;
                         } else {
                             targ_idx = new_targ_idx;
                         }
@@ -424,12 +428,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             arg,
                             range,
                             validate_restriction,
+                            tvt_consumed_unbounded,
                             errors,
                         ));
-                        // An unbounded tuple unpack at the trailing position provides
-                        // an infinite supply of its element type. Don't advance past it
-                        // so subsequent TypeVar params can also consume it.
-                        if !(targ_idx == nargs - 1
+                        // Don't advance past an unbounded tuple unpack that a
+                        // TypeVarTuple left for us.
+                        if !(tvt_consumed_unbounded
+                            && targ_idx == nargs - 1
                             && matches!(arg, Type::Unpack(box Type::Tuple(Tuple::Unbounded(_)))))
                         {
                             targ_idx += 1;
@@ -628,12 +633,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         arg: &Type,
         range: TextRange,
         validate_restriction: bool,
+        from_unbounded_supply: bool,
         errors: &ErrorCollector,
     ) -> Type {
         match arg {
-            // An unbounded tuple unpack provides an infinite supply of its element type,
-            // so a TypeVar can consume it by extracting the element type.
-            Type::Unpack(box Type::Tuple(Tuple::Unbounded(elt))) => (**elt).clone(),
+            // Only extract the element type if a TypeVarTuple set up the supply.
+            Type::Unpack(box Type::Tuple(Tuple::Unbounded(elt))) if from_unbounded_supply => {
+                (**elt).clone()
+            }
             Type::Unpack(_) => self.error(
                 errors,
                 range,
