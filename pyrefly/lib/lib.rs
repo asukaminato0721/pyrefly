@@ -34,7 +34,6 @@ mod commands;
 mod compat;
 mod error;
 mod export;
-mod graph;
 mod lsp;
 mod module;
 pub mod playground;
@@ -62,9 +61,14 @@ pub mod library {
                 pub use crate::commands::all::Command;
                 pub use crate::commands::check::CheckArgs;
                 pub use crate::commands::check::FullCheckArgs;
+                pub use crate::commands::config_finder::ConfigConfigurer;
+                pub use crate::commands::config_finder::ConfigConfigurerWrapper;
                 pub use crate::commands::config_finder::default_config_finder;
                 pub use crate::commands::config_finder::default_config_finder_with_overrides;
                 pub use crate::commands::util;
+                pub use crate::lsp::non_wasm::external_references::ExternalReferences;
+                pub use crate::lsp::non_wasm::external_references::NoExternalReferences;
+                pub use crate::lsp::non_wasm::module_helpers::PathRemapper;
             }
         }
     }

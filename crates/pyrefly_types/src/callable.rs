@@ -14,6 +14,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 
 use dupe::Dupe;
+use parse_display::Display;
 use pyrefly_derive::TypeEq;
 use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
@@ -315,12 +316,13 @@ pub struct FuncMetadata {
 }
 
 impl FuncMetadata {
-    pub fn def(module: Module, cls: Class, func: Name) -> Self {
+    pub fn def(module: Module, cls: Class, func: Name, def_index: Option<FuncDefIndex>) -> Self {
         Self {
             kind: FunctionKind::Def(Box::new(FuncId {
                 module,
                 cls: Some(cls),
                 name: func,
+                def_index,
             })),
             flags: FuncFlags::default(),
         }
@@ -397,11 +399,18 @@ pub struct FuncFlags {
     pub dataclass_transform_metadata: Option<DataclassTransformMetadata>,
 }
 
+/// The index of a function definition (`def ..():` statement) within the module,
+/// used as a reference to data associated with the function.
+#[derive(Debug, Clone, Dupe, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Display, Visit, VisitMut, TypeEq)]
+pub struct FuncDefIndex(pub u32);
+
 #[derive(Debug, Clone)]
 pub struct FuncId {
     pub module: Module,
     pub cls: Option<Class>,
     pub name: Name,
+    pub def_index: Option<FuncDefIndex>,
 }
 
 impl PartialEq for FuncId {
@@ -439,16 +448,33 @@ impl Visit<Type> for FuncId {
 }
 
 impl FuncId {
-    fn key_eq(&self) -> (ModuleName, ModulePath, Option<Class>, &Name) {
+    fn key_eq(
+        &self,
+    ) -> (
+        ModuleName,
+        ModulePath,
+        Option<Class>,
+        &Name,
+        Option<FuncDefIndex>,
+    ) {
         (
             self.module.name(),
             self.module.path().to_key_eq(),
             self.cls.clone(),
             &self.name,
+            self.def_index,
         )
     }
 
-    fn key_ord(&self) -> (ModuleName, ModulePath, Option<Class>, &Name) {
+    fn key_ord(
+        &self,
+    ) -> (
+        ModuleName,
+        ModulePath,
+        Option<Class>,
+        &Name,
+        Option<FuncDefIndex>,
+    ) {
         self.key_eq()
     }
 
@@ -490,6 +516,7 @@ pub enum FunctionKind {
     IsSubclass,
     Dataclass,
     DataclassField,
+    DataclassReplace,
     /// `typing.dataclass_transform`. Note that this is `dataclass_transform` itself, *not* the
     /// decorator created by a `dataclass_transform(...)` call. See
     /// https://typing.python.org/en/latest/spec/dataclasses.html#specification.
@@ -703,7 +730,7 @@ impl Callable {
 impl Param {
     fn fmt_default(&self, default: &Option<Type>) -> String {
         match default {
-            Some(Type::Literal(lit)) => format!("{lit}"),
+            Some(Type::Literal(lit)) => format!("{}", lit.value),
             Some(Type::None) => "None".to_owned(),
             _ => "...".to_owned(),
         }
@@ -798,6 +825,27 @@ impl Param {
             _ => false,
         }
     }
+
+    /// Format a parameter for display using the proper type display infrastructure.
+    /// This ensures consistent formatting with default values, position-only markers, etc.
+    ///
+    /// This is similar to the `Display` impl, but allows passing in a `TypeDisplayContext`
+    /// for context-aware formatting (e.g., disambiguating types with the same name).
+    pub fn format_for_signature(&self, type_ctx: &crate::display::TypeDisplayContext) -> String {
+        use pyrefly_util::display::Fmt;
+
+        use crate::type_output::DisplayOutput;
+
+        format!(
+            "{}",
+            Fmt(|f| {
+                let mut output = DisplayOutput::new(type_ctx, f);
+                self.fmt_with_type(&mut output, &|ty, o| {
+                    type_ctx.fmt_helper_generic(ty, false, o)
+                })
+            })
+        )
+    }
 }
 
 impl Display for Param {
@@ -815,19 +863,25 @@ impl Display for Param {
 }
 
 impl FunctionKind {
-    pub fn from_name(module: Module, cls: Option<Class>, func: &Name) -> Self {
+    pub fn from_name(
+        module: Module,
+        cls: Option<Class>,
+        func: &Name,
+        def_index: Option<FuncDefIndex>,
+    ) -> Self {
         match (module.name().as_str(), cls.as_ref(), func.as_str()) {
             ("builtins", None, "isinstance") => Self::IsInstance,
             ("builtins", None, "issubclass") => Self::IsSubclass,
             ("builtins", None, "classmethod") => Self::ClassMethod,
             ("dataclasses", None, "dataclass") => Self::Dataclass,
             ("dataclasses", None, "field") => Self::DataclassField,
-            ("typing", None, "overload") => Self::Overload,
-            ("typing", None, "override") => Self::Override,
-            ("typing", None, "cast") => Self::Cast,
-            ("typing", None, "assert_type") => Self::AssertType,
-            ("typing", None, "reveal_type") => Self::RevealType,
-            ("typing", None, "final") => Self::Final,
+            ("dataclasses", None, "replace") => Self::DataclassReplace,
+            ("typing" | "typing_extensions", None, "overload") => Self::Overload,
+            ("typing" | "typing_extensions", None, "override") => Self::Override,
+            ("typing" | "typing_extensions", None, "cast") => Self::Cast,
+            ("typing" | "typing_extensions", None, "assert_type") => Self::AssertType,
+            ("typing" | "typing_extensions", None, "reveal_type") => Self::RevealType,
+            ("typing" | "typing_extensions", None, "final") => Self::Final,
             ("typing" | "typing_extensions", None, "runtime_checkable") => Self::RuntimeCheckable,
             ("typing" | "typing_extensions", None, "dataclass_transform") => {
                 Self::DataclassTransform
@@ -835,12 +889,13 @@ impl FunctionKind {
             ("abc", None, "abstractmethod") => Self::AbstractMethod,
             ("functools", None, "total_ordering") => Self::TotalOrdering,
             ("typing" | "typing_extensions", None, "disjoint_base") => Self::DisjointBase,
-            ("numba", None, "jit") => Self::NumbaJit,
-            ("numba", None, "njit") => Self::NumbaNjit,
+            ("numba.core.decorators", None, "jit") => Self::NumbaJit,
+            ("numba.core.decorators", None, "njit") => Self::NumbaNjit,
             _ => Self::Def(Box::new(FuncId {
                 module,
                 cls,
                 name: func.clone(),
+                def_index,
             })),
         }
     }
@@ -852,6 +907,7 @@ impl FunctionKind {
             Self::ClassMethod => ModuleName::builtins(),
             Self::Dataclass => ModuleName::dataclasses(),
             Self::DataclassField => ModuleName::dataclasses(),
+            Self::DataclassReplace => ModuleName::dataclasses(),
             Self::DataclassTransform => ModuleName::typing(),
             Self::Final => ModuleName::typing(),
             Self::Overload => ModuleName::typing(),
@@ -877,6 +933,7 @@ impl FunctionKind {
             Self::ClassMethod => Cow::Owned(Name::new_static("classmethod")),
             Self::Dataclass => Cow::Owned(Name::new_static("dataclass")),
             Self::DataclassField => Cow::Owned(Name::new_static("field")),
+            Self::DataclassReplace => Cow::Owned(Name::new_static("replace")),
             Self::DataclassTransform => Cow::Owned(Name::new_static("dataclass_transform")),
             Self::Final => Cow::Owned(Name::new_static("final")),
             Self::Overload => Cow::Owned(Name::new_static("overload")),
@@ -902,6 +959,7 @@ impl FunctionKind {
             Self::ClassMethod => None,
             Self::Dataclass => None,
             Self::DataclassField => None,
+            Self::DataclassReplace => None,
             Self::DataclassTransform => None,
             Self::Final => None,
             Self::Overload => None,
