@@ -13,10 +13,12 @@ use std::ops::Not;
 use dupe::Dupe;
 use itertools::Either;
 use itertools::Itertools;
+use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_types::callable::FunctionKind;
 use pyrefly_types::callable::Param;
 use pyrefly_types::callable::Params;
 use pyrefly_types::class::Class;
@@ -62,6 +64,7 @@ use vec1::Vec1;
 use crate::alt::call::CallTargetLookup;
 use crate::alt::types::decorated_function::DecoratedFunction;
 use crate::binding::binding::KeyDecoratedFunction;
+use crate::binding::binding::KeyUndecoratedFunctionRange;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
 use crate::report::pysa::ast_visitor::AstScopedVisitor;
@@ -83,6 +86,7 @@ use crate::report::pysa::function::FunctionId;
 use crate::report::pysa::function::FunctionNode;
 use crate::report::pysa::function::FunctionRef;
 use crate::report::pysa::function::WholeProgramFunctionDefinitions;
+use crate::report::pysa::function::get_exported_decorated_function;
 use crate::report::pysa::function::should_export_decorated_function;
 use crate::report::pysa::global_variable::GlobalVariableRef;
 use crate::report::pysa::global_variable::WholeProgramGlobalVariables;
@@ -1838,6 +1842,98 @@ impl<'a> CallGraphVisitor<'a> {
         }
     }
 
+    fn call_targets_from_callable_type(
+        &self,
+        function: &pyrefly_types::callable::Function,
+        callee_type: Option<&Type>,
+        callee_expr: Option<AnyNodeRef>,
+        return_type: ScalarTypeProperties,
+        callee_expr_suffix: Option<&str>,
+        unknown_callee_as_direct_call: bool,
+        exclude_object_methods: bool,
+    ) -> MaybeResolved<Vec1<CallTarget<FunctionRef>>> {
+        self.call_targets_from_callable_metadata(function, return_type, callee_expr_suffix)
+            .map(|target| MaybeResolved::Resolved(Vec1::new(target)))
+            .unwrap_or_else(|| {
+                // Fallback for static methods, which have a defining class to search within.
+                self.call_targets_from_method_name(
+                    &method_name_from_function(function),
+                    callee_type, // For static methods, we find them within the callee type
+                    callee_expr,
+                    callee_type,
+                    return_type,
+                    /* is_bound_method */ false,
+                    callee_expr_suffix,
+                    /* override_implicit_receiver*/ None,
+                    /* override_is_direct_call */ None,
+                    unknown_callee_as_direct_call,
+                    exclude_object_methods,
+                )
+            })
+    }
+
+    fn call_targets_from_callable_metadata(
+        &self,
+        function: &pyrefly_types::callable::Function,
+        return_type: ScalarTypeProperties,
+        callee_expr_suffix: Option<&str>,
+    ) -> Option<CallTarget<FunctionRef>> {
+        // Resolve a `CallTarget::Function` directly via its `FuncDefIndex`, bypassing
+        // name-based lookup. This handles module-level function aliases (e.g.,
+        // `fromstring = XML` in `xml.etree.ElementTree`) where the type carries the
+        // original definition's index.
+        let (module, def_index) = match &function.metadata.kind {
+            FunctionKind::Def(box pyrefly_types::callable::FuncId {
+                module,
+                cls: None, // Only handle module-level functions, not methods.
+                def_index: Some(def_index),
+                ..
+            }) => (module, *def_index),
+            _ => return None,
+        };
+
+        let handle = Handle::new(
+            module.name(),
+            module.path().dupe(),
+            self.module_context.handle.sys_info().dupe(),
+        );
+        let target_context = ModuleContext::create(
+            handle,
+            self.module_context.transaction,
+            self.module_context.module_ids,
+        )?;
+
+        let key = KeyUndecoratedFunctionRange(def_index);
+        let short_id = target_context
+            .bindings
+            .key_to_idx_hashed_opt(Hashed::new(&key))
+            .and_then(|idx| target_context.answers.get_idx(idx))?
+            .0;
+
+        let key = KeyDecoratedFunction(short_id);
+        let idx = target_context
+            .bindings
+            .key_to_idx_hashed_opt(Hashed::new(&key))?;
+        let decorated = get_exported_decorated_function(
+            idx,
+            /* skip_property_getter */ false,
+            &target_context,
+        );
+
+        let target = self.call_target_from_function_target(
+            Target::Function(FunctionRef::from_decorated_function(
+                &decorated,
+                &target_context,
+            )),
+            return_type,
+            /* receiver_type */ None,
+            callee_expr_suffix,
+            /* override_implicit_receiver */ None,
+        );
+
+        Some(target)
+    }
+
     fn call_target_from_function_target(
         &self,
         function_target: Target<FunctionRef>,
@@ -2267,19 +2363,12 @@ impl<'a> CallGraphVisitor<'a> {
                     .unwrap()
             }
             Some(CallTargetLookup::Ok(box crate::alt::call::CallTarget::Function(function))) => {
-                // Sometimes this means calling a function (e.g., static method) on a class instance. Sometimes
-                // this could be simply calling a module top-level function, which can be handled when the stack
-                // of D85441657 enables uniquely identifying a definition from a type.
-                self.call_targets_from_method_name(
-                    &method_name_from_function(&function.1),
-                    callee_type, // For static methods, we find them within the callee type
-                    callee_expr,
+                self.call_targets_from_callable_type(
+                    &function.1,
                     callee_type,
+                    callee_expr,
                     return_type,
-                    /* is_bound_method */ false,
                     callee_expr_suffix,
-                    /* override_implicit_receiver*/ None,
-                    /* override_is_direct_call */ None,
                     unknown_callee_as_direct_call,
                     exclude_object_methods,
                 )

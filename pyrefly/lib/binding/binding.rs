@@ -73,6 +73,7 @@ use crate::binding::pydantic::PydanticConfigDict;
 use crate::export::special::SpecialExport;
 use crate::module::module_info::ModuleInfo;
 use crate::types::annotation::Annotation;
+use crate::types::callable::FuncDefIndex;
 use crate::types::class::Class;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFieldProperties;
@@ -124,7 +125,7 @@ assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
 assert_words!(BindingDecorator, 10);
 assert_bytes!(BindingDecoratedFunction, 20);
-assert_words!(BindingUndecoratedFunction, 14);
+assert_words!(BindingUndecoratedFunction, 15);
 
 #[derive(Clone, Dupe, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnyIdx {
@@ -143,6 +144,7 @@ pub enum AnyIdx {
     KeyDecorator(Idx<KeyDecorator>),
     KeyDecoratedFunction(Idx<KeyDecoratedFunction>),
     KeyUndecoratedFunction(Idx<KeyUndecoratedFunction>),
+    KeyUndecoratedFunctionRange(Idx<KeyUndecoratedFunctionRange>),
     KeyAnnotation(Idx<KeyAnnotation>),
     KeyClassMetadata(Idx<KeyClassMetadata>),
     KeyClassMro(Idx<KeyClassMro>),
@@ -206,6 +208,9 @@ macro_rules! dispatch_anyidx {
             }
             AnyIdx::KeyUndecoratedFunction(idx) => {
                 $self.$method::<$crate::binding::binding::KeyUndecoratedFunction>(*idx)
+            }
+            AnyIdx::KeyUndecoratedFunctionRange(idx) => {
+                $self.$method::<$crate::binding::binding::KeyUndecoratedFunctionRange>(*idx)
             }
             AnyIdx::KeyAnnotation(idx) => {
                 $self.$method::<$crate::binding::binding::KeyAnnotation>(*idx)
@@ -274,6 +279,9 @@ macro_rules! dispatch_anyidx {
             AnyIdx::KeyUndecoratedFunction(idx) => {
                 $self.$method::<$crate::binding::binding::KeyUndecoratedFunction>(*idx, $($args),+)
             }
+            AnyIdx::KeyUndecoratedFunctionRange(idx) => {
+                $self.$method::<$crate::binding::binding::KeyUndecoratedFunctionRange>(*idx, $($args),+)
+            }
             AnyIdx::KeyAnnotation(idx) => {
                 $self.$method::<$crate::binding::binding::KeyAnnotation>(*idx, $($args),+)
             }
@@ -320,6 +328,7 @@ impl DisplayWith<Bindings> for AnyIdx {
             Self::KeyDecorator(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyDecoratedFunction(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyUndecoratedFunction(idx) => write!(f, "{}", ctx.display(*idx)),
+            Self::KeyUndecoratedFunctionRange(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyAnnotation(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyClassMetadata(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyClassMro(idx) => write!(f, "{}", ctx.display(*idx)),
@@ -536,6 +545,13 @@ impl Keyed for KeyUndecoratedFunction {
     type Answer = UndecoratedFunction;
     fn to_anyidx(idx: Idx<Self>) -> AnyIdx {
         AnyIdx::KeyUndecoratedFunction(idx)
+    }
+}
+impl Keyed for KeyUndecoratedFunctionRange {
+    type Value = BindingUndecoratedFunctionRange;
+    type Answer = UndecoratedFunctionRangeAnswer;
+    fn to_anyidx(idx: Idx<Self>) -> AnyIdx {
+        AnyIdx::KeyUndecoratedFunctionRange(idx)
     }
 }
 impl Keyed for KeyAnnotation {
@@ -1220,6 +1236,48 @@ impl DisplayWith<ModuleInfo> for KeyUndecoratedFunction {
     }
 }
 
+/// Maps a FuncDefIndex to the function's ShortIdentifier, enabling lookup of
+/// the corresponding KeyUndecoratedFunction.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KeyUndecoratedFunctionRange(pub FuncDefIndex);
+
+impl Ranged for KeyUndecoratedFunctionRange {
+    fn range(&self) -> TextRange {
+        TextRange::default()
+    }
+}
+
+impl DisplayWith<ModuleInfo> for KeyUndecoratedFunctionRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, _: &ModuleInfo) -> fmt::Result {
+        write!(f, "KeyUndecoratedFunctionRange({})", self.0)
+    }
+}
+
+/// Trivial answer type for KeyUndecoratedFunctionRange — just a copy of the
+/// binding value (the function's ShortIdentifier).
+#[derive(Clone, Debug, VisitMut, TypeEq, PartialEq, Eq)]
+pub struct UndecoratedFunctionRangeAnswer(pub ShortIdentifier);
+
+impl Display for UndecoratedFunctionRangeAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "UndecoratedFunctionRangeAnswer({:?})", self.0.range())
+    }
+}
+
+/// Binding value for KeyUndecoratedFunctionRange.
+#[derive(Clone, Debug)]
+pub struct BindingUndecoratedFunctionRange(pub ShortIdentifier);
+
+impl DisplayWith<Bindings> for BindingUndecoratedFunctionRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
+        write!(
+            f,
+            "BindingUndecoratedFunctionRange({})",
+            ctx.module().display(&self.0)
+        )
+    }
+}
+
 /// A reference to a class.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct KeyClass(pub ShortIdentifier);
@@ -1634,6 +1692,7 @@ impl DisplayWith<Bindings> for BindingDecoratedFunction {
 
 #[derive(Clone, Debug)]
 pub struct BindingUndecoratedFunction {
+    pub def_index: FuncDefIndex,
     pub def: FunctionDefData,
     pub stub_or_impl: FunctionStubOrImpl,
     pub class_key: Option<Idx<KeyClass>>,

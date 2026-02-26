@@ -664,6 +664,7 @@ mod tests {
                 module,
                 cls: None,
                 name: Name::new(func_name),
+                def_index: None,
             })),
             flags: FuncFlags::default(),
         };

@@ -4746,6 +4746,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) -> Arc<UndecoratedFunction> {
         self.undecorated_function(
             &x.def,
+            x.def_index,
             x.stub_or_impl,
             x.class_key.as_ref(),
             &x.decorators,

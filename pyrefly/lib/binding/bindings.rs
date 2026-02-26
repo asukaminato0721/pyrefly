@@ -20,6 +20,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_types::callable::FuncDefIndex;
 use pyrefly_types::type_alias::TypeAliasIndex;
 use pyrefly_types::type_info::JoinStyle;
 use pyrefly_util::display::DisplayWithCtx;
@@ -228,6 +229,7 @@ pub struct BindingsBuilder<'a> {
     pub lookup: &'a dyn LookupExport,
     pub sys_info: &'a SysInfo,
     pub class_count: u32,
+    pub func_count: u32,
     type_alias_count: u32,
     await_context: AwaitContext,
     errors: &'a ErrorCollector,
@@ -479,6 +481,7 @@ impl Bindings {
             solver,
             uniques,
             class_count: 0,
+            func_count: 0,
             type_alias_count: 0,
             await_context: AwaitContext::General,
             has_docstring: Ast::has_docstring(&x),
@@ -1950,6 +1953,12 @@ impl<'a> BindingsBuilder<'a> {
     pub fn type_alias_index(&mut self) -> TypeAliasIndex {
         let res = TypeAliasIndex(self.type_alias_count);
         self.type_alias_count += 1;
+        res
+    }
+
+    pub fn func_def_index(&mut self) -> FuncDefIndex {
+        let res = FuncDefIndex(self.func_count);
+        self.func_count += 1;
         res
     }
 }

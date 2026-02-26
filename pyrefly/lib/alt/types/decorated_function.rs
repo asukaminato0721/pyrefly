@@ -20,6 +20,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::callable::Deprecation;
+use pyrefly_types::callable::FuncDefIndex;
 use pyrefly_types::callable::FuncFlags;
 use pyrefly_types::callable::FuncId;
 use pyrefly_types::callable::FunctionKind;
@@ -47,6 +48,7 @@ use crate::types::types::Type;
 /// includes information from decorators, like @classmethod.
 #[derive(Clone, Debug, Visit, VisitMut, TypeEq, PartialEq, Eq)]
 pub struct UndecoratedFunction {
+    pub def_index: FuncDefIndex,
     pub identifier: ShortIdentifier,
     pub metadata: FuncMetadata,
     pub decorators: Box<[(Type, TextRange)]>,
@@ -104,6 +106,7 @@ pub enum SpecialDecorator<'a> {
 impl UndecoratedFunction {
     pub fn recursive() -> Self {
         UndecoratedFunction {
+            def_index: FuncDefIndex(u32::MAX),
             identifier: ShortIdentifier::new(&Identifier::new(
                 Name::default(),
                 TextRange::default(),
@@ -117,6 +120,7 @@ impl UndecoratedFunction {
                     ),
                     cls: None,
                     name: Name::default(),
+                    def_index: None,
                 })),
                 flags: FuncFlags::default(),
             },

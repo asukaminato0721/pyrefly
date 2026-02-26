@@ -61,6 +61,7 @@ use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::solver::solver::QuantifiedHandle;
 use crate::types::callable::Callable;
+use crate::types::callable::FuncDefIndex;
 use crate::types::callable::FuncFlags;
 use crate::types::callable::FuncMetadata;
 use crate::types::callable::Function;
@@ -400,6 +401,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn undecorated_function(
         &self,
         def: &FunctionDefData,
+        def_index: FuncDefIndex,
         stub_or_impl: FunctionStubOrImpl,
         class_key: Option<&Idx<KeyClass>>,
         decorators: &[Idx<KeyDecorator>],
@@ -502,11 +504,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         tparams.extend(legacy_tparams);
         let tparams = self.validated_tparams(def.range, tparams, TParamsSource::Function, errors);
 
-        let kind =
-            FunctionKind::from_name(self.module().dupe(), defining_cls.clone(), &def.name.id);
+        let kind = FunctionKind::from_name(
+            self.module().dupe(),
+            defining_cls.clone(),
+            &def.name.id,
+            Some(def_index),
+        );
         let metadata = FuncMetadata { kind, flags };
 
         Arc::new(UndecoratedFunction {
+            def_index,
             identifier: ShortIdentifier::new(&def.name),
             metadata,
             decorators,

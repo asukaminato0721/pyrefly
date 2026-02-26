@@ -108,7 +108,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 ParamList::new(params),
                 self.heap.mk_self_type(self.as_class_type_unchecked(cls)),
             ),
-            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::NEW),
+            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::NEW, None),
         });
         ClassSynthesizedField::new(ty)
     }
@@ -122,7 +122,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         ];
         let ty = self.heap.mk_function(Function {
             signature: Callable::list(ParamList::new(params), self.heap.mk_none()),
-            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::INIT),
+            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::INIT, None),
         });
         ClassSynthesizedField::new(ty)
     }
@@ -148,7 +148,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.heap
                     .mk_class_type(self.stdlib.iterable(self.unions(element_types))),
             ),
-            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::ITER),
+            metadata: FuncMetadata::def(self.module().dupe(), cls.dupe(), dunder::ITER, None),
         });
         ClassSynthesizedField::new(ty)
     }
