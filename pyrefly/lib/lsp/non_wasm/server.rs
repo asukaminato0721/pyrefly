@@ -223,6 +223,7 @@ use serde_json::Value;
 use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
+use tracing::debug;
 use tracing::error;
 use tracing::info;
 use uuid::Uuid;
@@ -3182,25 +3183,13 @@ impl Server {
             events.removed.len(),
             events.unknown.len()
         );
-        for path in &events.created {
-            info!("[Pyrefly]   created: {}", path.display());
-        }
-        for path in &events.modified {
-            info!("[Pyrefly]   modified: {}", path.display());
-        }
-        for path in &events.removed {
-            info!("[Pyrefly]   removed: {}", path.display());
-        }
-        for path in &events.unknown {
-            info!("[Pyrefly]   unknown: {}", path.display());
-        }
 
         // Record the files that changed for telemetry
         telemetry_event.set_did_change_watched_files_stats(TelemetryDidChangeWatchedFilesStats {
-            created: events.created.clone(),
-            modified: events.modified.clone(),
-            removed: events.removed.clone(),
-            unknown: events.unknown.clone(),
+            created: events.created.iter().take(20).cloned().collect(),
+            modified: events.modified.iter().take(20).cloned().collect(),
+            removed: events.removed.iter().take(20).cloned().collect(),
+            unknown: events.unknown.iter().take(20).cloned().collect(),
         });
 
         let should_requery_build_system = should_requery_build_system(&events);
