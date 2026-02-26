@@ -105,6 +105,9 @@ fn test_pythonpath_change() {
             configuration: Some(Some(
                 json!([{"pyrefly": {"displayTypeErrors": "force-on"}}]),
             )),
+            initialization_options: Some(json!({
+                "pyrefly": {"streamDiagnostics": false},
+            })),
             ..Default::default()
         })
         .expect("Failed to initialize");
@@ -841,7 +844,7 @@ fn test_parse_pylance_configs() {
             {
                 "pyrefly": {"displayTypeErrors": "force-off"},
                 "analysis": {
-                    "diagnosticMode": "workspace",
+                    "diagnosticMode": "openFilesOnly",
                     "importFormat": "relative",
                     "inlayHints": {
                         "callArgumentNames": "on",

@@ -5,14 +5,19 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::io::Write;
+use std::sync::Arc;
+
 use clap::Parser;
 use clap::ValueEnum;
-use lsp_types::InitializeParams;
 use lsp_types::ServerInfo;
 use pyrefly_util::telemetry::Telemetry;
 
 use crate::commands::util::CommandExitStatus;
+use crate::lsp::non_wasm::external_references::ExternalReferences;
+use crate::lsp::non_wasm::module_helpers::PathRemapper;
 use crate::lsp::non_wasm::server::Connection;
+use crate::lsp::non_wasm::server::InitializeInfo;
 use crate::lsp::non_wasm::server::capabilities;
 use crate::lsp::non_wasm::server::initialize_finish;
 use crate::lsp::non_wasm::server::initialize_start;
@@ -54,22 +59,30 @@ pub struct LspArgs {
     pub(crate) build_system_blocking: bool,
 }
 
+/// Run LSP server with optional path remapping.
+/// When a path remapper is provided, go-to-definition will use the remapped
+/// paths for URIs, allowing navigation to source files instead of installed
+/// package files.
 pub fn run_lsp(
     connection: Connection,
     args: LspArgs,
     server_info: Option<ServerInfo>,
+    path_remapper: Option<PathRemapper>,
     telemetry: &impl Telemetry,
+    external_references: Arc<dyn ExternalReferences>,
 ) -> anyhow::Result<()> {
-    if let Some(initialize_params) =
+    if let Some(initialize_info) =
         initialize_connection(&connection, args.indexing_mode, server_info)?
     {
         lsp_loop(
             connection,
-            initialize_params,
+            initialize_info,
             args.indexing_mode,
             args.workspace_indexing_limit,
             args.build_system_blocking,
+            path_remapper,
             telemetry,
+            external_references,
         )?;
     }
     Ok(())
@@ -79,24 +92,29 @@ fn initialize_connection(
     connection: &Connection,
     indexing_mode: IndexingMode,
     server_info: Option<ServerInfo>,
-) -> anyhow::Result<Option<InitializeParams>> {
-    let Some((id, initialize_params)) = initialize_start(connection)? else {
+) -> anyhow::Result<Option<InitializeInfo>> {
+    let Some((id, initialize_info)) = initialize_start(connection)? else {
         return Ok(None);
     };
-    let capabilities = capabilities(indexing_mode, &initialize_params);
+    let capabilities = capabilities(indexing_mode, &initialize_info.params);
     if !initialize_finish(connection, id, capabilities, server_info)? {
         return Ok(None);
     }
-    Ok(Some(initialize_params))
+    Ok(Some(initialize_info))
 }
 
 impl LspArgs {
+    /// Run LSP with optional path remapping.
+    /// When a path remapper is provided, go-to-definition will navigate to
+    /// remapped source files instead of installed package files.
     pub fn run(
         self,
         version: &str,
+        path_remapper: Option<PathRemapper>,
         telemetry: &impl Telemetry,
+        external_references: Arc<dyn ExternalReferences>,
     ) -> anyhow::Result<CommandExitStatus> {
-        // Note that  we must have our logging only write out to stderr.
+        // Note that we must have our logging only write out to stderr.
         eprintln!("starting generic LSP server");
 
         // Create the transport. Includes the stdio (stdin and stdout) versions but this could
@@ -108,10 +126,20 @@ impl LspArgs {
             version: Some(version.to_owned()),
         };
 
-        run_lsp(connection, self, Some(server_info), telemetry)?;
+        run_lsp(
+            connection,
+            self,
+            Some(server_info),
+            path_remapper,
+            telemetry,
+            external_references,
+        )?;
         io_threads.join()?;
         // We have shut down gracefully.
-        eprintln!("shutting down server");
+        // Use writeln! instead of eprintln! to avoid panicking if stderr is closed.
+        // This can happen, for example, when stderr is connected to an LSP client which
+        // closes the connection before Pyrefly language server exits.
+        let _ = writeln!(std::io::stderr(), "shutting down server");
         Ok(CommandExitStatus::Success)
     }
 }
