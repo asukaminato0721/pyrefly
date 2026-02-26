@@ -290,8 +290,8 @@ impl Exports {
         lookup: &dyn LookupExport,
         module_info: &ModuleInfo,
     ) -> Vec<(TextRange, Name)> {
-        // Only validate if __all__ was explicitly defined by the user
-        if self.definitions.dunder_all.kind == DunderAllKind::Inferred {
+        // Only validate if __all__ was explicitly defined and resolvable
+        if self.definitions.dunder_all.kind != DunderAllKind::Specified {
             return Vec::new();
         }
         let mut invalid = Vec::new();
@@ -396,6 +396,14 @@ impl Exports {
             .definitions
             .get(name)
             .is_some_and(|definition| matches!(definition.style, DefinitionStyle::ImportAsEq(_)))
+    }
+
+    /// Returns the range of the unresolvable `__all__` RHS, if applicable.
+    pub fn unresolvable_dunder_all_range(&self) -> Option<TextRange> {
+        match self.definitions.dunder_all.kind {
+            DunderAllKind::Unresolvable(range) => Some(range),
+            _ => None,
+        }
     }
 }
 

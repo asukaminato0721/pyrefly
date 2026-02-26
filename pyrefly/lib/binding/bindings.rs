@@ -515,6 +515,15 @@ impl Bindings {
             );
         }
 
+        // Warn if __all__ could not be statically analyzed
+        if let Some(range) = exports.unresolvable_dunder_all_range() {
+            builder.error(
+                range,
+                ErrorInfo::Kind(ErrorKind::UnresolvableDunderAll),
+                "`__all__` could not be statically analyzed; falling back to module-level definitions for star imports".to_owned(),
+            );
+        }
+
         if let Some(exported_names) = exports.get_explicit_dunder_all_names_iter() {
             builder.record_used_imports_from_dunder_all_names(exported_names);
         }

@@ -1233,3 +1233,42 @@ assert_type(x, int)
 assert_type(y, str)
 "#,
 );
+
+fn env_all_unresolvable() -> TestEnv {
+    TestEnv::one(
+        "foo",
+        r#"
+def generate_all():
+    return ["x"]
+
+x: int = 1
+y: str = "hello"
+_private: float = 3.14
+__all__ = generate_all()  # E: `__all__` could not be statically analyzed
+"#,
+    )
+}
+
+testcase!(
+    test_import_star_all_unresolvable,
+    env_all_unresolvable(),
+    r#"
+from typing import assert_type
+from foo import *
+# Since __all__ is unresolvable, falls back to all public names
+assert_type(x, int)
+assert_type(y, str)
+_private  # E: Could not find name `_private`
+"#,
+);
+
+testcase!(
+    test_import_named_all_unresolvable,
+    env_all_unresolvable(),
+    r#"
+from typing import assert_type
+from foo import x, y
+assert_type(x, int)
+assert_type(y, str)
+"#,
+);
