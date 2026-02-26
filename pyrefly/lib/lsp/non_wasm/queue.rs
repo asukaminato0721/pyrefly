@@ -21,6 +21,7 @@ use lsp_types::DidChangeWorkspaceFoldersParams;
 use lsp_types::DidCloseTextDocumentParams;
 use lsp_types::DidOpenTextDocumentParams;
 use lsp_types::DidSaveTextDocumentParams;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryEvent;
 use pyrefly_util::telemetry::TelemetryEventKind;
@@ -220,12 +221,12 @@ pub struct HeavyTaskQueue {
     task_receiver: Receiver<(HeavyTask, TelemetryEventKind, Instant)>,
     stop_sender: Sender<()>,
     stop_receiver: Receiver<()>,
-    queue_name: &'static str,
+    queue_name: QueueName,
     next_task_id: AtomicUsize,
 }
 
 impl HeavyTaskQueue {
-    pub fn new(queue_name: &'static str) -> Self {
+    pub fn new(queue_name: QueueName) -> Self {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded();
         let (stop_sender, stop_receiver) = crossbeam_channel::unbounded();
         Self {

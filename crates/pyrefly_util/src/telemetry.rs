@@ -5,11 +5,13 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fmt::Display;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Error;
+use dupe::Dupe;
 use lsp_types::Url;
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,6 +27,31 @@ impl Telemetry for NoTelemetry {
     fn record_event(&self, _event: TelemetryEvent, _process: Duration, _error: Option<&Error>) {}
     fn surface(&self) -> Option<String> {
         None
+    }
+}
+
+#[derive(Debug, Clone, Dupe, Copy)]
+pub enum QueueName {
+    LspQueue,
+    RecheckQueue,
+    FindReferenceQueue,
+    SourceDbQueue,
+}
+
+impl Display for QueueName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl QueueName {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LspQueue => "lsp_queue",
+            Self::RecheckQueue => "recheck_queue",
+            Self::FindReferenceQueue => "find_reference_queue",
+            Self::SourceDbQueue => "sourcedb_queue",
+        }
     }
 }
 
@@ -90,12 +117,12 @@ pub struct TelemetryTransactionStats {
 
 #[derive(Clone)]
 pub struct TelemetryTaskId {
-    pub queue_name: &'static str,
+    pub queue_name: QueueName,
     pub id: Option<usize>,
 }
 
 impl TelemetryTaskId {
-    pub fn new(queue_name: &'static str, id: Option<usize>) -> Self {
+    pub fn new(queue_name: QueueName, id: Option<usize>) -> Self {
         Self { queue_name, id }
     }
 }

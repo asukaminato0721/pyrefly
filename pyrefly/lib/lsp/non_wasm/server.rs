@@ -203,6 +203,7 @@ use pyrefly_util::prelude::VecExt;
 use pyrefly_util::task_heap::CancellationHandle;
 use pyrefly_util::task_heap::Cancelled;
 use pyrefly_util::telemetry::ActivityKey;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::SubTaskTelemetry;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryDidChangeWatchedFilesStats;
@@ -1231,7 +1232,7 @@ pub fn lsp_loop(
                         enqueue_time,
                         server.telemetry_state(),
                     );
-                    event_telemetry.set_task_stats(TelemetryTaskId::new("lsp_queue", None));
+                    event_telemetry.set_task_stats(TelemetryTaskId::new(QueueName::LspQueue, None));
                     let event_description = event.describe();
                     let result = server.process_event(
                         &mut ide_transaction_manager,
@@ -2170,9 +2171,9 @@ impl Server {
         let s = Self {
             connection: ServerConnection(connection),
             lsp_queue,
-            recheck_queue: HeavyTaskQueue::new("recheck_queue"),
-            find_reference_queue: HeavyTaskQueue::new("find_reference_queue"),
-            sourcedb_queue: HeavyTaskQueue::new("sourcedb_queue"),
+            recheck_queue: HeavyTaskQueue::new(QueueName::RecheckQueue),
+            find_reference_queue: HeavyTaskQueue::new(QueueName::FindReferenceQueue),
+            sourcedb_queue: HeavyTaskQueue::new(QueueName::SourceDbQueue),
             invalidated_source_dbs: Mutex::new(SmallSet::new()),
             initialize_params,
             indexing_mode,
