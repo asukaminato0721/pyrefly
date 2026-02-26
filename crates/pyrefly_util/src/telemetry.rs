@@ -81,7 +81,8 @@ pub struct TelemetryEvent {
     pub transaction_stats: Option<TelemetryTransactionStats>,
     pub server_state: TelemetryServerState,
     pub file_stats: Option<TelemetryFileStats>,
-    pub task_id: Option<TelemetryTaskId>,
+    pub queue_name: QueueName,
+    pub task_id: Option<usize>,
     pub sourcedb_rebuild_stats: Option<TelemetrySourceDbRebuildStats>,
     pub sourcedb_rebuild_instance_stats: Option<TelemetrySourceDbRebuildInstanceStats>,
     pub file_watcher_stats: Option<TelemetryFileWatcherStats>,
@@ -113,18 +114,6 @@ pub struct TelemetryTransactionStats {
     pub run_time: Duration,
     pub committed: bool,
     pub state_lock_blocked: Duration,
-}
-
-#[derive(Clone)]
-pub struct TelemetryTaskId {
-    pub queue_name: QueueName,
-    pub id: Option<usize>,
-}
-
-impl TelemetryTaskId {
-    pub fn new(queue_name: QueueName, id: Option<usize>) -> Self {
-        Self { queue_name, id }
-    }
 }
 
 #[derive(Default)]
@@ -176,6 +165,7 @@ impl TelemetryEvent {
         kind: TelemetryEventKind,
         enqueued_at: Instant,
         server_state: TelemetryServerState,
+        queue_name: QueueName,
     ) -> (Self, Duration) {
         let start = Instant::now();
         let queue = start - enqueued_at;
@@ -189,6 +179,7 @@ impl TelemetryEvent {
                 transaction_stats: None,
                 server_state,
                 file_stats: None,
+                queue_name,
                 task_id: None,
                 sourcedb_rebuild_stats: None,
                 sourcedb_rebuild_instance_stats: None,
@@ -204,7 +195,8 @@ impl TelemetryEvent {
     pub fn new_task(
         kind: TelemetryEventKind,
         server_state: TelemetryServerState,
-        task_id: Option<TelemetryTaskId>,
+        queue_name: QueueName,
+        task_id: Option<usize>,
         start: Instant,
     ) -> Self {
         Self {
@@ -216,6 +208,7 @@ impl TelemetryEvent {
             transaction_stats: None,
             server_state,
             file_stats: None,
+            queue_name,
             task_id,
             sourcedb_rebuild_stats: None,
             sourcedb_rebuild_instance_stats: None,
@@ -246,8 +239,8 @@ impl TelemetryEvent {
         self.file_stats = Some(stats);
     }
 
-    pub fn set_task_stats(&mut self, stats: TelemetryTaskId) {
-        self.task_id = Some(stats);
+    pub fn set_task_id(&mut self, id: usize) {
+        self.task_id = Some(id);
     }
 
     pub fn set_sourcedb_rebuild_stats(&mut self, stats: TelemetrySourceDbRebuildStats) {
@@ -282,19 +275,22 @@ impl TelemetryEvent {
 pub struct SubTaskTelemetry<'a> {
     telemetry: &'a dyn Telemetry,
     server_state: TelemetryServerState,
-    task_stats: Option<&'a TelemetryTaskId>,
+    queue_name: QueueName,
+    task_id: Option<usize>,
 }
 
 impl<'a> SubTaskTelemetry<'a> {
     pub fn new(
         telemetry: &'a dyn Telemetry,
         server_state: TelemetryServerState,
-        task_stats: Option<&'a TelemetryTaskId>,
+        queue_name: QueueName,
+        task_id: Option<usize>,
     ) -> Self {
         Self {
             telemetry,
             server_state,
-            task_stats,
+            queue_name,
+            task_id,
         }
     }
 
@@ -302,7 +298,8 @@ impl<'a> SubTaskTelemetry<'a> {
         TelemetryEvent::new_task(
             kind,
             self.server_state.clone(),
-            self.task_stats.cloned(),
+            self.queue_name,
+            self.task_id,
             start,
         )
     }

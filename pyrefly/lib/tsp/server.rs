@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use lsp_server::RequestId;
 use lsp_types::InitializeParams;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryEvent;
 use pyrefly_util::telemetry::TelemetryEventKind;
@@ -160,6 +161,7 @@ pub fn tsp_loop(
                 TelemetryEventKind::LspEvent(event.describe()),
                 enqueued_at,
                 server.inner.telemetry_state(),
+                QueueName::LspQueue,
             );
             let event_description = event.describe();
 

@@ -212,7 +212,6 @@ use pyrefly_util::telemetry::TelemetryEventKind;
 use pyrefly_util::telemetry::TelemetryFileStats;
 use pyrefly_util::telemetry::TelemetryFileWatcherStats;
 use pyrefly_util::telemetry::TelemetryServerState;
-use pyrefly_util::telemetry::TelemetryTaskId;
 use pyrefly_util::thread_pool::ThreadPool;
 use pyrefly_util::watch_pattern::WatchPattern;
 use ruff_text_size::Ranged;
@@ -1231,8 +1230,8 @@ pub fn lsp_loop(
                         TelemetryEventKind::LspEvent(event.describe()),
                         enqueue_time,
                         server.telemetry_state(),
+                        QueueName::LspQueue,
                     );
-                    event_telemetry.set_task_stats(TelemetryTaskId::new(QueueName::LspQueue, None));
                     let event_description = event.describe();
                     let result = server.process_event(
                         &mut ide_transaction_manager,
@@ -1294,10 +1293,12 @@ fn record_code_action_telemetry(
     telemetry: &dyn Telemetry,
     activity_key: Option<&ActivityKey>,
     file_stats: Option<&TelemetryFileStats>,
+    queue_name: QueueName,
 ) {
     let mut event = TelemetryEvent::new_task(
         TelemetryEventKind::CodeAction(name.to_owned()),
         server_state.clone(),
+        queue_name,
         None,
         start,
     );
@@ -1597,6 +1598,7 @@ impl Server {
                             let mut event = TelemetryEvent::new_task(
                                 TelemetryEventKind::AdHocSolve(label.to_owned()),
                                 server_state.clone(),
+                                QueueName::LspQueue,
                                 None,
                                 start,
                             );
@@ -1715,6 +1717,7 @@ impl Server {
                                     telemetry,
                                     activity_key,
                                     file_stats,
+                                    QueueName::LspQueue,
                                 )
                                 .unwrap_or_default()),
                         ));
@@ -2591,7 +2594,7 @@ impl Server {
                     if self.indexed_configs.lock().insert(config.dupe()) {
                         self.recheck_queue.queue_task(
                             TelemetryEventKind::PopulateProjectFiles,
-                            Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+                            Box::new(move |server, _telemetry, telemetry_event, _, _| {
                                 server
                                     .populate_all_project_files_in_config(config, telemetry_event);
                             }),
@@ -2647,7 +2650,7 @@ impl Server {
                 drop(indexed_workspaces);
                 self.recheck_queue.queue_task(
                     TelemetryEventKind::PopulateWorkspaceFiles,
-                    Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+                    Box::new(move |server, _telemetry, telemetry_event, _, _| {
                         server.populate_all_workspaces_files(
                             roots_to_populate_files,
                             telemetry_event,
@@ -2671,7 +2674,7 @@ impl Server {
         let open_handles = self.get_open_file_handles();
         self.recheck_queue.queue_task(
             kind,
-            Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+            Box::new(move |server, _telemetry, telemetry_event, _, _| {
                 // Filter to only include handles from workspaces with streaming enabled
                 let streaming_handles: SmallSet<Handle> = open_handles
                     .iter()
@@ -2834,7 +2837,8 @@ impl Server {
         let run = move |server: &Server,
                         telemetry: &dyn Telemetry,
                         telemetry_event: &mut TelemetryEvent,
-                        task_stats: Option<&TelemetryTaskId>| {
+                        queue_name: QueueName,
+                        task_id: Option<usize>| {
             let mut configs_to_paths: SmallMap<ArcId<ConfigFile>, SmallSet<ModulePath>> =
                 SmallMap::new();
             let config_finder = server.state.config_finder();
@@ -2852,7 +2856,7 @@ impl Server {
                     .insert(handle.path().dupe());
             }
             let task_telemetry =
-                SubTaskTelemetry::new(telemetry, server.telemetry_state(), task_stats);
+                SubTaskTelemetry::new(telemetry, server.telemetry_state(), queue_name, task_id);
             let (new_invalidated_source_dbs, rebuild_stats) =
                 ConfigFile::query_source_db(&configs_to_paths, force, Some(task_telemetry));
             telemetry_event.set_sourcedb_rebuild_stats(rebuild_stats);
@@ -2866,7 +2870,7 @@ impl Server {
         };
 
         if self.build_system_blocking {
-            run(self, telemetry, telemetry_event, None);
+            run(self, telemetry, telemetry_event, QueueName::LspQueue, None);
         } else {
             self.sourcedb_queue
                 .queue_task(TelemetryEventKind::SourceDbRebuild, Box::new(run));
@@ -3279,7 +3283,7 @@ impl Server {
         self.queue_source_db_rebuild_and_recheck(telemetry, telemetry_event, false);
         self.recheck_queue.queue_task(
             TelemetryEventKind::InvalidateOnClose,
-            Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+            Box::new(move |server, _telemetry, telemetry_event, _, _| {
                 // Clear out the memory associated with this file.
                 // Not a race condition because we immediately call validate_in_memory to put back the open files as they are now.
                 // Having the extra file hanging around doesn't harm anything, but does use extra memory.
@@ -3359,7 +3363,7 @@ impl Server {
             // calculation in the recheck queue to ensure ordering.
             self.recheck_queue.queue_task(
                 TelemetryEventKind::PopulateProjectFiles,
-                Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+                Box::new(move |server, _telemetry, telemetry_event, _, _| {
                     let configs: Vec<_> = server
                         .open_files
                         .read()
@@ -3651,6 +3655,7 @@ impl Server {
         telemetry: &dyn Telemetry,
         activity_key: Option<&ActivityKey>,
         file_stats: Option<&TelemetryFileStats>,
+        queue_name: QueueName,
     ) -> Option<CodeActionResponse> {
         let uri = &params.text_document.uri;
         let (handle, lsp_config) = self.make_handle_with_lsp_analysis_config_if_enabled(
@@ -3710,6 +3715,7 @@ impl Server {
                 telemetry,
                 activity_key,
                 file_stats,
+                queue_name,
             );
         }
         let start = Instant::now();
@@ -3745,6 +3751,7 @@ impl Server {
                 telemetry,
                 activity_key,
                 file_stats,
+                queue_name,
             );
         }
         // Optimization: do not calculate refactors for automated codeactions since they're expensive
@@ -3797,6 +3804,7 @@ impl Server {
                         telemetry,
                         activity_key,
                         file_stats,
+                        queue_name,
                     );
                 }};
             }
@@ -3934,7 +3942,7 @@ impl Server {
         };
         self.find_reference_queue.queue_task(
             TelemetryEventKind::FindFromDefinition,
-            Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+            Box::new(move |server, _telemetry, telemetry_event, _, _| {
                 let mut transaction = server.state.cancellable_transaction();
                 server
                     .cancellation_handles
@@ -4649,7 +4657,7 @@ impl Server {
         let open_handles = self.get_open_file_handles();
         self.recheck_queue.queue_task(
             TelemetryEventKind::InvalidateConfig,
-            Box::new(move |server, _telemetry, telemetry_event, _task_stats| {
+            Box::new(move |server, _telemetry, telemetry_event, _, _| {
                 // Filter to only include handles from workspaces with streaming enabled
                 let streaming_handles: SmallSet<Handle> = open_handles
                     .iter()
