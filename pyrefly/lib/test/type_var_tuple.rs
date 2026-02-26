@@ -388,3 +388,14 @@ def func11(a: TA10, b: TA9[*tuple[int, ...], str]):
     assert_type(b, tuple[*tuple[int, ...], str])
 "#,
 );
+
+testcase!(
+    bug = "Conformance: We should not be able to specialize IntTupleGeneric",
+    test_typevartuple_specialization_unbounded_no_tvt,
+    r#"
+from typing import TypeVar
+T = TypeVar("T")
+IntTupleGeneric = tuple[int, T]
+x: IntTupleGeneric[*tuple[float, ...]]
+"#,
+);
