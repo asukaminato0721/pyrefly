@@ -455,6 +455,7 @@ impl Transaction<'_> {
             .import_handle(handle, ModuleName::builtins(), None)
             .finding()
         {
+            let builtin_path = completion_data_handle_path(&builtin_handle);
             let builtin_exports = self.get_exports(&builtin_handle);
             for (name, location) in builtin_exports.iter() {
                 if let Some(identifier) = identifier
@@ -465,19 +466,30 @@ impl Transaction<'_> {
                 {
                     continue;
                 }
-                let kind = match location {
+                let (kind, data) = match location {
                     ExportLocation::OtherModule(..) => continue,
-                    ExportLocation::ThisModule(export) => export
-                        .symbol_kind
-                        .map_or(Some(CompletionItemKind::VARIABLE), |k| {
-                            Some(k.to_lsp_completion_item_kind())
-                        }),
+                    ExportLocation::ThisModule(export) => {
+                        let data = CompletionResolveData::export_value(
+                            ModuleName::builtins(),
+                            name.as_str(),
+                            export.docstring_range.map(|_| builtin_path.clone()),
+                            export.docstring_range,
+                        );
+                        (
+                            export
+                                .symbol_kind
+                                .map_or(Some(CompletionItemKind::VARIABLE), |k| {
+                                    Some(k.to_lsp_completion_item_kind())
+                                }),
+                            Some(data),
+                        )
+                    }
                 };
                 completions.push(RankedCompletion::new(CompletionItem {
                     label: name.as_str().to_owned(),
                     detail: None,
                     kind,
-                    data: Some(serde_json::json!("builtin")),
+                    data,
                     ..Default::default()
                 }));
             }
