@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use itertools::Itertools;
 use pyrefly_python::dunder;
 use pyrefly_types::callable::FunctionKind;
-use pyrefly_types::meta_shape::MetaShapeFunction;
-use pyrefly_types::meta_shape::MetaShapeRegistry;
+use pyrefly_types::meta_shape_dsl::MetaShapeFunction;
+use pyrefly_types::tensor_ops_registry::TensorOpsRegistry;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_types::types::TArgs;
@@ -1098,10 +1098,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         mut ctor_targs: Option<&mut TArgs>,
     ) -> Type {
         // Look up meta-shape early so we can conditionally collect bound args.
-        let meta_shape_func = Self::lookup_meta_shape(callable_name);
-        let mut bound_args: Option<HashMap<String, Type>> = meta_shape_func
-            .filter(|f| !f.signature().is_empty())
-            .map(|_| HashMap::new());
+        // Only consult the registry when tensor_shapes is enabled to avoid
+        // unnecessary DSL parsing and per-call HashMap lookups.
+        let meta_shape_func = if self.solver().tensor_shapes {
+            Self::lookup_meta_shape(callable_name)
+        } else {
+            None
+        };
+        let mut bound_args: Option<HashMap<String, Type>> = meta_shape_func.map(|_| HashMap::new());
 
         let (callable_qs, mut callable) = if let Some(tparams) = tparams {
             // If we have a hint, we want to try to instantiate against it first, so we can contextually type
@@ -1283,11 +1287,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     /// Look up whether a callable has a registered meta-shape function.
-    fn lookup_meta_shape(
-        callable_name: Option<&FunctionKind>,
-    ) -> Option<&'static dyn MetaShapeFunction> {
+    fn lookup_meta_shape(callable_name: Option<&FunctionKind>) -> Option<&dyn MetaShapeFunction> {
         use std::sync::OnceLock;
-        static META_SHAPE_REGISTRY: OnceLock<MetaShapeRegistry> = OnceLock::new();
+        static TENSOR_OPS_REGISTRY: OnceLock<TensorOpsRegistry> = OnceLock::new();
 
         let func_id = callable_name.and_then(|fk| match fk {
             FunctionKind::Def(box_func_id) => Some(box_func_id.as_ref()),
@@ -1300,7 +1302,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             format!("{}.{}", func_id.module.name(), func_id.name)
         };
 
-        let registry = META_SHAPE_REGISTRY.get_or_init(MetaShapeRegistry::new);
+        let registry = TENSOR_OPS_REGISTRY.get_or_init(TensorOpsRegistry::new);
         registry.get(&qualified_name)
     }
 
@@ -1313,18 +1315,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Type {
-        match meta_shape_func.bind_args(bound_args) {
-            Some(meta_args) => match meta_shape_func.compute(meta_args) {
-                Ok(result) => meta_shape_func.result_to_type(result, &ret_type),
-                Err(shape_error) => {
-                    errors.add(
-                        range,
-                        ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                        vec1![format!("{}", shape_error)],
-                    );
-                    ret_type
-                }
-            },
+        match meta_shape_func.evaluate(bound_args, &ret_type) {
+            Some(Ok(ty)) => ty,
+            Some(Err(shape_error)) => {
+                errors.add(
+                    range,
+                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                    vec1![format!("{}", shape_error)],
+                );
+                ret_type
+            }
             None => ret_type,
         }
     }

@@ -283,8 +283,8 @@ class Tensor[*Shape]:
         """Scatter elements along dimension. Shape-preserving operation."""
         ...
 
-    def masked_select(self: Tensor, mask: Tensor) -> Tensor:
-        """Select elements with mask. Shape inference via meta-shape: torch.Tensor.masked_select"""
+    def masked_select(self: Tensor, mask: Tensor) -> Tensor[Any]:
+        """Select elements with mask. Returns 1D tensor with data-dependent size."""
         ...
 
     # ==== Phase 1.1: Missing Shape Operations (Methods) ====
@@ -1233,8 +1233,8 @@ def scatter[*Shape](
     """Scatter elements along dimension. Shape-preserving operation."""
     ...
 
-def masked_select(self: Tensor, mask: Tensor) -> Tensor:
-    """Select elements with mask. Shape inference via meta-shape: torch.masked_select"""
+def masked_select(self: Tensor, mask: Tensor) -> Tensor[Any]:
+    """Select elements with mask. Returns 1D tensor with data-dependent size."""
     ...
 
 # ==== Phase 1.1: Missing Shape Operations ====

@@ -378,9 +378,8 @@ fn broadcast_concrete_with_unpacked(
             result_suffix,
         ))))
     } else {
-        Err(ShapeError::InvalidDimension {
-            value: 0,
-            reason: "Cannot broadcast concrete dims with variadic shape: alignment is ambiguous"
+        Err(ShapeError::ShapeComputation {
+            message: "Cannot broadcast concrete dims with variadic shape: alignment is ambiguous"
                 .to_owned(),
         })
     }
@@ -438,9 +437,8 @@ fn broadcast_unpacked_with_unpacked(
         ))))
     } else {
         // Different TypeVarTuples or structural mismatch
-        Err(ShapeError::InvalidDimension {
-            value: 0,
-            reason: format!(
+        Err(ShapeError::ShapeComputation {
+            message: format!(
                 "Cannot broadcast variadic shapes: incompatible middles *{} vs *{}",
                 am, bm
             ),
@@ -501,9 +499,8 @@ fn broadcast_dim(a_ty: &Type, b_ty: &Type, position: usize) -> Result<Type, Shap
         (Type::Size(SizeExpr::Literal(1)), _) => Ok(b_ty.clone()),
         (_, Type::Size(SizeExpr::Literal(1))) => Ok(a_ty.clone()),
         // Different non-broadcastable types: incompatible
-        _ => Err(ShapeError::InvalidDimension {
-            value: 0,
-            reason: format!(
+        _ => Err(ShapeError::ShapeComputation {
+            message: format!(
                 "Cannot broadcast dimension {} with dimension {} at position {}",
                 a_ty, b_ty, position
             ),
