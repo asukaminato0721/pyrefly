@@ -59,6 +59,16 @@ def main() -> int:
         default=None,
         help="LLM model to use (default: depends on backend)",
     )
+    parser.add_argument(
+        "--pyrefly-diff",
+        default=None,
+        help="Path to file containing the pyrefly PR code diff (for attribution)",
+    )
+    parser.add_argument(
+        "--suggest",
+        action="store_true",
+        help="Generate aggregate source code suggestions for fixing regressions (Pass 3)",
+    )
 
     args = parser.parse_args()
 
@@ -94,12 +104,27 @@ def main() -> int:
     else:
         fetch_code = args.fetch_code
 
+    # Read the pyrefly PR diff if provided
+    pyrefly_diff = None
+    if args.pyrefly_diff:
+        try:
+            with open(args.pyrefly_diff) as f:
+                pyrefly_diff = f.read()
+        except FileNotFoundError:
+            print(f"Error: file not found: {args.pyrefly_diff}", file=sys.stderr)
+            return 1
+        except OSError as e:
+            print(f"Error reading pyrefly diff file: {e}", file=sys.stderr)
+            return 1
+
     # Classify
     result = classify_all(
         projects,
         fetch_code=fetch_code,
         use_llm=use_llm,
         model=args.model,
+        pyrefly_diff=pyrefly_diff,
+        generate_suggestion=args.suggest,
     )
 
     # Output
