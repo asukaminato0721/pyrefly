@@ -1172,3 +1172,62 @@ class B(A):
     x: ClassVar[int]  # OK - ClassVar, @override cannot be applied
     "#,
 );
+
+testcase!(
+    test_raise_not_implemented_infers_never_but_allows_override,
+    r#"
+from typing import Never, assert_type
+
+class A:
+    def foo(self):
+        raise NotImplementedError()
+
+assert_type(A().foo(), Never)
+
+class B(A):
+    def foo(self) -> int:
+        return 1
+"#,
+);
+
+testcase!(
+    test_explicit_never_annotation_allows_override,
+    r#"
+from typing import Never, assert_type
+
+class A:
+    def foo(self) -> Never:
+        raise NotImplementedError()
+
+assert_type(A().foo(), Never)
+
+class B(A):
+    def foo(self) -> int:
+        return 1
+    "#,
+);
+
+testcase!(
+    test_bad_parameter_override_with_never_return,
+    r#"
+class A:
+    def f(self, x: int):
+        raise NotImplementedError()
+class B(A):
+    def f(self, x: str):  # E: overrides parent class `A` in an inconsistent manner
+        return 1
+    "#,
+);
+
+testcase!(
+    test_callable_returning_never_checked_for_override_consistency,
+    r#"
+from typing import Any, Callable, Never, assert_type
+
+class A:
+    f: Callable[[Any], Never]
+
+class B(A):
+    f: Callable[[Any], int]  # E: overrides parent class `A` in an inconsistent manner
+    "#,
+);

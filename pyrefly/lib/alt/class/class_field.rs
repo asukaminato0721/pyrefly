@@ -16,6 +16,7 @@ use pyrefly_derive::VisitMut;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::FuncFlags;
 use pyrefly_types::callable::FuncId;
 use pyrefly_types::callable::FunctionKind;
@@ -3069,12 +3070,31 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             {
                 continue;
             }
-            // Substitute `Self` with derived class to support contravariant occurrences of `Self`
-            let want_attribute = self.as_instance_attribute(
-                field_name,
-                &want_class_field,
-                &Instance::of_protocol(parent, self.instantiate(cls)),
-            );
+            let want_attribute = {
+                let mut attr = self.as_instance_attribute(
+                    field_name,
+                    &want_class_field,
+                    // Substitute `Self` with derived class to support contravariant occurrences of `Self`
+                    &Instance::of_protocol(parent, self.instantiate(cls)),
+                );
+                if !want_class_field.has_explicit_annotation() {
+                    match &mut attr {
+                        ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty)
+                            if ty.has_toplevel_func_metadata() =>
+                        {
+                            // If parent return type was Never (for example a method that only raises),
+                            // skip override consistency checks on the return type so we don't produce noisy bad-override diagnostics.
+                            ty.visit_toplevel_callable_mut(&mut |callable: &mut Callable| {
+                                if callable.ret.is_never() {
+                                    callable.ret = Type::any_implicit();
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                attr
+            };
             if got_attribute.is_none() {
                 // Optimisation: Only compute the `got_attr` once, and only if we actually need it.
                 got_attribute = Some(self.as_instance_attribute(
