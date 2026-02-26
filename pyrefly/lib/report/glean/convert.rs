@@ -73,6 +73,13 @@ fn join_names(base_name: &str, name: &str) -> String {
     }
 }
 
+fn find_preference_glean() -> FindPreference {
+    FindPreference {
+        prefer_pyi: false, // Similar to Pyrefly behavior, we prefer py over pyi files
+        ..Default::default()
+    }
+}
+
 fn all_modules_with_range(
     module_name: ModuleName,
     position: TextSize,
@@ -551,7 +558,7 @@ impl GleanState<'_> {
         let definition = self.transaction.find_definition_for_name_use(
             self.handle,
             &identifier,
-            FindPreference::default(),
+            find_preference_glean(),
         );
 
         let additional_definitions = self.get_additional_definitions(identifier.range());
@@ -573,7 +580,7 @@ impl GleanState<'_> {
         let definition = self.transaction.find_definition_for_name_use(
             self.handle,
             &identifier,
-            FindPreference::default(),
+            find_preference_glean(),
         );
         let additional_definitions = if definition.is_some() || self.names.contains(&fqname) {
             self.get_additional_definitions(range)
@@ -655,7 +662,7 @@ impl GleanState<'_> {
                             self.transaction
                                 .find_definition_for_base_type(
                                     self.handle,
-                                    FindPreference::default(),
+                                    find_preference_glean(),
                                     completions(ty.clone()),
                                     name,
                                 )
@@ -1055,7 +1062,7 @@ impl GleanState<'_> {
     fn find_definition(&self, position: TextSize) -> Vec<DefinitionLocation> {
         let definitions =
             self.transaction
-                .find_definition(self.handle, position, FindPreference::default());
+                .find_definition(self.handle, position, find_preference_glean());
 
         definitions
             .into_iter()
@@ -1069,10 +1076,7 @@ impl GleanState<'_> {
         let definition = self.transaction.find_definition_for_imported_module(
             self.handle,
             module,
-            FindPreference {
-                prefer_pyi: false, // Similar to Pyrefly behavior, we prefer py over pyi files
-                ..Default::default()
-            },
+            find_preference_glean(),
         );
 
         definition.map_or(
