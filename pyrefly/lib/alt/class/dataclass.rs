@@ -428,11 +428,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         ClassSynthesizedField::new(ty)
     }
 
+    /// Validate that frozen and non-frozen dataclasses are not mixed in an inheritance chain.
+    /// For standard `@dataclass`, we reject both directions (frozen-from-non-frozen and
+    /// non-frozen-from-frozen). For `@dataclass_transform` classes, only non-frozen inheriting
+    /// from frozen is an error, since the transform allows each class to independently opt
+    /// into frozen.
     pub fn validate_frozen_dataclass_inheritance(
         &self,
         cls: &Class,
         dataclass_metadata: &DataclassMetadata,
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
+        is_from_dataclass_transform: bool,
         errors: &ErrorCollector,
     ) {
         for (base, base_metadata) in bases_with_metadata {
@@ -441,6 +447,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let is_current_frozen = dataclass_metadata.kws.frozen;
 
                 if is_current_frozen != is_base_frozen {
+                    // For dataclass_transform classes, a frozen subclass of a non-frozen base is
+                    // allowed. The restriction only applies when a non-frozen subclass inherits
+                    // from a frozen base, which would violate the parent's immutability guarantee.
+                    if is_from_dataclass_transform && is_current_frozen && !is_base_frozen {
+                        continue;
+                    }
+
                     let current_status = if is_current_frozen {
                         "frozen"
                     } else {

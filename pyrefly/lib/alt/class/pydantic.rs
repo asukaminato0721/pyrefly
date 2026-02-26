@@ -184,7 +184,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
-    /// Helper function to find inherited keyword values from parent dataclass metadata
+    /// Helper function to find inherited keyword values from parent pydantic model metadata.
+    /// Only inherits from parents that are themselves pydantic models, not from arbitrary
+    /// dataclass parents whose config values (e.g. strict) may have different defaults.
     fn find_inherited_keyword_value<T>(
         &self,
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
@@ -192,6 +194,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) -> Option<T> {
         bases_with_metadata
             .iter()
+            .filter(|(_, metadata)| metadata.is_pydantic_model())
             .find_map(|(_, metadata)| metadata.dataclass_metadata().map(&extractor))
     }
 

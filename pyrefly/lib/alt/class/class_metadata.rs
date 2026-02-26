@@ -305,11 +305,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             })
         });
 
-        // If this class inherits from a dataclass_transform-ed class, record the defaults that we
-        // should use for dataclass parameters.
+        // If this class inherits from a dataclass_transform-ed class or uses a metaclass decorated
+        // with @dataclass_transform, record the defaults that we should use for dataclass parameters.
         let dataclass_defaults_from_base_class = bases_with_metadata
             .iter()
-            .find_map(|(_, metadata)| metadata.dataclass_transform_metadata().cloned());
+            .find_map(|(_, metadata)| metadata.dataclass_transform_metadata().cloned())
+            .or_else(|| {
+                metaclass.and_then(|c| {
+                    self.get_metadata_for_class(c.class_object())
+                        .dataclass_transform_metadata()
+                        .cloned()
+                })
+            });
         let dataclass_transform_metadata = self.dataclass_transform_metadata(
             &decorators,
             metaclass,
@@ -323,6 +330,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         );
         let is_attrs_class =
             self.is_attrs_class(&dataclass_from_dataclass_transform, &bases_with_metadata);
+        let is_from_dataclass_transform = dataclass_from_dataclass_transform.is_some();
         let dataclass_metadata = self.dataclass_metadata(
             cls,
             &decorators,
@@ -334,7 +342,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         if let Some(dm) = dataclass_metadata.as_ref()
             && pydantic_config.is_none()
         {
-            self.validate_frozen_dataclass_inheritance(cls, dm, &bases_with_metadata, errors);
+            self.validate_frozen_dataclass_inheritance(
+                cls,
+                dm,
+                &bases_with_metadata,
+                is_from_dataclass_transform,
+                errors,
+            );
         }
         let extends_abc = self.extends_abc(&bases_with_metadata, metaclass);
 
