@@ -557,7 +557,7 @@ impl<'a> BindingsBuilder<'a> {
             // raise NotImplementedError(...)
             [
                 Stmt::Raise(StmtRaise {
-                    exc: Some(box Expr::Call(ExprCall { box func, .. })),
+                    exc: Some(box (Expr::Call(ExprCall { box func, .. }) | func)),
                     ..
                 }),
             ] if self.as_special_export(func) == Some(SpecialExport::NotImplementedError) => true,
