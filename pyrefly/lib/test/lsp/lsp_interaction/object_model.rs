@@ -293,7 +293,7 @@ impl TestClient {
         self.conn
             .as_ref()
             .unwrap()
-            .receiver
+            .channel_receiver()
             .recv_timeout(self.recv_timeout)
     }
 

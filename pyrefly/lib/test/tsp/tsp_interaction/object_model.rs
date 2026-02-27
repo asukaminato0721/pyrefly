@@ -342,6 +342,7 @@ impl TspInteraction {
         init_test();
 
         let (conn_server, conn_client) = Connection::memory();
+        let client_receiver = conn_client.channel_receiver().clone();
 
         let args = TspArgs {
             indexing_mode: IndexingMode::LazyBlocking,
@@ -363,7 +364,7 @@ impl TspInteraction {
 
         server.server_thread = Some(thread_handle);
 
-        let client = TestTspClient::new(conn_client.receiver);
+        let client = TestTspClient::new(client_receiver);
 
         Self { server, client }
     }

@@ -9,6 +9,8 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
+use std::io::BufReader;
+use std::io::Stdin;
 use std::iter::once;
 use std::path::Path;
 use std::path::PathBuf;
@@ -385,45 +387,52 @@ pub trait TspInterface: Send + Sync {
 
 pub struct Connection {
     pub sender: Sender<Message>,
-    pub receiver: Receiver<Message>,
+    reader: ConnectionReader,
 }
 
-pub struct IoThreads {
-    reader: JoinHandle<std::io::Result<()>>,
+/// The message source for a `Connection`. Either a crossbeam channel (used in
+/// tests via `Connection::memory()`) or a direct stdin reader (used in
+/// production via `Connection::stdio()`).
+enum ConnectionReader {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Channel(Receiver<Message>),
+    Stdio(Mutex<BufReader<Stdin>>),
+}
+
+impl Connection {
+    /// Receive the next message, blocking until one is available.
+    /// Returns `None` if the connection is closed (channel disconnected or
+    /// stdin EOF).
+    pub fn recv(&self) -> Option<Message> {
+        match &self.reader {
+            ConnectionReader::Channel(r) => r.recv().ok(),
+            ConnectionReader::Stdio(r) => {
+                let mut r = r.lock();
+                read_lsp_message(&mut *r).ok().flatten()
+            }
+        }
+    }
+}
+
+pub struct IoThread {
     writer: JoinHandle<std::io::Result<()>>,
 }
 
-impl IoThreads {
+impl IoThread {
     pub fn join(self) -> std::io::Result<()> {
-        let reader_result = match self.reader.join() {
+        match self.writer.join() {
             Ok(result) => result,
             Err(e) => std::panic::panic_any(e),
-        };
-        let writer_result = match self.writer.join() {
-            Ok(result) => result,
-            Err(e) => std::panic::panic_any(e),
-        };
-        reader_result.and(writer_result)
+        }
     }
 }
 
 impl Connection {
-    pub fn stdio() -> (Self, IoThreads) {
-        let (reader_sender, reader_receiver) = crossbeam_channel::unbounded();
+    /// Create a connection that reads directly from stdin and writes to stdout.
+    /// Only the writer uses a background thread; reads happen inline in the
+    /// calling thread, eliminating a context switch per LSP message.
+    pub fn stdio() -> (Self, IoThread) {
         let (writer_sender, writer_receiver) = crossbeam_channel::unbounded();
-        let reader = std::thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            while let Some(msg) = read_lsp_message(&mut stdin)? {
-                let is_exit = match &msg {
-                    Message::Notification(x) => x.method == Exit::METHOD,
-                    _ => false,
-                };
-                if reader_sender.send(msg).is_err() || is_exit {
-                    break;
-                }
-            }
-            Ok(())
-        });
         let writer = std::thread::spawn(move || {
             let mut stdout = std::io::stdout().lock();
             while let Ok(msg) = writer_receiver.recv() {
@@ -434,9 +443,9 @@ impl Connection {
         (
             Self {
                 sender: writer_sender,
-                receiver: reader_receiver,
+                reader: ConnectionReader::Stdio(Mutex::new(BufReader::new(std::io::stdin()))),
             },
-            IoThreads { reader, writer },
+            IoThread { writer },
         )
     }
 
@@ -447,13 +456,25 @@ impl Connection {
         (
             Self {
                 sender: s1,
-                receiver: r2,
+                reader: ConnectionReader::Channel(r2),
             },
             Self {
                 sender: s2,
-                receiver: r1,
+                reader: ConnectionReader::Channel(r1),
             },
         )
+    }
+
+    /// Access the underlying channel receiver. Only available for
+    /// channel-based connections (tests).
+    #[cfg(test)]
+    pub fn channel_receiver(&self) -> &Receiver<Message> {
+        match &self.reader {
+            ConnectionReader::Channel(r) => r,
+            ConnectionReader::Stdio(_) => {
+                unreachable!("channel_receiver not available for stdio connections")
+            }
+        }
     }
 }
 
@@ -758,7 +779,7 @@ pub fn shutdown_finish(connection: &Connection, id: RequestId) {
     if connection.sender.send(response.into()).is_err() {
         return;
     }
-    while let Ok(msg) = connection.receiver.recv() {
+    while let Some(msg) = connection.recv() {
         match msg {
             Message::Request(x) => {
                 error!("Unexpected request after shutdown: {x:?}");
@@ -793,7 +814,7 @@ pub fn initialize_start(
     connection: &Connection,
 ) -> anyhow::Result<Option<(RequestId, InitializeInfo)>> {
     loop {
-        let Ok(msg) = connection.receiver.recv() else {
+        let Some(msg) = connection.recv() else {
             break;
         };
         match msg {
@@ -876,7 +897,7 @@ pub fn initialize_finish<C: Serialize>(
         return Ok(false);
     }
     loop {
-        let Ok(msg) = connection.receiver.recv() else {
+        let Some(msg) = connection.recv() else {
             break;
         };
         match msg {
@@ -926,7 +947,7 @@ pub fn initialize_finish<C: Serialize>(
 ///   request is cancelled)
 /// - queued_events includes most of the other events.
 pub fn dispatch_lsp_events(server: &Server) {
-    for msg in &server.connection().receiver {
+    while let Some(msg) = server.connection().recv() {
         match msg {
             Message::Request(x) => {
                 if x.method == Shutdown::METHOD {
