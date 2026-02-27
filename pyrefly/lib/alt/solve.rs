@@ -93,7 +93,6 @@ use crate::binding::binding::EmptyAnswer;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::FirstUse;
 use crate::binding::binding::FunctionParameter;
-use crate::binding::binding::FunctionStubOrImpl;
 use crate::binding::binding::IsAsync;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
@@ -135,7 +134,6 @@ use crate::types::annotation::Annotation;
 use crate::types::annotation::Qualifier;
 use crate::types::callable::Callable;
 use crate::types::callable::Function;
-use crate::types::callable::FunctionKind;
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
 use crate::types::callable::Required;
@@ -158,7 +156,6 @@ use crate::types::type_var::TypeVar;
 use crate::types::type_var::Variance;
 use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
-use crate::types::types::CalleeKind;
 use crate::types::types::Forallable;
 use crate::types::types::SuperObj;
 use crate::types::types::TParams;
@@ -3061,8 +3058,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             ReturnTypeKind::ShouldValidateAnnotation {
                 range,
                 annotation,
-                stub_or_impl,
-                decorators,
+                stub_or_impl: _,
+                decorators: _,
                 implicit_return,
                 is_generator,
                 has_explicit_return,
@@ -3071,28 +3068,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // It will result in an implicit Any type, which is reasonable, but we should
                 // at least error here.
                 let ty = self.get_idx(*annotation).annotation.get_type().clone();
-                // If the function body is stubbed out or if the function is decorated with
-                // `@abstractmethod`, we blindly accept the return type annotation.
-                if *stub_or_impl != FunctionStubOrImpl::Stub
-                    && !decorators.iter().any(|k| {
-                        let decorator = self.get_idx(*k);
-                        match decorator.ty.callee_kind() {
-                            Some(CalleeKind::Function(FunctionKind::AbstractMethod)) => true,
-                            _ => false,
-                        }
-                    })
-                {
-                    let implicit_return = self.get_idx(*implicit_return);
-                    self.check_implicit_return_against_annotation(
-                        implicit_return,
-                        &ty,
-                        x.is_async,
-                        *is_generator,
-                        *has_explicit_return,
-                        *range,
-                        errors,
-                    );
-                }
+                let implicit_return = self.get_idx(*implicit_return);
+                self.check_implicit_return_against_annotation(
+                    implicit_return,
+                    &ty,
+                    x.is_async,
+                    *is_generator,
+                    *has_explicit_return,
+                    *range,
+                    errors,
+                );
                 self.return_type_from_annotation(ty, x.is_async, *is_generator)
             }
             ReturnTypeKind::ShouldTrustAnnotation {

@@ -491,16 +491,14 @@ x = Child()
 );
 
 testcase!(
-    bug = "False negative",
     test_implicit_return_in_abstract_method,
     r#"
 from abc import ABC, abstractmethod
 
 class A(ABC):
     @abstractmethod
-    def f(self, x: bool) -> int:
+    def f(self, x: bool) -> int:  # E: one or more paths are missing an explicit `return`
         if x:
             return 0
-        # false negative: f implicitly returns None here, violating the return type annotation
     "#,
 );

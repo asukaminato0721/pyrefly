@@ -432,8 +432,8 @@ impl<'a> BindingsBuilder<'a> {
             .into_boxed_slice();
 
         let return_type_binding = {
-            let kind = match (return_ann_with_range, implicit_return) {
-                (Some((range, annotation)), Some(implicit_return)) => {
+            let kind = match (return_ann_with_range, implicit_return, stub_or_impl) {
+                (Some((range, annotation)), Some(implicit_return), FunctionStubOrImpl::Impl) => {
                     // We have an explicit return annotation and we want to validate it.
                     ReturnTypeKind::ShouldValidateAnnotation {
                         range,
@@ -445,15 +445,17 @@ impl<'a> BindingsBuilder<'a> {
                         has_explicit_return: !return_keys.is_empty(),
                     }
                 }
-                (Some((range, annotation)), None) => {
-                    // We have an explicit return annotation and we just want to trust it.
+                // We have an explicit return annotation on a stub function, so we just trust it, ignoring the implicit return.
+                (Some((range, annotation)), Some(_), FunctionStubOrImpl::Stub)
+                // We have an explicit return annotation and no implicit return.
+                | (Some((range, annotation)), None, _) => {
                     ReturnTypeKind::ShouldTrustAnnotation {
                         annotation,
                         range,
                         is_generator: !(yield_keys.is_empty() && yield_from_keys.is_empty()),
                     }
                 }
-                (None, Some(implicit_return)) if should_infer_return_type => {
+                (None, Some(implicit_return), _) if should_infer_return_type => {
                     // We don't have an explicit return annotation, but we want to infer it.
                     ReturnTypeKind::ShouldInferType {
                         returns: return_keys,
@@ -462,7 +464,7 @@ impl<'a> BindingsBuilder<'a> {
                         yield_froms: yield_from_keys,
                     }
                 }
-                (None, _) => {
+                (None, _, _) => {
                     // We don't have an explicit return annotation, or we don't want to infer return type.
                     // Just treat the return type as `Any`.
                     ReturnTypeKind::ShouldReturnAny {
