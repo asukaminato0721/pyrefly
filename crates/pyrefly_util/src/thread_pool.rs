@@ -110,14 +110,6 @@ impl ThreadPool {
         Self::with_thread_count(*THREADS.lock())
     }
 
-    /// Returns the number of threads in the pool, or 1 if running single-threaded.
-    fn num_threads(&self) -> usize {
-        match &self.0 {
-            None => 1,
-            Some(pool) => pool.current_num_threads(),
-        }
-    }
-
     pub fn spawn_many(&self, f: impl Fn() + Sync) {
         match &self.0 {
             None => f(),
