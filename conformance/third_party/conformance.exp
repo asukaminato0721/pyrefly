@@ -7036,10 +7036,10 @@
     {
       "code": -2,
       "column": 6,
-      "concise_description": "Unpacked argument `tuple[Literal[1]]` is not assignable to parameter `*args` with type `tuple[int, str]` in function `func3`",
-      "description": "Unpacked argument `tuple[Literal[1]]` is not assignable to parameter `*args` with type `tuple[int, str]` in function `func3`",
+      "concise_description": "Expected 1 more positional argument in function `func3`",
+      "description": "Expected 1 more positional argument in function `func3`",
       "line": 67,
-      "name": "bad-argument-type",
+      "name": "bad-argument-count",
       "severity": "error",
       "stop_column": 9,
       "stop_line": 67

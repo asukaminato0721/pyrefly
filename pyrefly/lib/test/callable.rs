@@ -603,9 +603,8 @@ from typing import assert_type
 
 def test1(*args: *tuple[int, int, int]): ...
 test1(*(1, 2, 3)) # OK
-test1(*(1, 2)) # E: Unpacked argument `tuple[Literal[1], Literal[2]]` is not assignable to parameter `*args` with type `tuple[int, int, int]` in function `test1`
-test1(*(1, 2, 3, 4)) # E: Unpacked argument `tuple[Literal[1], Literal[2], Literal[3], Literal[4]]` is not assignable to parameter `*args` with type `tuple[int, int, int]` in function `test1`
-
+test1(*(1, 2)) # E: Expected 1 more positional argument in function `test1`
+test1(*(1, 2, 3, 4)) # E: Expected 3 positional arguments, got 4 in function `test1`
 def test2[*T](*args: *tuple[int, *T, int]) -> tuple[*T]: ...
 assert_type(test2(*(1, 2, 3)), tuple[int])
 assert_type(test2(*(1, 2)), tuple[()])
