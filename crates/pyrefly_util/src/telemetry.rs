@@ -70,6 +70,7 @@ pub enum TelemetryEventKind {
     SourceDbRebuild,
     SourceDbRebuildInstance,
     FindFromDefinition,
+    ExternalReferences,
 }
 
 pub struct TelemetryEvent {
@@ -87,6 +88,7 @@ pub struct TelemetryEvent {
     pub sourcedb_rebuild_instance_stats: Option<TelemetrySourceDbRebuildInstanceStats>,
     pub file_watcher_stats: Option<TelemetryFileWatcherStats>,
     pub did_change_watched_files_stats: Option<TelemetryDidChangeWatchedFilesStats>,
+    pub external_references_stats: Option<TelemetryExternalReferencesStats>,
     pub activity_key: Option<ActivityKey>,
     pub canceled: bool,
 }
@@ -167,6 +169,16 @@ pub struct TelemetryDidChangeWatchedFilesStats {
     pub unknown: Vec<PathBuf>,
 }
 
+#[derive(Default)]
+pub struct TelemetryExternalReferencesStats {
+    pub qualified_name: String,
+    pub db_name: Option<String>,
+    pub result_file_count: usize,
+    pub result_span_count: usize,
+    pub find_repo_ms: Option<Duration>,
+    pub angle_query_ms: Option<Duration>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivityKey {
     pub id: String,
@@ -198,6 +210,7 @@ impl TelemetryEvent {
                 sourcedb_rebuild_instance_stats: None,
                 file_watcher_stats: None,
                 did_change_watched_files_stats: None,
+                external_references_stats: None,
                 activity_key: None,
                 canceled: false,
             },
@@ -227,6 +240,7 @@ impl TelemetryEvent {
             sourcedb_rebuild_instance_stats: None,
             file_watcher_stats: None,
             did_change_watched_files_stats: None,
+            external_references_stats: None,
             activity_key: None,
             canceled: false,
         }
@@ -276,6 +290,10 @@ impl TelemetryEvent {
         stats: TelemetryDidChangeWatchedFilesStats,
     ) {
         self.did_change_watched_files_stats = Some(stats);
+    }
+
+    pub fn set_external_references_stats(&mut self, stats: TelemetryExternalReferencesStats) {
+        self.external_references_stats = Some(stats);
     }
 
     pub fn finish_and_record(self, telemetry: &dyn Telemetry, error: Option<&Error>) -> Duration {

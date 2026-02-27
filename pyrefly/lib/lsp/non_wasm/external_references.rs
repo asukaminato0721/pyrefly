@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use lsp_types::Range;
 use lsp_types::Url;
+use pyrefly_util::telemetry::SubTaskTelemetry;
 
 pub trait ExternalReferences: Send + Sync {
     fn find_references(
@@ -16,18 +17,19 @@ pub trait ExternalReferences: Send + Sync {
         qualified_name: &str,
         source_uri: &Url,
         timeout: Duration,
+        telemetry: Option<SubTaskTelemetry>,
     ) -> Vec<(Url, Vec<Range>)>;
 }
 
 pub struct NoExternalReferences;
 
-/// This struct will be used when we have no source of external references.
 impl ExternalReferences for NoExternalReferences {
     fn find_references(
         &self,
         _qualified_name: &str,
         _source_uri: &Url,
         _timeout: Duration,
+        _telemetry: Option<SubTaskTelemetry>,
     ) -> Vec<(Url, Vec<Range>)> {
         Vec::new()
     }
