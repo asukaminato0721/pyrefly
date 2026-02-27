@@ -222,7 +222,10 @@ if cond:
     def zip(*args) -> list[int]:
         return [42, 42, 42]
 
-reveal_type(zip([1], [2]))  # E: revealed type: list[int] | zip[tuple[int, int]]
+def f():
+    return zip([1], [2])
+
+reveal_type(f())  # E: revealed type: list[int] | zip[tuple[int, int]]
 "#,
 );
 

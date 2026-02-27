@@ -100,6 +100,8 @@ pub struct Definition {
     pub style: DefinitionStyle,
     /// A location where the name is defined. Always matches the source of `self.style`.
     pub range: TextRange,
+    /// Whether all definitions for this name are conditional.
+    pub conditional: bool,
     /// Does this definition require an `Anywhere` binding at binding time? Typically yes if there
     /// are multiple definitions, but mutable captures and `del` both require special handling.
     pub needs_anywhere: bool,
@@ -116,13 +118,14 @@ impl Definition {
         }
     }
 
-    fn merge(&mut self, other: DefinitionStyle, range: TextRange) {
+    fn merge(&mut self, other: DefinitionStyle, range: TextRange, conditional: bool) {
         // To ensure binding code cannot produce invalid lookups, we ensure that
         // `self.style` and `self.range` always match.
         if other < self.style {
             self.style = other;
             self.range = range;
         }
+        self.conditional = self.conditional && conditional;
         // If we've merged a Definition, then there are multiple definition sites.
         //
         // We want an Anywhere at bindings time unless either:
@@ -260,6 +263,7 @@ struct DefinitionsBuilder<'a> {
     module_name: ModuleName,
     is_init: bool,
     sys_info: &'a SysInfo,
+    conditional_depth: usize,
     inner: Definitions,
 }
 
@@ -315,6 +319,7 @@ impl Definitions {
             module_name,
             sys_info,
             is_init,
+            conditional_depth: 0,
             inner: Definitions::default(),
         };
         builder.stmts(x);
@@ -338,6 +343,7 @@ impl Definitions {
                 Definition {
                     range: TextRange::default(),
                     style: DefinitionStyle::ImplicitGlobal,
+                    conditional: false,
                     needs_anywhere: false,
                     docstring_range: None,
                 },
@@ -391,6 +397,20 @@ impl Definitions {
 }
 
 impl<'a> DefinitionsBuilder<'a> {
+    fn is_conditional(&self) -> bool {
+        self.conditional_depth > 0
+    }
+
+    fn with_conditional(&mut self, conditional: bool, f: impl FnOnce(&mut Self)) {
+        if conditional {
+            self.conditional_depth += 1;
+        }
+        f(self);
+        if conditional {
+            self.conditional_depth -= 1;
+        }
+    }
+
     fn stmts(&mut self, xs: &[Stmt]) {
         for x in xs {
             self.stmt(x);
@@ -404,14 +424,16 @@ impl<'a> DefinitionsBuilder<'a> {
         style: DefinitionStyle,
         body: Option<&[Stmt]>,
     ) {
+        let conditional = self.is_conditional();
         match self.inner.definitions.entry(x.clone()) {
             Entry::Occupied(mut e) => {
-                e.get_mut().merge(style, range);
+                e.get_mut().merge(style, range, conditional);
             }
             Entry::Vacant(e) => {
                 e.insert(Definition {
                     range,
                     style,
+                    conditional,
                     needs_anywhere: false,
                     docstring_range: body.and_then(Docstring::range_from_stmts),
                 });
@@ -735,7 +757,10 @@ impl<'a> DefinitionsBuilder<'a> {
             }
             Stmt::For(x) => {
                 self.named_in_expr(&x.iter);
-                self.expr_lvalue(&x.target)
+                self.expr_lvalue(&x.target);
+                self.with_conditional(true, |builder| builder.stmts(&x.body));
+                self.with_conditional(true, |builder| builder.stmts(&x.orelse));
+                return;
             }
             Stmt::With(x) => {
                 for x in &x.items {
@@ -744,36 +769,60 @@ impl<'a> DefinitionsBuilder<'a> {
                         self.expr_lvalue(target);
                     }
                 }
+                self.with_conditional(true, |builder| builder.stmts(&x.body));
+                return;
             }
             Stmt::Match(x) => {
                 self.named_in_expr(&x.subject);
                 for x in &x.cases {
-                    self.pattern(&x.pattern);
+                    if let Some(guard) = &x.guard {
+                        self.named_in_expr(guard);
+                    }
+                    self.with_conditional(true, |builder| builder.pattern(&x.pattern));
+                    self.with_conditional(true, |builder| builder.stmts(&x.body));
                 }
+                return;
             }
             Stmt::Try(x) => {
                 for x in &x.handlers {
                     match x {
                         ExceptHandler::ExceptHandler(x) => {
-                            if let Some(name) = &x.name {
-                                self.add_identifier(
-                                    name,
-                                    DefinitionStyle::Unannotated(SymbolKind::Variable),
-                                );
+                            if let Some(ty) = &x.type_ {
+                                self.named_in_expr(ty);
                             }
+                            if let Some(name) = &x.name {
+                                self.with_conditional(true, |builder| {
+                                    builder.add_identifier(
+                                        name,
+                                        DefinitionStyle::Unannotated(SymbolKind::Variable),
+                                    )
+                                });
+                            }
+                            self.with_conditional(true, |builder| builder.stmts(&x.body));
                         }
                     }
                 }
+                self.with_conditional(true, |builder| builder.stmts(&x.body));
+                self.with_conditional(true, |builder| builder.stmts(&x.orelse));
+                self.with_conditional(true, |builder| builder.stmts(&x.finalbody));
+                return;
             }
             Stmt::If(x) => {
-                self.named_in_expr(&x.test);
-                for (_, body) in self.sys_info.pruned_if_branches(x) {
-                    self.stmts(body);
+                let branches: Vec<_> = self.sys_info.pruned_if_branches(x).collect();
+                let unconditional = branches.len() == 1 && branches[0].0.is_none();
+                for (test, body) in branches {
+                    if let Some(test) = test {
+                        self.named_in_expr(test);
+                    }
+                    self.with_conditional(!unconditional, |builder| builder.stmts(body));
                 }
                 return; // We went through the relevant branches already
             }
             Stmt::While(x) => {
                 self.named_in_expr(&x.test);
+                self.with_conditional(true, |builder| builder.stmts(&x.body));
+                self.with_conditional(true, |builder| builder.stmts(&x.orelse));
+                return;
             }
             Stmt::Assert(x) => {
                 self.named_in_expr(&x.test);

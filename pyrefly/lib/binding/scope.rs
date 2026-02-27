@@ -387,6 +387,12 @@ impl Static {
             d.inject_implicit_globals();
         }
 
+        let unconditional_defs: SmallSet<Name> = d
+            .definitions
+            .iter_hashed()
+            .filter_map(|(name, def)| (!def.conditional).then(|| (*name.key()).clone()))
+            .collect();
+
         let mut all_wildcards = Vec::with_capacity(d.import_all.len());
         for (m, range) in d.import_all {
             if let Some(wildcards) = lookup.get_wildcard(m) {
@@ -408,12 +414,12 @@ impl Static {
             self.upsert(name, range, style);
         }
         for (module, range, wildcard) in all_wildcards {
-            // Builtins are a fallback, so they should never shadow an existing definition.
+            // Builtins are a fallback, so they should never shadow unconditional definitions.
             let skip_existing =
                 module == ModuleName::builtins() || module == ModuleName::extra_builtins();
             for name in wildcard.iter_hashed() {
                 // TODO: semantics of import * and global var with same name
-                if skip_existing && self.0.get_hashed(name).is_some() {
+                if skip_existing && unconditional_defs.contains(*name.key()) {
                     continue;
                 }
                 self.upsert(name.cloned(), range, StaticStyle::MergeableImport)
