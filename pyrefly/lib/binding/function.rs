@@ -543,16 +543,16 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             body.as_slice()
         };
-        let body_is_trivial = match body_no_docstring {
-            [] => true,
-            [Stmt::Pass(_)] => true,
-            [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
-            _ => false,
-        };
         let body_is_ellipse = match body_no_docstring {
             [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
             _ => false,
         };
+        let body_is_trivial = body_is_ellipse
+            || (match body_no_docstring {
+                [] => true,
+                [Stmt::Pass(_)] => true,
+                _ => false,
+            });
         let body_is_not_implemented = match body_no_docstring {
             // raise NotImplementedError(...)
             [
@@ -570,11 +570,13 @@ impl<'a> BindingsBuilder<'a> {
             ] if self.as_special_export(val) == Some(SpecialExport::NotImplemented) => true,
             _ => false,
         };
-        let stub_or_impl = if (self.scopes.is_in_protocol_class()
-            || decorators.is_abstract_method
-            || decorators.is_overload
-            || body_is_ellipse)
-            && body_is_trivial
+        // A `...` body is always interpreted as a stub function.
+        // Functions with other trivial bodies are interpreted as stubs in some contexts.
+        let stub_or_impl = if body_is_ellipse
+            || ((self.scopes.is_in_protocol_class()
+                || decorators.is_abstract_method
+                || decorators.is_overload)
+                && body_is_trivial)
         {
             FunctionStubOrImpl::Stub
         } else {
