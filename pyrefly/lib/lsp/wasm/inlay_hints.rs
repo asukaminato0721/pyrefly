@@ -38,6 +38,14 @@ use crate::state::state::Transaction;
 use crate::types::callable::Param;
 use crate::types::types::Type;
 
+pub struct InlayHintData {
+    pub position: TextSize,
+    /// Label parts with optional location info for click-to-navigate
+    pub label_parts: Vec<(String, Option<TextRangeWithModule>)>,
+    /// Whether double-clicking should insert the type annotation.
+    pub insertable: bool,
+}
+
 #[derive(Debug)]
 pub struct ParameterAnnotation {
     pub text_size: TextSize,
@@ -83,7 +91,7 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         inlay_hint_config: InlayHintConfig,
-    ) -> Option<Vec<(TextSize, Vec<(String, Option<TextRangeWithModule>)>)>> {
+    ) -> Option<Vec<InlayHintData>> {
         let is_interesting = |e: &Expr, ty: &Type, class_name: Option<&Name>| {
             !ty.is_any()
                 && match e {
@@ -140,10 +148,11 @@ impl<'a> Transaction<'a> {
                                 {
                                     let fun = bindings.get(bindings.get(*x).undecorated_idx);
                                     if fun.def.is_async
-                                        && let Some(Some((_, _, return_ty))) = self
-                                            .ad_hoc_solve(handle, |solver| {
-                                                solver.unwrap_coroutine(&ty)
-                                            })
+                                        && let Some(Some((_, _, return_ty))) = self.ad_hoc_solve(
+                                            handle,
+                                            "inlay_hint_coroutine",
+                                            |solver| solver.unwrap_coroutine(&ty),
+                                        )
                                     {
                                         ty = return_ty;
                                     }
@@ -156,7 +165,11 @@ impl<'a> Transaction<'a> {
                                                 .map(|(text, loc)| (text.clone(), loc.clone())),
                                         )
                                         .collect();
-                                    res.push((fun.def.parameters.range.end(), label_parts));
+                                    res.push(InlayHintData {
+                                        position: fun.def.parameters.range.end(),
+                                        label_parts,
+                                        insertable: true,
+                                    });
                                 }
                             }
                             _ => {}
@@ -169,12 +182,8 @@ impl<'a> Transaction<'a> {
                 {
                     // For unpacked values, extract the element expression if available
                     let (e, is_unpacked) = match bindings.get(idx) {
-                        Binding::NameAssign {
-                            annotation: None,
-                            expr: e,
-                            ..
-                        } => (Some(&**e), false),
-                        Binding::Expr(None, e) => (Some(e), false),
+                        Binding::NameAssign(x) if x.annotation.is_none() => (Some(&*x.expr), false),
+                        Binding::Expr(None, e) => (Some(&**e), false),
                         Binding::UnpackedValue(None, unpack_idx, _, pos) => {
                             // Try to get the element expression from the unpacked source
                             let element_expr =
@@ -213,7 +222,11 @@ impl<'a> Transaction<'a> {
                                     .map(|(text, loc)| (text.clone(), loc.clone())),
                             )
                             .collect();
-                        res.push((key.range().end(), label_parts));
+                        res.push(InlayHintData {
+                            position: key.range().end(),
+                            label_parts,
+                            insertable: !is_unpacked,
+                        });
                     }
                 }
                 _ => {}
@@ -224,7 +237,11 @@ impl<'a> Transaction<'a> {
             res.extend(
                 self.add_inlay_hints_for_positional_function_args(handle)
                     .into_iter()
-                    .map(|(pos, text)| (pos, vec![(text, None)])),
+                    .map(|(pos, text)| InlayHintData {
+                        position: pos,
+                        label_parts: vec![(text, None)],
+                        insertable: true,
+                    }),
             );
         }
 
@@ -250,7 +267,7 @@ impl<'a> Transaction<'a> {
         }?;
 
         // Try to extract elements from tuple or list literals
-        let elts = match source_expr {
+        let elts = match &**source_expr {
             Expr::Tuple(tup) => Some(&tup.elts),
             Expr::List(lst) => Some(&lst.elts),
             _ => None,
@@ -443,6 +460,7 @@ impl<'a> Transaction<'a> {
                 handle.sys_info(),
                 definition_kind,
                 TextRangeWithModule::new(module_info, id.range()),
+                true,
             ) {
                 return references;
             }
@@ -577,21 +595,17 @@ impl<'a> Transaction<'a> {
                 key @ Key::Definition(_) if containers => {
                     if let Some(ty) = self.get_type(handle, key) {
                         let e = match bindings.get(idx) {
-                            Binding::NameAssign {
-                                annotation: None,
-                                expr: e,
-                                ..
-                            } => match &**e {
+                            Binding::NameAssign(x) if x.annotation.is_none() => match &*x.expr {
                                 Expr::List(ExprList { elts, .. }) => {
                                     if elts.is_empty() {
-                                        Some(&**e)
+                                        Some(&*x.expr)
                                     } else {
                                         None
                                     }
                                 }
                                 Expr::Dict(ExprDict { items, .. }) => {
                                     if items.is_empty() {
-                                        Some(&**e)
+                                        Some(&*x.expr)
                                     } else {
                                         None
                                     }
@@ -621,16 +635,16 @@ impl<'a> Transaction<'a> {
 
 #[cfg(test)]
 mod tests {
+    use pyrefly_types::heap::TypeHeap;
     use ruff_python_ast::name::Name;
 
     use super::Transaction;
     use crate::types::callable::Param;
     use crate::types::callable::Required;
-    use crate::types::types::AnyStyle;
     use crate::types::types::Type;
 
     fn any_type() -> Type {
-        Type::Any(AnyStyle::Explicit)
+        TypeHeap::new().mk_any_explicit()
     }
 
     #[test]

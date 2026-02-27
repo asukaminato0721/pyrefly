@@ -910,7 +910,7 @@ class TD(TypedDict, Generic[_NBit1, _NBit2]):
 
 class A:
     x: ClassVar[TD[Any, Any]]
-    y: ClassVar[TD[_NBit1, Any]]  # E: `ClassVar` arguments may not contain any type variables
+    y: ClassVar[TD[_NBit1, Any]]  # E: Type variable `_NBit1` is not in scope  # E: `ClassVar` arguments may not contain any type variables
     "#,
 );
 
@@ -1038,5 +1038,66 @@ from typing import reveal_type
 
 def f[T, U: int, V = str](x: T, y: U, z: V) -> tuple[T, U, V]: ...
 reveal_type(f)  # E: revealed type: [T, U: int, V = str](x: T, y: U, z: V) -> tuple[T, U, V]
+"#,
+);
+
+testcase!(
+    bug =
+        "conformance: Should error on unbound TypeVars in class bases, TypeAlias, and expressions",
+    test_typevar_scoping_restrictions,
+    r#"
+from typing import TypeVar, Generic, TypeAlias
+from collections.abc import Iterable
+
+T = TypeVar("T")
+S = TypeVar("S")
+
+# Unbound TypeVar S used in generic function body
+def fun_3(x: T) -> list[T]:
+    y: list[T] = []  # OK
+    z: list[S] = []  # E: Type variable `S` is not in scope
+    return y
+
+# Unbound TypeVar S in class body (not in method)
+class Bar(Generic[T]):
+    an_attr: list[S] = []  # E: Type variable `S` is not in scope
+
+# Nested class using outer class's TypeVar
+class Outer(Generic[T]):
+    class Bad(Iterable[T]):  # should error: T from outer not in scope
+        ...
+    class AlsoBad:
+        x: list[T]  # should error: T from outer not in scope
+
+    alias: TypeAlias = list[T]  # should error: T not allowed in TypeAlias here
+
+# Unbound TypeVars at global scope
+global_var1: T  # E: Type variable `T` is not in scope
+global_var2: list[T] = []  # E: Type variable `T` is not in scope
+list[T]()  # should error
+"#,
+);
+
+testcase!(
+    bug = "Follow-on errors on TypeVar usages inside nested class that shadows outer TypeVars",
+    test_nested_class_independent_typevar_adoption,
+    r#"
+from typing import Generic, Type, TypeVar
+
+_Deserialized = TypeVar("_Deserialized")
+_Serialized = TypeVar("_Serialized")
+
+class CustomCoercer(Generic[_Deserialized, _Serialized]):
+    # CoercerMapping uses the same TypeVars as CustomCoercer, which the spec forbids.
+    class CoercerMapping(
+        dict[
+            Type[_Deserialized],  # should error: _Deserialized already bound by CustomCoercer
+            Type["CustomCoercer[_Deserialized, _Serialized]"],  # should error: both TypeVars
+        ]
+    ):
+        def __getitem__(
+            self,
+            key: type[_Deserialized],
+        ) -> type["CustomCoercer[_Deserialized, _Serialized]"]: ...
 "#,
 );

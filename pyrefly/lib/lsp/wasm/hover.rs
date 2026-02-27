@@ -42,8 +42,11 @@ use ruff_text_size::TextSize;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::error::error::Error;
 use crate::lsp::module_helpers::collect_symbol_def_paths;
+use crate::lsp::wasm::signature_help::CallInfo;
 use crate::lsp::wasm::signature_help::is_constructor_call;
 use crate::lsp::wasm::signature_help::override_constructor_return_type;
+use crate::lsp::wasm::type_source::set_display_pos_fragment;
+use crate::lsp::wasm::type_source::type_sources_for_hover;
 use crate::state::lsp::DefinitionMetadata;
 use crate::state::lsp::FindDefinitionItemWithDocstring;
 use crate::state::lsp::FindPreference;
@@ -57,6 +60,7 @@ pub struct HoverValue {
     pub type_: Type,
     pub docstring: Option<Docstring>,
     pub parameter_doc: Option<(String, String)>,
+    pub type_sources: Vec<String>,
     pub display: Option<String>,
     pub show_go_to_links: bool,
 }
@@ -70,20 +74,7 @@ impl HoverValue {
             .filter_map(|(qname, file_path)| {
                 if let Ok(mut url) = Url::from_file_path(&file_path) {
                     let start_pos = qname.module().display_range(qname.range()).start;
-                    if let Some(cell) = start_pos.cell() {
-                        url.set_fragment(Some(&format!(
-                            "{},L{},{}",
-                            cell.get(),
-                            start_pos.line_within_cell().get(),
-                            start_pos.column()
-                        )));
-                    } else {
-                        url.set_fragment(Some(&format!(
-                            "L{},{}",
-                            start_pos.line_within_file().get(),
-                            start_pos.column()
-                        )));
-                    }
+                    set_display_pos_fragment(&mut url, start_pos);
                     Some(format!("[{}]({})", qname.id(), url))
                 } else {
                     None
@@ -157,6 +148,17 @@ impl HoverValue {
         } else {
             String::new()
         };
+        let type_source_formatted = if self.type_sources.is_empty() {
+            String::new()
+        } else {
+            let mut section = String::from("\n---\n**Type source**\n");
+            for source in &self.type_sources {
+                section.push_str("- ");
+                section.push_str(source);
+                section.push('\n');
+            }
+            section
+        };
         let type_display = self.display.clone().unwrap_or_else(|| {
             self.type_
                 .as_lsp_string_with_fallback_name(self.name.as_deref(), LspDisplayMode::Hover)
@@ -166,10 +168,11 @@ impl HoverValue {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: format!(
-                    "```python\n{}{}{}\n```{}{}{}",
+                    "```python\n{}{}{}\n```{}{}{}{}",
                     kind_formatted,
                     name_formatted,
                     type_display,
+                    type_source_formatted,
                     docstring_formatted,
                     parameter_doc_formatted,
                     symbol_def_formatted
@@ -393,7 +396,7 @@ fn keyword_argument_documentation(
     if !matches!(identifier.context, IdentifierContext::KeywordArgument(_)) {
         return None;
     }
-    let (_, _, _, callee_range) = transaction.get_callables_from_call(handle, position)?;
+    let CallInfo { callee_range, .. } = transaction.get_callables_from_call(handle, position)?;
     let docs = parameter_documentation_for_callee(transaction, handle, callee_range)?;
     let name = identifier.identifier.id.to_string();
     docs.get(name.as_str()).cloned().map(|doc| (name, doc))
@@ -527,7 +530,7 @@ pub fn get_hover(
     // Check both: hovering in arguments area OR hovering over the callee itself
     let callee_range_opt = transaction
         .get_callables_from_call(handle, position)
-        .map(|(_, _, _, range)| range)
+        .map(|info| info.callee_range)
         .or_else(find_callee_range_at_position);
 
     if let Some(callee_range) = callee_range_opt {
@@ -579,7 +582,7 @@ pub fn get_hover(
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 
     let name_for_display = name.clone();
-    let type_display = transaction.ad_hoc_solve(handle, {
+    let type_display = transaction.ad_hoc_solve(handle, "hover_display", {
         let mut cloned = type_.clone();
         move |solver| {
             cloned.visit_toplevel_callable_mut(|c| expand_callable_kwargs_for_hover(&solver, c));
@@ -626,6 +629,7 @@ pub fn get_hover(
             type_,
             docstring,
             parameter_doc,
+            type_sources: type_sources_for_hover(transaction, handle, position),
             display: type_display,
             show_go_to_links,
         }
@@ -647,11 +651,12 @@ mod tests {
     use pyrefly_types::callable::FuncMetadata;
     use pyrefly_types::callable::Function;
     use pyrefly_types::callable::FunctionKind;
+    use pyrefly_types::heap::TypeHeap;
     use ruff_python_ast::name::Name;
 
     use super::*;
 
-    fn make_function_type(module_name: &str, func_name: &str) -> Type {
+    fn make_function_type(heap: &TypeHeap, module_name: &str, func_name: &str) -> Type {
         let module = Module::new(
             ModuleName::from_str(module_name),
             ModulePath::filesystem(PathBuf::from(format!("{module_name}.pyi"))),
@@ -662,25 +667,28 @@ mod tests {
                 module,
                 cls: None,
                 name: Name::new(func_name),
+                def_index: None,
             })),
             flags: FuncFlags::default(),
         };
-        Type::Function(Box::new(Function {
-            signature: Callable::ellipsis(Type::None),
+        heap.mk_function(Function {
+            signature: Callable::ellipsis(heap.mk_none()),
             metadata,
-        }))
+        })
     }
 
     #[test]
     fn fallback_uses_function_metadata() {
-        let ty = make_function_type("numpy", "arange");
+        let heap = TypeHeap::new();
+        let ty = make_function_type(&heap, "numpy", "arange");
         let fallback = fallback_hover_name_from_type(&ty);
         assert_eq!(fallback.as_deref(), Some("arange"));
     }
 
     #[test]
     fn fallback_recurses_through_type_wrapper() {
-        let ty = Type::Type(Box::new(make_function_type("pkg.subpkg", "run")));
+        let heap = TypeHeap::new();
+        let ty = heap.mk_type(make_function_type(&heap, "pkg.subpkg", "run"));
         let fallback = fallback_hover_name_from_type(&ty);
         assert_eq!(fallback.as_deref(), Some("run"));
     }

@@ -1421,7 +1421,7 @@ class Parent(TypedDict, extra_items=int):
 class GoodChild(Parent):
     x: NotRequired[int]
 class BadChild1(Parent):
-    x: Required[int]  # E: cannot be extended with required extra item `x`
+    x: Required[int]  # E: Cannot add required field `x`
 class BadChild2(Parent):
     x: NotRequired[bool]  # E: `bool` is not consistent with `extra_items` type `int`
     "#,
@@ -1541,9 +1541,9 @@ testcase!(
     test_functional_form_unexpected_keyword,
     r#"
 from typing import TypedDict
-X = TypedDict('X', {}, nonsense=True)  # E: Unrecognized argument `nonsense` for typed dictionary definition
+X = TypedDict('X', {}, nonsense=True)  # E: Unrecognized keyword argument `nonsense` in typed dictionary definition
 def f(kwargs):
-    Y = TypedDict('Y', {}, **kwargs)  # E: Unrecognized argument for typed dictionary definition
+    Y = TypedDict('Y', {}, **kwargs)  # E: Unpacking is not supported in typed dictionary definition
     "#,
 );
 
@@ -2216,4 +2216,120 @@ def test_empty_not_in(e: Empty, k: str):
     else:
         reveal_type(k)  # E: revealed type: Never
 "#,
+);
+
+testcase!(
+    test_illegal_unpacking_in_def,
+    r#"
+from typing import TypedDict
+def f() -> dict: ...
+X = TypedDict("X", {"k1": int, **f()})  # E: Unpacking is not supported
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_missing_required_key,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict):
+    a: int
+    b: bool
+
+def f(td: TD) -> None: ...
+
+td = {"a": 1000}
+f(td=td)  # E: `b` is present in `TD` and absent in `<anonymous>`
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_missing_not_required_key_ok,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict, total=False):
+    a: int
+    b: bool
+
+def f(td: TD) -> None: ...
+
+td = {"a": 1000}
+f(td=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_any_requiredness_ok,
+    r#"
+from typing import NotRequired, Required, TypedDict
+
+class TD1(TypedDict):
+    a: Required[int]
+
+class TD2(TypedDict):
+    a: NotRequired[int]
+
+def f(td1: TD1, td2: TD2) -> None: ...
+
+td = {"a": 1000}
+f(td1=td, td2=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_any_extra_items_ok,
+    r#"
+from typing import ReadOnly, TypedDict
+
+class TD1(TypedDict, closed=True):
+    a: int
+
+class TD2(TypedDict, extra_items=str):
+    a: int
+
+class TD3(TypedDict, extra_items=ReadOnly[str]):
+    a: int
+
+def f(td1: TD1, td2: TD2, td3: TD3) -> None: ...
+
+td = {"a": 1000}
+f(td1=td, td2=td, td3=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_value_subtype,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict):
+    a: int
+
+def f(td: TD) -> None: ...
+
+td = {"a": True}
+f(td=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_check_extra_items,
+    r#"
+from typing import TypedDict
+
+class TD1(TypedDict):
+    a: int
+
+class TD2(TypedDict, extra_items=str):
+    a: int
+
+def f(td1: TD1, td2: TD2) -> None: ...
+
+td = {"a": 0, "b": "hi"}
+f(
+    td1=td,  # E: Field `b` is present in `<anonymous>` and absent in `TD1`
+    td2=td,
+)
+    "#,
 );

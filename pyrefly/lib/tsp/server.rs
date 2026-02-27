@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use lsp_server::RequestId;
 use lsp_types::InitializeParams;
-use lsp_types::ServerCapabilities;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryEvent;
 use pyrefly_util::telemetry::TelemetryEventKind;
@@ -23,10 +23,11 @@ use crate::lsp::non_wasm::lsp::new_response;
 use crate::lsp::non_wasm::protocol::Request;
 use crate::lsp::non_wasm::protocol::Response;
 use crate::lsp::non_wasm::queue::LspEvent;
+use crate::lsp::non_wasm::server::InitializeInfo;
 use crate::lsp::non_wasm::server::ProcessEvent;
+use crate::lsp::non_wasm::server::ServerCapabilitiesWithTypeHierarchy;
 use crate::lsp::non_wasm::server::TspInterface;
 use crate::lsp::non_wasm::server::capabilities;
-use crate::lsp::non_wasm::server::dispatch_lsp_events;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
 
 /// TSP server that delegates to LSP server infrastructure while handling only TSP requests
@@ -48,7 +49,7 @@ impl<T: TspInterface> TspServer<T> {
         &'a self,
         ide_transaction_manager: &mut TransactionManager<'a>,
         canceled_requests: &mut HashSet<RequestId>,
-        telemetry: &impl Telemetry,
+        telemetry: &'a impl Telemetry,
         telemetry_event: &mut TelemetryEvent,
         subsequent_mutation: bool,
         event: LspEvent,
@@ -59,7 +60,7 @@ impl<T: TspInterface> TspServer<T> {
             // Increment on DidChange since it affects type checker state via synchronous validation
             LspEvent::DidChangeTextDocument(_) => true,
             // Don't increment on DidChangeWatchedFiles directly since it triggers RecheckFinished
-            // LspEvent::DidChangeWatchedFiles(_) => true,
+            // LspEvent::DidChangeWatchedFiles => true,
             // Don't increment on DidOpen since it triggers RecheckFinished events that will increment
             // LspEvent::DidOpenTextDocument(_) => true,
             _ => false,
@@ -138,7 +139,7 @@ impl<T: TspInterface> TspServer<T> {
 
 pub fn tsp_loop(
     lsp_server: impl TspInterface,
-    _initialization_params: InitializeParams,
+    _initialization: InitializeInfo,
     telemetry: &impl Telemetry,
 ) -> anyhow::Result<()> {
     eprintln!("Reading TSP messages");
@@ -149,11 +150,7 @@ pub fn tsp_loop(
         scope.spawn(|| server.inner.run_recheck_queue(telemetry));
 
         scope.spawn(|| {
-            dispatch_lsp_events(
-                server.inner.connection(),
-                server.inner.lsp_queue(),
-                server.inner.uris_pending_close(),
-            );
+            server.inner.dispatch_lsp_events();
         });
 
         let mut ide_transaction_manager = TransactionManager::default();
@@ -164,6 +161,7 @@ pub fn tsp_loop(
                 TelemetryEventKind::LspEvent(event.describe()),
                 enqueued_at,
                 server.inner.telemetry_state(),
+                QueueName::LspQueue,
             );
             let event_description = event.describe();
 
@@ -199,7 +197,7 @@ pub fn tsp_loop(
 pub fn tsp_capabilities(
     indexing_mode: IndexingMode,
     initialization_params: &InitializeParams,
-) -> ServerCapabilities {
+) -> ServerCapabilitiesWithTypeHierarchy {
     // Use the same capabilities as LSP - TSP server supports the same features
     // but will only respond to TSP protocol requests
     capabilities(indexing_mode, initialization_params)

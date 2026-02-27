@@ -6,15 +6,18 @@
  */
 
 use std::io::Write;
+use std::sync::Arc;
 
 use clap::Parser;
-use lsp_types::InitializeParams;
 use pyrefly_util::telemetry::Telemetry;
 
+use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::lsp::IndexingMode;
 use crate::commands::util::CommandExitStatus;
+use crate::lsp::non_wasm::external_references::NoExternalReferences;
 use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::server::Connection;
+use crate::lsp::non_wasm::server::InitializeInfo;
 use crate::lsp::non_wasm::server::initialize_finish;
 use crate::lsp::non_wasm::server::initialize_start;
 use crate::tsp::server::tsp_capabilities;
@@ -37,21 +40,28 @@ pub fn run_tsp(
     connection: Connection,
     args: TspArgs,
     telemetry: &impl Telemetry,
+    wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
-    if let Some(initialize_params) = initialize_tsp_connection(&connection, args.indexing_mode)? {
+    if let Some(initialize_info) = initialize_tsp_connection(&connection, args.indexing_mode)? {
         // Create an LSP server instance for the TSP server to use.
         let lsp_queue = LspQueue::new();
+        let surface = telemetry.surface();
         let lsp_server = crate::lsp::non_wasm::server::Server::new(
             connection,
             lsp_queue,
-            initialize_params.clone(),
+            initialize_info.params.clone(),
+            initialize_info.supports_diagnostic_markdown,
             args.indexing_mode,
             args.workspace_indexing_limit,
             false,
+            surface,
+            None, // No path remapping for TSP
+            Arc::new(NoExternalReferences),
+            wrapper,
         );
 
         // Reuse the existing lsp_loop but with TSP initialization
-        tsp_loop(lsp_server, initialize_params, telemetry)?;
+        tsp_loop(lsp_server, initialize_info, telemetry)?;
     }
     Ok(())
 }
@@ -59,20 +69,24 @@ pub fn run_tsp(
 fn initialize_tsp_connection(
     connection: &Connection,
     indexing_mode: IndexingMode,
-) -> anyhow::Result<Option<InitializeParams>> {
-    let Some((id, initialize_params)) = initialize_start(connection)? else {
+) -> anyhow::Result<Option<InitializeInfo>> {
+    let Some((id, initialize_info)) = initialize_start(connection)? else {
         return Ok(None);
     };
-    let capabilities = tsp_capabilities(indexing_mode, &initialize_params);
+    let capabilities = tsp_capabilities(indexing_mode, &initialize_info.params);
     // Note: TSP doesn't include serverInfo, unlike LSP
     if !initialize_finish(connection, id, capabilities, None)? {
         return Ok(None);
     }
-    Ok(Some(initialize_params))
+    Ok(Some(initialize_info))
 }
 
 impl TspArgs {
-    pub fn run(self, telemetry: &impl Telemetry) -> anyhow::Result<CommandExitStatus> {
+    pub fn run(
+        self,
+        telemetry: &impl Telemetry,
+        wrapper: Option<ConfigConfigurerWrapper>,
+    ) -> anyhow::Result<CommandExitStatus> {
         // Note that we must have our logging only write out to stderr.
         eprintln!("starting TSP server");
 
@@ -80,7 +94,7 @@ impl TspArgs {
         // also be implemented to use sockets or HTTP.
         let (connection, io_threads) = Connection::stdio();
 
-        run_tsp(connection, self, telemetry)?;
+        run_tsp(connection, self, telemetry, wrapper)?;
         io_threads.join()?;
         // We have shut down gracefully.
         // Use writeln! instead of eprintln! to avoid panicking if stderr is closed.

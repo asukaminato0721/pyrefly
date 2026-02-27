@@ -9,7 +9,6 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
-    bug = "The results include over-eager pinning of vars in generic solving, see https://github.com/facebook/pyrefly/issues/105",
     test_loop_with_generic_pin,
     r#"
 def condition() -> bool: ...
@@ -615,7 +614,7 @@ class Query:
 
 def test(q: Query) -> None:
     cursor = None
-    while not cursor or not cursor.finished():  # E: `Cursor | None` is not assignable to `None` (caused by inconsistent types when breaking cycles)
+    while not cursor or not cursor.finished():  # E: Pyrefly detected conflicting types while breaking a dependency cycle: `Cursor | None` is not assignable to `None`.
         cursor = q.send(cursor)
 "#,
 );
@@ -672,7 +671,7 @@ while condition():
 assert_type(good, list[int])
 
 bad = [1]
-while condition():  # E: `list[int] | list[str]` is not assignable to `list[int]` (caused by inconsistent types when breaking cycles)
+while condition():  # E: Pyrefly detected conflicting types while breaking a dependency cycle: `list[int] | list[str]` is not assignable to `list[int]`.
     if condition():
         bad = [f(bad)]
     else:

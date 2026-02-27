@@ -649,6 +649,24 @@ def foo(x: int | None) -> None:
 );
 
 testcase!(
+    test_type_not_eq_final,
+    r#"
+from typing import assert_type
+def f(x: str | int | bool):
+    # bool is final, so we can narrow it away
+    if type(x) != bool:
+        assert_type(x, str | int)
+    else:
+        assert_type(x, bool)
+    # str is not final, so we can't narrow it away (subclasses of str are possible)
+    if type(x) != str:
+        assert_type(x, str | int | bool)
+    else:
+        assert_type(x, str)
+    "#,
+);
+
+testcase!(
     test_isinstance_union,
     r#"
 from typing import assert_type
@@ -719,6 +737,25 @@ def test_negative():
         assert_type(c, int)
     else:
         assert_type(c, list[int] | list[bool] | list[str])
+"#,
+);
+
+testcase!(
+    test_isinstance_and_len_narrow,
+    r#"
+from typing import assert_type
+
+def test(x: str | tuple[int, str] | tuple[int, str, str]):
+    if isinstance(x, tuple) and len(x) == 3:
+        assert_type(x, tuple[int, str, str])
+
+def test2(x: str | tuple[int, str] | tuple[int, str, str]) -> str:
+    if (not isinstance(x, tuple)) or len(x) != 3:
+        assert_type(x, str | tuple[int, str])
+        return "nope"
+    assert_type(x, tuple[int, str, str])
+    _, _, s = x
+    return s
 "#,
 );
 
@@ -795,6 +832,60 @@ def g(x):
 );
 
 testcase!(
+    test_isinstance_final_intersection,
+    r#"
+from typing import assert_never, final
+
+@final
+class A: ...
+class B: ...
+
+def f(x: A):
+    if isinstance(x, B):
+        assert_never(x)
+    "#,
+);
+
+testcase!(
+    test_isinstance_enum_intersection,
+    r#"
+from enum import Enum
+from typing import assert_never, reveal_type
+
+class E1(Enum):
+    pass
+
+class E2(Enum):
+    X = 1
+
+class A: ...
+
+def f(x: A):
+    if isinstance(x, E1):
+        reveal_type(x) # E: A & E1
+    if isinstance(x, E2):
+        assert_never(x)
+    "#,
+);
+
+testcase!(
+    test_final_intersect_typevar,
+    r#"
+from typing import assert_type, Callable, final
+
+@final
+class C:
+    x: int
+
+def f[R](g: Callable[[], R]) -> R:
+    x = g()
+    if isinstance(x, C):
+        assert_type(x.x, int)
+    return x
+    "#,
+);
+
+testcase!(
     test_isinstance_tuple,
     r#"
 from typing import assert_type
@@ -830,6 +921,95 @@ def g(x: object, y: type[Any]) -> None:
     if isinstance(x, y):
         assert_type(x, Any)
 "#,
+);
+
+testcase!(
+    test_isinstance_type_negative_no_narrow,
+    r#"
+from typing import assert_type
+
+def f(cls: type[int], x: int | str) -> None:
+    if isinstance(x, cls):
+        assert_type(x, int)
+    else:
+        # cls might be a subclass of int, so x can still be an int here
+        assert_type(x, int | str)
+"#,
+);
+
+testcase!(
+    test_isinstance_type_negative_partial_narrow,
+    r#"
+from typing import assert_type
+
+def f(cls: type[int], x: int | str | bytes) -> None:
+    if isinstance(x, (cls, str)):
+        assert_type(x, int | str)
+    else:
+        # cls might be a subclass of int, so x can still be an int here
+        assert_type(x, int | bytes)
+
+def g(cls: type[int], x: int | str | bytes) -> None:
+    if isinstance(x, cls | str):
+        assert_type(x, int | str)
+    else:
+        # cls might be a subclass of int, so x can still be an int here
+        assert_type(x, int | bytes)
+"#,
+);
+
+testcase!(
+    test_is_not_instance_no_narrow,
+    r#"
+from typing import assert_type
+
+def f(cls: type[int], x: int | str) -> None:
+    if not isinstance(x, cls):
+        # cls might be a subclass of int, so x can still be an int here
+        assert_type(x, int | str)
+    "#,
+);
+
+testcase!(
+    test_is_not_instance_alias,
+    r#"
+from typing import TypeAlias, assert_type
+
+X1 = int
+def f(x: int | str) -> None:
+    if not isinstance(x, X1):
+        assert_type(x, str)
+
+X2: TypeAlias = int
+def g(x: int | str) -> None:
+    if not isinstance(x, X2):
+        assert_type(x, str)
+    "#,
+);
+
+testcase!(
+    test_is_not_instance_of_final_class,
+    r#"
+from typing import assert_type, final
+@final
+class C: ...
+def f(cls: type[C], x: C | int):
+    if not isinstance(x, cls):
+        # Because `C` is final, we can assume that `cls` is exactly `C` and has been narrowed away
+        assert_type(x, int)
+    "#,
+);
+
+testcase!(
+    test_not_issubclass_no_narrow,
+    r#"
+from typing import assert_type
+
+def f(cls: type[int], x: type[int] | type[str]):
+    if not issubclass(x, cls):
+        # cls might be a subclass of int, so x can still be int here
+        assert_type(x, type[int] | type[str])
+    "#,
 );
 
 testcase!(
@@ -1626,6 +1806,32 @@ def test(x: Literal["foo", 1] | Color | bool | None, y: object, z: Literal["f", 
         assert_type(y, Literal[1, Color.RED, True])
     else:
         assert_type(y, object)
+
+def test_type_objects(x: type[object]) -> None:
+    if x in (int, float):
+        assert_type(x, type[int] | type[float])
+
+def test_type_objects_not_in(x: type[int] | type[float] | type[str]) -> None:
+    if x not in (int, float):
+        assert_type(x, type[int] | type[float] | type[str])
+    else:
+        assert_type(x, type[int] | type[float])
+
+def test_type_objects_in_union(x: type[int] | type[float] | type[str]) -> None:
+    if x in (int, float):
+        assert_type(x, type[int] | type[float])
+    else:
+        assert_type(x, type[int] | type[float] | type[str])
+
+def test_type_objects_mixed_with_literals(x: type[int] | type[float] | None, y: Literal[1] | type[int] | type[str]) -> None:
+    if x in (int, None):
+        assert_type(x, type[int] | None)
+    else:
+        assert_type(x, type[int] | type[float])
+    if y in (1, int):
+        assert_type(y, Literal[1] | type[int])
+    else:
+        assert_type(y, type[int] | type[str])
 "#,
 );
 
@@ -2501,6 +2707,20 @@ assert_type(is_str("hello"), bool)
 );
 
 testcase!(
+    test_typeguard_bad_specialization_no_duplicate,
+    r#"
+from typing import TypeGuard
+
+def f[T: str](x: T) -> TypeGuard[T]:
+    return True
+
+def g(x: int | str):
+    if f(x):  # E: `int | str` is not assignable to upper bound `str` of type variable `T`
+        pass
+    "#,
+);
+
+testcase!(
     test_isinstance_invalid_special_form,
     r#"
 from typing import Final
@@ -2531,5 +2751,37 @@ class C:
 def f(o: C):
     if o.x is not None:
         o.x.foo
+    "#,
+);
+
+testcase!(
+    test_narrow_to_intersection_of_mapping_and_iterable,
+    r#"
+from collections.abc import Iterable, Mapping
+from typing import Any, assert_type
+
+def test1(arg: Mapping[str, int] | Iterable[tuple[str, int]]) -> None:
+    if isinstance(arg, Mapping):
+        assert_type(arg, Mapping[str, int] | Mapping[tuple[str, int], Any])
+    else:
+        assert_type(arg, Iterable[tuple[str, int]])
+
+def test2(arg: Mapping[str, int] | Iterable[tuple[str, int]]) -> None:
+    if not isinstance(arg, Mapping):
+        assert_type(arg, Iterable[tuple[str, int]])
+    else:
+        assert_type(arg, Mapping[str, int] | Mapping[tuple[str, int], Any])
+    "#,
+);
+
+testcase!(
+    test_narrow_sequence_to_tuple,
+    r#"
+from typing import Any, Sequence, assert_type
+
+def f(inputs: Sequence[int]):
+    assert isinstance(inputs, tuple)
+    for x in inputs:
+        assert_type(x, int)
     "#,
 );
