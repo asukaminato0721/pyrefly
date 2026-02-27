@@ -1745,12 +1745,6 @@ pub enum ReturnTypeKind {
     ShouldValidateAnnotation {
         range: TextRange,
         annotation: Idx<KeyAnnotation>,
-        /// Used to skip the validation for stub functions (returning `...`). This is
-        /// unsafe, but is convenient and matches Pyright's behavior.
-        stub_or_impl: FunctionStubOrImpl,
-        /// We keep this just so we can scan for `@abstractmethod` and use the info to decide
-        /// whether to skip the validation.
-        decorators: Box<[Idx<KeyDecorator>]>,
         implicit_return: Idx<Key>,
         is_generator: bool,
         has_explicit_return: bool,

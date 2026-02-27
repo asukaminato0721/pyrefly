@@ -379,7 +379,6 @@ impl<'a> BindingsBuilder<'a> {
         implicit_return: Option<Idx<Key>>,
         should_infer_return_type: bool,
         stub_or_impl: FunctionStubOrImpl,
-        decorators: Box<[Idx<KeyDecorator>]>,
     ) {
         let is_generator =
             !(yields_and_returns.yields.is_empty() && yields_and_returns.yield_froms.is_empty());
@@ -438,8 +437,6 @@ impl<'a> BindingsBuilder<'a> {
                     ReturnTypeKind::ShouldValidateAnnotation {
                         range,
                         annotation,
-                        stub_or_impl,
-                        decorators,
                         implicit_return,
                         is_generator: !(yield_keys.is_empty() && yield_from_keys.is_empty()),
                         has_explicit_return: !return_keys.is_empty(),
@@ -637,7 +634,6 @@ impl<'a> BindingsBuilder<'a> {
                         None,
                         false, // this disables return type inference
                         stub_or_impl,
-                        decorators.decorators.clone(),
                     );
                     self_assignments
                 }
@@ -667,7 +663,6 @@ impl<'a> BindingsBuilder<'a> {
                         Some(implicit_return),
                         false, // this disables return type inference
                         stub_or_impl,
-                        decorators.decorators.clone(),
                     );
                     self_assignments
                 }
@@ -697,7 +692,6 @@ impl<'a> BindingsBuilder<'a> {
                         Some(implicit_return),
                         true,
                         stub_or_impl,
-                        decorators.decorators.clone(),
                     );
                     self_assignments
                 }

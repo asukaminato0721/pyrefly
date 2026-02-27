@@ -3058,8 +3058,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             ReturnTypeKind::ShouldValidateAnnotation {
                 range,
                 annotation,
-                stub_or_impl: _,
-                decorators: _,
                 implicit_return,
                 is_generator,
                 has_explicit_return,
