@@ -1234,16 +1234,17 @@ impl GleanState<'_> {
                     .map_or(from_name.id().to_string(), |x| {
                         join_names(x, from_name.id())
                     });
+                let from_name_definition = DefinitionLocation {
+                    name: from_name_string.clone(),
+                    file: None, // TODO: default to module file
+                };
                 let as_name = import.asname.as_ref().unwrap_or(from_name);
 
                 let definition = self
                     .find_definition(from_name.range.start())
                     .first()
                     .cloned()
-                    .unwrap_or(DefinitionLocation {
-                        name: from_name_string.clone(),
-                        file: None, // TODO: default to module file
-                    });
+                    .unwrap_or(from_name_definition.clone());
 
                 let from_name_id = Identifier::new(Name::new(from_name_string), from_name.range);
                 decl_infos.push(self.make_import_fact(
@@ -1252,7 +1253,12 @@ impl GleanState<'_> {
                     Some(&definition.name),
                     top_level_declaration,
                 ));
-                self.add_xref(definition, from_name.range);
+
+                let range = from_name.range;
+                if definition.name != from_name_definition.name {
+                    self.add_xref(from_name_definition, range)
+                }
+                self.add_xref(definition, range);
             }
         }
 
