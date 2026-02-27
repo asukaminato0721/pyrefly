@@ -546,6 +546,14 @@ impl<'a> BindingsBuilder<'a> {
         let body_is_trivial = match body_no_docstring {
             [] => true,
             [Stmt::Pass(_)] => true,
+            [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
+            _ => false,
+        };
+        let body_is_ellipse = match body_no_docstring {
+            [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
+            _ => false,
+        };
+        let body_is_not_implemented = match body_no_docstring {
             // raise NotImplementedError(...)
             [
                 Stmt::Raise(StmtRaise {
@@ -560,11 +568,6 @@ impl<'a> BindingsBuilder<'a> {
                     ..
                 }),
             ] if self.as_special_export(val) == Some(SpecialExport::NotImplemented) => true,
-            [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
-            _ => false,
-        };
-        let body_is_ellipse = match body_no_docstring {
-            [Stmt::Expr(StmtExpr { value, .. })] if value.is_ellipsis_literal_expr() => true,
             _ => false,
         };
         let stub_or_impl = if (self.scopes.is_in_protocol_class()
@@ -579,6 +582,7 @@ impl<'a> BindingsBuilder<'a> {
         };
         let should_report_unused_parameters = stub_or_impl == FunctionStubOrImpl::Impl
             && !body_is_trivial
+            && !body_is_not_implemented
             && !decorators.is_overload
             && !decorators.is_override
             && !decorators.is_abstract_method;
