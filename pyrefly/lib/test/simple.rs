@@ -212,6 +212,21 @@ assert_type(f([1], [2]), Iterator[int])
 );
 
 testcase!(
+    test_conditional_shadow_builtin_zip,
+    r#"
+from typing import reveal_type
+import random
+
+cond = random.randint(0, 1)
+if cond:
+    def zip(*args) -> list[int]:
+        return [42, 42, 42]
+
+reveal_type(zip([1], [2]))  # E: revealed type: list[int] | zip[tuple[int, int]]
+"#,
+);
+
+testcase!(
     test_unordered_defs,
     r#"
 def f() -> int:
