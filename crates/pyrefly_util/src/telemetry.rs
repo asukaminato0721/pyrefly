@@ -114,6 +114,19 @@ pub struct TelemetryTransactionStats {
     pub run_time: Duration,
     pub committed: bool,
     pub state_lock_blocked: Duration,
+    /// `true` when the transaction was created fresh (restore failed or no saved state),
+    /// `false` when restored from saved state.
+    pub fresh: bool,
+    /// Number of modules dirtied by `set_memory`.
+    pub set_memory_dirty: usize,
+    /// Time spent in `compute_stdlib` during `run_step`.
+    pub compute_stdlib_time: Duration,
+    /// Number of modules in the dirty set at the start of `run_step`.
+    pub run_dirty_count: usize,
+    /// Number of items pushed to the todo work queue in `run_step`.
+    pub run_todo_count: usize,
+    /// Time spent in `work()` (the parallel solve phase) during `run_step`.
+    pub run_work_time: Duration,
 }
 
 #[derive(Default)]

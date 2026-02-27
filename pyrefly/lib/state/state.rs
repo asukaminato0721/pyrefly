@@ -553,6 +553,11 @@ impl<'a> Transaction<'a> {
         self.data.subscriber = subscriber;
     }
 
+    /// Mark this transaction as freshly created (not restored from saved state).
+    pub fn set_fresh(&mut self) {
+        self.stats.lock().fresh = true;
+    }
+
     /// Sets a callback that will be invoked immediately each time an ad-hoc solve completes,
     /// recording the operation label, start time, and duration as a telemetry event.
     pub fn set_ad_hoc_solve_recorder(
@@ -1451,30 +1456,43 @@ impl<'a> Transaction<'a> {
             .iter()
             .map(|x| x.sys_info().dupe())
             .collect::<SmallSet<_>>();
+        let stdlib_start = Instant::now();
         self.compute_stdlib(sys_infos);
+        let compute_stdlib_time = stdlib_start.elapsed();
+        self.stats.lock().compute_stdlib_time += compute_stdlib_time;
 
+        let mut todo_count = 0;
+        let dirty_count;
         {
             let dirty = mem::take(&mut *self.data.dirty.lock());
+            dirty_count = dirty.len();
             for h in handles {
                 let (m, created) = self.get_module_ex(h, require);
                 let dirty_require = m.state.increase_require(require);
                 if (created || dirty_require) && !dirty.contains(&m) {
                     self.data.todo.push_fifo(Step::first(), m);
+                    todo_count += 1;
                 }
             }
             for m in dirty {
                 self.data.todo.push_fifo(Step::first(), m);
+                todo_count += 1;
             }
         }
 
+        let work_start = Instant::now();
         let cancelled = AtomicBool::new(false);
         self.data.state.threads.spawn_many(|| {
             cancelled.fetch_or(self.work().is_err(), Ordering::Relaxed);
         });
+        let run_work_time = work_start.elapsed();
 
         let mut stats = self.stats.lock();
         stats.run_steps += 1;
         stats.run_time += run_start.elapsed();
+        stats.run_dirty_count += dirty_count;
+        stats.run_todo_count += todo_count;
+        stats.run_work_time += run_work_time;
 
         if cancelled.into_inner() {
             Err(Cancelled)
@@ -1783,6 +1801,7 @@ impl<'a> Transaction<'a> {
                 changed.insert(ModulePath::memory(path));
             }
         }
+        self.stats.lock().set_memory_dirty = changed.len();
         if changed.is_empty() {
             return;
         }
