@@ -3116,8 +3116,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 implicit_return,
                 yields,
                 yield_froms,
-                body_is_trivial,
-                class_metadata_key,
+                body_is_trivial: _,
+                class_metadata_key: _,
             } => {
                 let is_generator = !(yields.is_empty() && yield_froms.is_empty());
                 let returns = returns.iter().map(|k| self.get_idx(*k).arc_clone_ty());
@@ -3134,17 +3134,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             .chain(iter::once(implicit_return.arc_clone_ty()))
                             .collect(),
                     )
-                };
-                // If this is a method with a trivial body (e.g., `raise NotImplementedError()`)
-                // in a class that extends ABC, treat it as an abstract method and return Any
-                // instead of Never. This handles transitive ABC inheritance.
-                let is_abstract_method = *body_is_trivial
-                    && return_ty.is_never()
-                    && class_metadata_key.is_some_and(|key| self.get_idx(key).extends_abc());
-                let return_ty = if is_abstract_method {
-                    self.heap.mk_any_implicit()
-                } else {
-                    return_ty
                 };
                 if is_generator {
                     let yield_ty = self.unions({
