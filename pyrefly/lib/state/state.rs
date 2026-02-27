@@ -1482,9 +1482,18 @@ impl<'a> Transaction<'a> {
 
         let work_start = Instant::now();
         let cancelled = AtomicBool::new(false);
-        self.data.state.threads.spawn_many(|| {
+        // When the todo queue is empty, run `work()` on the calling thread instead of
+        // dispatching to the shared thread pool. `spawn_many` uses rayon `scope` which
+        // blocks until all spawned closures complete. If pool threads are parked inside
+        // another transaction's work loop (e.g. a concurrent recheck), acquiring them
+        // can take as long as the recheck itself — even when our todo queue is empty.
+        if todo_count == 0 {
             cancelled.fetch_or(self.work().is_err(), Ordering::Relaxed);
-        });
+        } else {
+            self.data.state.threads.spawn_many(|| {
+                cancelled.fetch_or(self.work().is_err(), Ordering::Relaxed);
+            });
+        }
         let run_work_time = work_start.elapsed();
 
         let mut stats = self.stats.lock();
