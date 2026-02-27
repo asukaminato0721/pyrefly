@@ -48,7 +48,6 @@ use crate::binding::binding::IsAsync;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyClass;
-use crate::binding::binding::KeyClassMetadata;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
 use crate::binding::binding::KeyUndecoratedFunction;
@@ -381,8 +380,6 @@ impl<'a> BindingsBuilder<'a> {
         should_infer_return_type: bool,
         stub_or_impl: FunctionStubOrImpl,
         decorators: Box<[Idx<KeyDecorator>]>,
-        body_is_trivial: bool,
-        class_metadata_key: Option<Idx<KeyClassMetadata>>,
     ) {
         let is_generator =
             !(yields_and_returns.yields.is_empty() && yields_and_returns.yield_froms.is_empty());
@@ -463,8 +460,6 @@ impl<'a> BindingsBuilder<'a> {
                         implicit_return,
                         yields: yield_keys,
                         yield_froms: yield_from_keys,
-                        body_is_trivial,
-                        class_metadata_key,
                     }
                 }
                 (None, _) => {
@@ -540,7 +535,6 @@ impl<'a> BindingsBuilder<'a> {
         parent: &NestingContext,
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
-        metadata_key: Option<Idx<KeyClassMetadata>>,
     ) -> (FunctionStubOrImpl, Option<SelfAssignments>) {
         // If the first statement in the body is a docstring, remove it
         let body_no_docstring = if let Some(s) = body.first()
@@ -642,8 +636,6 @@ impl<'a> BindingsBuilder<'a> {
                         false, // this disables return type inference
                         stub_or_impl,
                         decorators.decorators.clone(),
-                        body_is_trivial,
-                        metadata_key,
                     );
                     self_assignments
                 }
@@ -674,8 +666,6 @@ impl<'a> BindingsBuilder<'a> {
                         false, // this disables return type inference
                         stub_or_impl,
                         decorators.decorators.clone(),
-                        body_is_trivial,
-                        metadata_key,
                     );
                     self_assignments
                 }
@@ -706,8 +696,6 @@ impl<'a> BindingsBuilder<'a> {
                         true,
                         stub_or_impl,
                         decorators.decorators.clone(),
-                        body_is_trivial,
-                        metadata_key,
                     );
                     self_assignments
                 }
@@ -759,7 +747,6 @@ impl<'a> BindingsBuilder<'a> {
             parent,
             undecorated_idx,
             class_key,
-            metadata_key,
         );
 
         // Pop the annotation scope to get back to the parent scope, and handle this
