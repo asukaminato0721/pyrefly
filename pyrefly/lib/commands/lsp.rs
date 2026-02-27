@@ -67,7 +67,7 @@ pub struct LspArgs {
 /// package files.
 pub fn run_lsp(
     connection: Connection,
-    reader: MessageReader,
+    mut reader: MessageReader,
     args: LspArgs,
     server_info: Option<ServerInfo>,
     path_remapper: Option<PathRemapper>,
@@ -75,8 +75,8 @@ pub fn run_lsp(
     external_references: Arc<dyn ExternalReferences>,
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
-    if let Some((reader, initialize_info)) =
-        initialize_connection(&connection, reader, args.indexing_mode, server_info)?
+    if let Some(initialize_info) =
+        initialize_connection(&connection, &mut reader, args.indexing_mode, server_info)?
     {
         lsp_loop(
             connection,
@@ -96,24 +96,18 @@ pub fn run_lsp(
 
 fn initialize_connection(
     connection: &Connection,
-    mut reader: MessageReader,
+    reader: &mut MessageReader,
     indexing_mode: IndexingMode,
     server_info: Option<ServerInfo>,
-) -> anyhow::Result<Option<(MessageReader, InitializeInfo)>> {
-    let Some((id, initialize_info)) = initialize_start(&connection.sender, &mut reader)? else {
+) -> anyhow::Result<Option<InitializeInfo>> {
+    let Some((id, initialize_info)) = initialize_start(&connection.sender, reader)? else {
         return Ok(None);
     };
     let capabilities = capabilities(indexing_mode, &initialize_info.params);
-    if !initialize_finish(
-        &connection.sender,
-        &mut reader,
-        id,
-        capabilities,
-        server_info,
-    )? {
+    if !initialize_finish(&connection.sender, reader, id, capabilities, server_info)? {
         return Ok(None);
     }
-    Ok(Some((reader, initialize_info)))
+    Ok(Some(initialize_info))
 }
 
 impl LspArgs {
