@@ -1243,7 +1243,7 @@ impl LspInteraction {
     pub fn new_with_indexing_mode(indexing_mode: IndexingMode) -> Self {
         init_test();
 
-        let (conn_client, conn_server) = Connection::memory();
+        let ((conn_client, _client_reader), (conn_server, server_reader)) = Connection::memory();
 
         let finish_handle = Arc::new(FinishHandle::new());
         let finish_server = finish_handle.clone();
@@ -1257,6 +1257,7 @@ impl LspInteraction {
             };
             let _ = run_lsp(
                 conn_server,
+                server_reader,
                 args,
                 None,
                 None,

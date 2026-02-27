@@ -341,7 +341,7 @@ impl TspInteraction {
     pub fn new() -> Self {
         init_test();
 
-        let (conn_server, conn_client) = Connection::memory();
+        let ((conn_server, server_reader), (conn_client, _client_reader)) = Connection::memory();
         let client_receiver = conn_client.channel_receiver().clone();
 
         let args = TspArgs {
@@ -357,7 +357,7 @@ impl TspInteraction {
 
         // Spawn the server thread and store its handle
         let thread_handle = thread::spawn(move || {
-            run_tsp(conn_server, args, &NoTelemetry, None)
+            run_tsp(conn_server, server_reader, args, &NoTelemetry, None)
                 .map(|_| ())
                 .map_err(|e| std::io::Error::other(e.to_string()))
         });

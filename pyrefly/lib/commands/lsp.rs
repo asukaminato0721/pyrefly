@@ -19,6 +19,7 @@ use crate::lsp::non_wasm::external_references::ExternalReferences;
 use crate::lsp::non_wasm::module_helpers::PathRemapper;
 use crate::lsp::non_wasm::server::Connection;
 use crate::lsp::non_wasm::server::InitializeInfo;
+use crate::lsp::non_wasm::server::MessageReader;
 use crate::lsp::non_wasm::server::capabilities;
 use crate::lsp::non_wasm::server::initialize_finish;
 use crate::lsp::non_wasm::server::initialize_start;
@@ -66,6 +67,7 @@ pub struct LspArgs {
 /// package files.
 pub fn run_lsp(
     connection: Connection,
+    reader: MessageReader,
     args: LspArgs,
     server_info: Option<ServerInfo>,
     path_remapper: Option<PathRemapper>,
@@ -73,11 +75,12 @@ pub fn run_lsp(
     external_references: Arc<dyn ExternalReferences>,
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
-    if let Some(initialize_info) =
-        initialize_connection(&connection, args.indexing_mode, server_info)?
+    if let Some((reader, initialize_info)) =
+        initialize_connection(&connection, reader, args.indexing_mode, server_info)?
     {
         lsp_loop(
             connection,
+            reader,
             initialize_info,
             args.indexing_mode,
             args.workspace_indexing_limit,
@@ -93,17 +96,24 @@ pub fn run_lsp(
 
 fn initialize_connection(
     connection: &Connection,
+    mut reader: MessageReader,
     indexing_mode: IndexingMode,
     server_info: Option<ServerInfo>,
-) -> anyhow::Result<Option<InitializeInfo>> {
-    let Some((id, initialize_info)) = initialize_start(connection)? else {
+) -> anyhow::Result<Option<(MessageReader, InitializeInfo)>> {
+    let Some((id, initialize_info)) = initialize_start(&connection.sender, &mut reader)? else {
         return Ok(None);
     };
     let capabilities = capabilities(indexing_mode, &initialize_info.params);
-    if !initialize_finish(connection, id, capabilities, server_info)? {
+    if !initialize_finish(
+        &connection.sender,
+        &mut reader,
+        id,
+        capabilities,
+        server_info,
+    )? {
         return Ok(None);
     }
-    Ok(Some(initialize_info))
+    Ok(Some((reader, initialize_info)))
 }
 
 impl LspArgs {
@@ -123,7 +133,7 @@ impl LspArgs {
 
         // Create the transport. Includes the stdio (stdin and stdout) versions but this could
         // also be implemented to use sockets or HTTP.
-        let (connection, io_threads) = Connection::stdio();
+        let (connection, reader, io_threads) = Connection::stdio();
 
         let server_info = ServerInfo {
             name: "pyrefly-lsp".to_owned(),
@@ -132,6 +142,7 @@ impl LspArgs {
 
         run_lsp(
             connection,
+            reader,
             self,
             Some(server_info),
             path_remapper,

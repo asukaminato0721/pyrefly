@@ -356,7 +356,7 @@ pub trait TspInterface: Send + Sync {
     /// Send a response back to the LSP client
     fn send_response(&self, response: Response);
 
-    fn connection(&self) -> &Connection;
+    fn sender(&self) -> &Sender<Message>;
 
     fn lsp_queue(&self) -> &LspQueue;
 
@@ -369,7 +369,7 @@ pub trait TspInterface: Send + Sync {
 
     fn stop_recheck_queue(&self);
 
-    fn dispatch_lsp_events(&self);
+    fn dispatch_lsp_events(&self, reader: &mut MessageReader);
 
     /// Process an LSP event and return the next step
     fn process_event<'a>(
@@ -387,29 +387,34 @@ pub trait TspInterface: Send + Sync {
 
 pub struct Connection {
     pub sender: Sender<Message>,
-    reader: ConnectionReader,
+    /// Channel receiver, only present for test connections created via
+    /// `Connection::memory()`. The test client reads from this to observe
+    /// messages sent by the server.
+    #[cfg(test)]
+    channel_receiver: Option<Receiver<Message>>,
 }
 
-/// The message source for a `Connection`. Either a crossbeam channel (used in
-/// tests via `Connection::memory()`) or a direct stdin reader (used in
+/// Owns the message source for the LSP/TSP server. Either a crossbeam channel
+/// (used in tests via `Connection::memory()`) or a direct stdin reader (used in
 /// production via `Connection::stdio()`).
-enum ConnectionReader {
+///
+/// This is kept separate from `Connection` so the read side can take `&mut self`
+/// without requiring interior mutability — stdin is only ever read from one
+/// thread.
+pub enum MessageReader {
     #[cfg_attr(not(test), allow(dead_code))]
     Channel(Receiver<Message>),
-    Stdio(Mutex<BufReader<Stdin>>),
+    Stdio(BufReader<Stdin>),
 }
 
-impl Connection {
+impl MessageReader {
     /// Receive the next message, blocking until one is available.
     /// Returns `None` if the connection is closed (channel disconnected or
     /// stdin EOF).
-    pub fn recv(&self) -> Option<Message> {
-        match &self.reader {
-            ConnectionReader::Channel(r) => r.recv().ok(),
-            ConnectionReader::Stdio(r) => {
-                let mut r = r.lock();
-                read_lsp_message(&mut *r).ok().flatten()
-            }
+    pub fn recv(&mut self) -> Option<Message> {
+        match self {
+            MessageReader::Channel(r) => r.recv().ok(),
+            MessageReader::Stdio(r) => read_lsp_message(r).ok().flatten(),
         }
     }
 }
@@ -431,7 +436,7 @@ impl Connection {
     /// Create a connection that reads directly from stdin and writes to stdout.
     /// Only the writer uses a background thread; reads happen inline in the
     /// calling thread, eliminating a context switch per LSP message.
-    pub fn stdio() -> (Self, IoThread) {
+    pub fn stdio() -> (Self, MessageReader, IoThread) {
         let (writer_sender, writer_receiver) = crossbeam_channel::unbounded();
         let writer = std::thread::spawn(move || {
             let mut stdout = std::io::stdout().lock();
@@ -443,25 +448,33 @@ impl Connection {
         (
             Self {
                 sender: writer_sender,
-                reader: ConnectionReader::Stdio(Mutex::new(BufReader::new(std::io::stdin()))),
+                #[cfg(test)]
+                channel_receiver: None,
             },
+            MessageReader::Stdio(BufReader::new(std::io::stdin())),
             IoThread { writer },
         )
     }
 
     #[cfg(test)]
-    pub fn memory() -> (Self, Self) {
+    pub fn memory() -> ((Self, MessageReader), (Self, MessageReader)) {
         let (s1, r1) = crossbeam_channel::unbounded();
         let (s2, r2) = crossbeam_channel::unbounded();
         (
-            Self {
-                sender: s1,
-                reader: ConnectionReader::Channel(r2),
-            },
-            Self {
-                sender: s2,
-                reader: ConnectionReader::Channel(r1),
-            },
+            (
+                Self {
+                    sender: s1,
+                    channel_receiver: Some(r2.clone()),
+                },
+                MessageReader::Channel(r2),
+            ),
+            (
+                Self {
+                    sender: s2,
+                    channel_receiver: Some(r1.clone()),
+                },
+                MessageReader::Channel(r1),
+            ),
         )
     }
 
@@ -469,12 +482,9 @@ impl Connection {
     /// channel-based connections (tests).
     #[cfg(test)]
     pub fn channel_receiver(&self) -> &Receiver<Message> {
-        match &self.reader {
-            ConnectionReader::Channel(r) => r,
-            ConnectionReader::Stdio(_) => {
-                unreachable!("channel_receiver not available for stdio connections")
-            }
-        }
+        self.channel_receiver
+            .as_ref()
+            .expect("channel_receiver not available for stdio connections")
     }
 }
 
@@ -774,12 +784,12 @@ pub struct Server {
     external_references: Arc<dyn ExternalReferences>,
 }
 
-pub fn shutdown_finish(connection: &Connection, id: RequestId) {
+pub fn shutdown_finish(sender: &Sender<Message>, reader: &mut MessageReader, id: RequestId) {
     let response = Response::new_ok(id, ());
-    if connection.sender.send(response.into()).is_err() {
+    if sender.send(response.into()).is_err() {
         return;
     }
-    while let Some(msg) = connection.recv() {
+    while let Some(msg) = reader.recv() {
         match msg {
             Message::Request(x) => {
                 error!("Unexpected request after shutdown: {x:?}");
@@ -789,7 +799,7 @@ pub fn shutdown_finish(connection: &Connection, id: RequestId) {
                     ErrorCode::InvalidRequest as i32,
                     "Shutdown already requested".to_owned(),
                 );
-                if connection.sender.send(response.into()).is_err() {
+                if sender.send(response.into()).is_err() {
                     return;
                 }
             }
@@ -811,10 +821,11 @@ pub fn shutdown_finish(connection: &Connection, id: RequestId) {
 // If the connection is closed, or we receive an exit notification, returns None.
 // If we receive an unexpected shutdown notification, respond and wait for exit.
 pub fn initialize_start(
-    connection: &Connection,
+    sender: &Sender<Message>,
+    reader: &mut MessageReader,
 ) -> anyhow::Result<Option<(RequestId, InitializeInfo)>> {
     loop {
-        let Some(msg) = connection.recv() else {
+        let Some(msg) = reader.recv() else {
             break;
         };
         match msg {
@@ -834,7 +845,7 @@ pub fn initialize_start(
                 error!("Unexpected request before initialize: {x:?}");
 
                 let response = if x.method == Shutdown::METHOD {
-                    shutdown_finish(connection, x.id);
+                    shutdown_finish(sender, reader, x.id);
                     break;
                 } else {
                     Response::new_err(
@@ -844,7 +855,7 @@ pub fn initialize_start(
                     )
                 };
 
-                if connection.sender.send(response.into()).is_err() {
+                if sender.send(response.into()).is_err() {
                     break;
                 }
             }
@@ -883,7 +894,8 @@ struct InitializeResult<C> {
 }
 
 pub fn initialize_finish<C: Serialize>(
-    connection: &Connection,
+    sender: &Sender<Message>,
+    reader: &mut MessageReader,
     id: RequestId,
     capabilities: C,
     server_info: Option<ServerInfo>,
@@ -893,11 +905,11 @@ pub fn initialize_finish<C: Serialize>(
         server_info,
     };
     let response = Response::new_ok(id, result);
-    if connection.sender.send(response.into()).is_err() {
+    if sender.send(response.into()).is_err() {
         return Ok(false);
     }
     loop {
-        let Some(msg) = connection.recv() else {
+        let Some(msg) = reader.recv() else {
             break;
         };
         match msg {
@@ -905,7 +917,7 @@ pub fn initialize_finish<C: Serialize>(
                 error!("Unexpected request before initialized: {x:?}");
 
                 let response = if x.method == Shutdown::METHOD {
-                    shutdown_finish(connection, x.id);
+                    shutdown_finish(sender, reader, x.id);
                     break;
                 } else {
                     Response::new_err(
@@ -917,7 +929,7 @@ pub fn initialize_finish<C: Serialize>(
                         ),
                     )
                 };
-                if connection.sender.send(response.into()).is_err() {
+                if sender.send(response.into()).is_err() {
                     break;
                 }
             }
@@ -946,12 +958,12 @@ pub fn initialize_finish<C: Serialize>(
 /// - priority_events includes those that should be handled as soon as possible (e.g. know that a
 ///   request is cancelled)
 /// - queued_events includes most of the other events.
-pub fn dispatch_lsp_events(server: &Server) {
-    while let Some(msg) = server.connection().recv() {
+pub fn dispatch_lsp_events(server: &Server, reader: &mut MessageReader) {
+    while let Some(msg) = reader.recv() {
         match msg {
             Message::Request(x) => {
                 if x.method == Shutdown::METHOD {
-                    shutdown_finish(server.connection(), x.id);
+                    shutdown_finish(server.sender(), reader, x.id);
                     break;
                 }
                 if server.lsp_queue().send(LspEvent::LspRequest(x)).is_err() {
@@ -1208,6 +1220,7 @@ struct TypeHierarchyTarget {
 
 pub fn lsp_loop(
     connection: Connection,
+    mut reader: MessageReader,
     initialization: InitializeInfo,
     indexing_mode: IndexingMode,
     workspace_indexing_limit: usize,
@@ -1298,7 +1311,7 @@ pub fn lsp_loop(
         });
         // Run dispatch on the main thread. This reads from the LSP connection
         // and routes messages into the LspQueue.
-        dispatch_lsp_events(&server);
+        dispatch_lsp_events(&server, &mut reader);
     });
     drop(server); // close connection
     Ok(())
@@ -5227,8 +5240,8 @@ impl TspInterface for Server {
         self.send_response(response)
     }
 
-    fn connection(&self) -> &Connection {
-        &self.connection.0
+    fn sender(&self) -> &Sender<Message> {
+        &self.connection.0.sender
     }
 
     fn lsp_queue(&self) -> &LspQueue {
@@ -5243,8 +5256,8 @@ impl TspInterface for Server {
         &self.pending_watched_file_changes
     }
 
-    fn dispatch_lsp_events(&self) {
-        dispatch_lsp_events(self);
+    fn dispatch_lsp_events(&self, reader: &mut MessageReader) {
+        dispatch_lsp_events(self, reader);
     }
 
     fn run_recheck_queue(&self, telemetry: &impl Telemetry) {

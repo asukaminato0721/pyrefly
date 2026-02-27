@@ -24,6 +24,7 @@ use crate::lsp::non_wasm::protocol::Request;
 use crate::lsp::non_wasm::protocol::Response;
 use crate::lsp::non_wasm::queue::LspEvent;
 use crate::lsp::non_wasm::server::InitializeInfo;
+use crate::lsp::non_wasm::server::MessageReader;
 use crate::lsp::non_wasm::server::ProcessEvent;
 use crate::lsp::non_wasm::server::ServerCapabilitiesWithTypeHierarchy;
 use crate::lsp::non_wasm::server::TspInterface;
@@ -139,6 +140,7 @@ impl<T: TspInterface> TspServer<T> {
 
 pub fn tsp_loop(
     lsp_server: impl TspInterface,
+    mut reader: MessageReader,
     _initialization: InitializeInfo,
     telemetry: &impl Telemetry,
 ) -> anyhow::Result<()> {
@@ -150,7 +152,7 @@ pub fn tsp_loop(
         scope.spawn(|| server.inner.run_recheck_queue(telemetry));
 
         scope.spawn(|| {
-            server.inner.dispatch_lsp_events();
+            server.inner.dispatch_lsp_events(&mut reader);
         });
 
         let mut ide_transaction_manager = TransactionManager::default();

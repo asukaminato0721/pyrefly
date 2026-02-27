@@ -18,6 +18,7 @@ use crate::lsp::non_wasm::external_references::NoExternalReferences;
 use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::server::Connection;
 use crate::lsp::non_wasm::server::InitializeInfo;
+use crate::lsp::non_wasm::server::MessageReader;
 use crate::lsp::non_wasm::server::initialize_finish;
 use crate::lsp::non_wasm::server::initialize_start;
 use crate::tsp::server::tsp_capabilities;
@@ -38,11 +39,14 @@ pub struct TspArgs {
 
 pub fn run_tsp(
     connection: Connection,
+    mut reader: MessageReader,
     args: TspArgs,
     telemetry: &impl Telemetry,
     wrapper: Option<ConfigConfigurerWrapper>,
 ) -> anyhow::Result<()> {
-    if let Some(initialize_info) = initialize_tsp_connection(&connection, args.indexing_mode)? {
+    if let Some(initialize_info) =
+        initialize_tsp_connection(&connection, &mut reader, args.indexing_mode)?
+    {
         // Create an LSP server instance for the TSP server to use.
         let lsp_queue = LspQueue::new();
         let surface = telemetry.surface();
@@ -61,21 +65,22 @@ pub fn run_tsp(
         );
 
         // Reuse the existing lsp_loop but with TSP initialization
-        tsp_loop(lsp_server, initialize_info, telemetry)?;
+        tsp_loop(lsp_server, reader, initialize_info, telemetry)?;
     }
     Ok(())
 }
 
 fn initialize_tsp_connection(
     connection: &Connection,
+    reader: &mut MessageReader,
     indexing_mode: IndexingMode,
 ) -> anyhow::Result<Option<InitializeInfo>> {
-    let Some((id, initialize_info)) = initialize_start(connection)? else {
+    let Some((id, initialize_info)) = initialize_start(&connection.sender, reader)? else {
         return Ok(None);
     };
     let capabilities = tsp_capabilities(indexing_mode, &initialize_info.params);
     // Note: TSP doesn't include serverInfo, unlike LSP
-    if !initialize_finish(connection, id, capabilities, None)? {
+    if !initialize_finish(&connection.sender, reader, id, capabilities, None)? {
         return Ok(None);
     }
     Ok(Some(initialize_info))
@@ -92,9 +97,9 @@ impl TspArgs {
 
         // Create the transport. Includes the stdio (stdin and stdout) versions but this could
         // also be implemented to use sockets or HTTP.
-        let (connection, io_threads) = Connection::stdio();
+        let (connection, reader, io_threads) = Connection::stdio();
 
-        run_tsp(connection, self, telemetry, wrapper)?;
+        run_tsp(connection, reader, self, telemetry, wrapper)?;
         io_threads.join()?;
         // We have shut down gracefully.
         // Use writeln! instead of eprintln! to avoid panicking if stderr is closed.
