@@ -667,7 +667,7 @@ testcase!(
     test_auto,
     r#"
 from enum import auto, Enum, StrEnum
-from typing import assert_type
+from typing import assert_type, Literal
 class E1(Enum):
     X = auto()
 class E2(StrEnum):
@@ -677,9 +677,34 @@ class E3(str, Enum):
 class E4(Enum):
     X = (auto(),)
 assert_type(E1.X.value, int)
-assert_type(E2.X.value, str)
-assert_type(E3.X.value, str)
+assert_type(E2.X.value, Literal["X"])
+assert_type(E3.X.value, Literal["X"])
 assert_type(E4.X.value, tuple[int])
+    "#,
+);
+
+testcase!(
+    test_str_enum_value_literal,
+    r#"
+from enum import Enum, StrEnum
+from typing import Literal
+
+class Foo(StrEnum):
+    x = "x"
+
+class Bar(str, Enum):
+    y = "y"
+
+def take_literal(z: Literal["x", "y"]) -> None: ...
+
+def test(foo: Foo, bar: Bar) -> None:
+    from typing import assert_type
+    assert_type(foo.x, Literal[Foo.x])
+    assert_type(bar.y, Literal[Bar.y])
+    assert_type(foo.x.value, Literal["x"])
+    assert_type(bar.y.value, Literal["y"])
+    take_literal(foo.x.value)
+    take_literal(bar.y.value)
     "#,
 );
 

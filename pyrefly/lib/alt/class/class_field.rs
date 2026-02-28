@@ -1710,6 +1710,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.determine_read_only_reason(name, annotation.as_ref(), &metadata, field_definition);
 
         // Determine the final type, promoting literals when appropriate.
+        let raw_value_ty = value_ty.clone();
         let mut has_implicit_literal = value_ty.is_implicit_literal();
         if !has_implicit_literal && matches!(initialization, ClassFieldInitialization::Method) {
             value_ty.universe(&mut |current_type_node| {
@@ -1793,6 +1794,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             name,
             direct_annotation.as_ref(),
             &ty,
+            &raw_value_ty,
             field_definition,
             descriptor.is_some(),
             range,
@@ -2012,6 +2014,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         name: &Name,
         direct_annotation: Option<&Annotation>,
         ty: &Type,
+        raw_value_ty: &Type,
         field_definition: &ClassFieldDefinition,
         is_descriptor: bool,
         range: TextRange,
@@ -2033,6 +2036,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             name,
             direct_annotation,
             ty,
+            raw_value_ty,
             alias_of,
             is_initialized_on_class_body,
             is_descriptor,

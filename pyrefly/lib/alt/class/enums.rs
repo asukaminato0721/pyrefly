@@ -142,42 +142,57 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             ) || self.field_is_inherited_from(
                 class.class_object(),
                 name,
+                (ModuleName::enum_().as_str(), "StrEnum"),
+            ) || self.field_is_inherited_from(
+                class.class_object(),
+                name,
+                (ModuleName::enum_().as_str(), "IntEnum"),
+            ) || self.field_is_inherited_from(
+                class.class_object(),
+                name,
                 (ModuleName::django_models_enums().as_str(), "Choices"),
             )))
         {
             return None;
         }
         if name == &VALUE {
-            let ty = self
-                .mixed_in_enum_data_type(class.class_object())
-                .unwrap_or_else(|| {
-                    if let Some(lit_enum) = enum_literal {
-                        self.enum_literal_to_value_type(lit_enum.clone(), enum_metadata.is_django)
-                    } else {
-                        // The `_value_` annotation on `enum.Enum` is `Any`; we can infer a better type
-                        let enum_value_types: Vec<_> = self
-                            .get_enum_members(class.class_object())
-                            .into_iter()
-                            .filter_map(|lit| {
-                                if let Lit::Enum(lit_enum) = lit {
-                                    Some(self.enum_literal_to_value_type(
-                                        *lit_enum,
-                                        enum_metadata.is_django,
-                                    ))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        if enum_value_types.is_empty() {
-                            // Assume Any, rather than Never, if there are no members because they may
-                            // be created dynamically and we don't want downstream analysis to be incorrect.
-                            self.heap.mk_any_implicit()
+            let ty = if let Some(lit_enum) = enum_literal {
+                let promote_literals =
+                    !enum_metadata.is_django && !self.enum_values_are_str(&lit_enum.class);
+                self.enum_literal_to_value_type(
+                    lit_enum.clone(),
+                    enum_metadata.is_django,
+                    promote_literals,
+                )
+            } else if let Some(mixed_in) = self.mixed_in_enum_data_type(class.class_object()) {
+                mixed_in
+            } else if self.enum_values_are_str(&enum_metadata.cls) {
+                self.heap.mk_class_type(self.stdlib.str().clone())
+            } else {
+                // The `_value_` annotation on `enum.Enum` is `Any`; we can infer a better type
+                let enum_value_types: Vec<_> = self
+                    .get_enum_members(class.class_object())
+                    .into_iter()
+                    .filter_map(|lit| {
+                        if let Lit::Enum(lit_enum) = lit {
+                            Some(self.enum_literal_to_value_type(
+                                *lit_enum,
+                                enum_metadata.is_django,
+                                !enum_metadata.is_django,
+                            ))
                         } else {
-                            self.unions(enum_value_types)
+                            None
                         }
-                    }
-                });
+                    })
+                    .collect();
+                if enum_value_types.is_empty() {
+                    // Assume Any, rather than Never, if there are no members because they may
+                    // be created dynamically and we don't want downstream analysis to be incorrect.
+                    self.heap.mk_any_implicit()
+                } else {
+                    self.unions(enum_value_types)
+                }
+            };
             Some(ClassAttribute::read_write(ty))
         } else if let Some(lit_enum) = enum_literal {
             self.get_enum_literal_or_instance_attribute(lit_enum, metadata, &VALUE)
@@ -208,22 +223,130 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
-    fn enum_literal_to_value_type(&self, lit_enum: LitEnum, is_django: bool) -> Type {
-        let ty = match lit_enum.ty {
+    fn enum_literal_to_value_type(
+        &self,
+        lit_enum: LitEnum,
+        is_django: bool,
+        promote_literals: bool,
+    ) -> Type {
+        let is_str_enum = self.enum_values_are_str(&lit_enum.class);
+        let is_int_enum = self.enum_values_are_int(&lit_enum.class);
+        let mut ty = match lit_enum.ty {
             Type::Tuple(Tuple::Concrete(elements)) if is_django && elements.len() >= 2 => {
-                // The last element is the label.
-                let value_len = elements.len() - 1;
-                self.heap
-                    .mk_concrete_tuple(elements.into_iter().take(value_len).collect())
+                if is_str_enum || is_int_enum {
+                    // Django TextChoices/IntegerChoices: the value is the first element.
+                    elements
+                        .into_iter()
+                        .next()
+                        .expect("Tuple elements should be non-empty for Django enums")
+                } else {
+                    // The last element is the label.
+                    let value_len = elements.len() - 1;
+                    self.heap
+                        .mk_concrete_tuple(elements.into_iter().take(value_len).collect())
+                }
             }
             ty => ty,
         };
-        let int_ty = self.heap.mk_class_type(self.stdlib.int().clone());
-        ty.transform(&mut |t| {
+        let auto_ty = if is_str_enum {
+            Lit::Str(lit_enum.member.as_str().into()).to_implicit_type()
+        } else {
+            self.heap.mk_class_type(self.stdlib.int().clone())
+        };
+        ty.transform_mut(&mut |t| {
             if matches!(t, Type::ClassType(cls) if cls.has_qname(ModuleName::enum_().as_str(), "auto")) {
-                *t = int_ty.clone();
+                *t = auto_ty.clone();
             }
-        })
+        });
+        if promote_literals {
+            ty = ty.promote_implicit_literals(self.stdlib);
+        }
+        if is_django && is_int_enum {
+            ty = ty.promote_implicit_literals(self.stdlib);
+        }
+        ty
+    }
+
+    fn enum_values_are_str(&self, enum_class: &ClassType) -> bool {
+        if self.has_superclass(enum_class.class_object(), self.stdlib.str().class_object())
+            || enum_class.has_qname(ModuleName::enum_().as_str(), "StrEnum")
+            || self
+                .get_mro_for_class(enum_class.class_object())
+                .ancestors(self.stdlib)
+                .any(|ancestor| ancestor.has_qname(ModuleName::enum_().as_str(), "StrEnum"))
+        {
+            return true;
+        }
+        if self
+            .get_base_types_for_class(enum_class.class_object())
+            .iter()
+            .any(|base| {
+                base.is_builtin("str") || base.has_qname(ModuleName::enum_().as_str(), "StrEnum")
+            })
+        {
+            return true;
+        }
+        if let Some(field) = self.get_class_member(enum_class.class_object(), &VALUE) {
+            let ty = field.ty();
+            if !ty.is_any()
+                && self.is_subset_eq(&ty, &self.heap.mk_class_type(self.stdlib.str().clone()))
+            {
+                return true;
+            }
+        }
+        let enum_meta = self.get_metadata_for_class(enum_class.class_object());
+        if let Some(enum_) = enum_meta.enum_metadata()
+            && let Some(value_ty) = self.type_of_enum_value(enum_)
+        {
+            if !value_ty.is_any() {
+                return self.is_subset_eq(
+                    &value_ty,
+                    &self.heap.mk_class_type(self.stdlib.str().clone()),
+                );
+            }
+        }
+        false
+    }
+
+    fn enum_values_are_int(&self, enum_class: &ClassType) -> bool {
+        if self.has_superclass(enum_class.class_object(), self.stdlib.int().class_object())
+            || enum_class.has_qname(ModuleName::enum_().as_str(), "IntEnum")
+            || self
+                .get_mro_for_class(enum_class.class_object())
+                .ancestors(self.stdlib)
+                .any(|ancestor| ancestor.has_qname(ModuleName::enum_().as_str(), "IntEnum"))
+        {
+            return true;
+        }
+        if self
+            .get_base_types_for_class(enum_class.class_object())
+            .iter()
+            .any(|base| {
+                base.is_builtin("int") || base.has_qname(ModuleName::enum_().as_str(), "IntEnum")
+            })
+        {
+            return true;
+        }
+        if let Some(field) = self.get_class_member(enum_class.class_object(), &VALUE) {
+            let ty = field.ty();
+            if !ty.is_any()
+                && self.is_subset_eq(&ty, &self.heap.mk_class_type(self.stdlib.int().clone()))
+            {
+                return true;
+            }
+        }
+        let enum_meta = self.get_metadata_for_class(enum_class.class_object());
+        if let Some(enum_) = enum_meta.enum_metadata()
+            && let Some(value_ty) = self.type_of_enum_value(enum_)
+        {
+            if !value_ty.is_any() {
+                return self.is_subset_eq(
+                    &value_ty,
+                    &self.heap.mk_class_type(self.stdlib.int().clone()),
+                );
+            }
+        }
+        false
     }
 
     pub fn get_enum_member_count(&self, cls: &Class) -> Option<usize> {
@@ -239,9 +362,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     /// - Check whether the field is a member (which depends only on its type and name)
     /// - Validate that a member should not have an annotation, and should respect any explicit annotation on `_value_`
     ///
-    /// TODO(stroxler, yangdanny): We currently operate on promoted types, which means we do not infer `Literal[...]`
-    /// types for the `.value` / `._value_` attributes of literals. This is permitted in the spec although not optimal
-    /// for most cases; we are handling it this way in part because generic enum behavior is not yet well-specified.
+    /// TODO(stroxler, yangdanny): We still operate on promoted types for non-string enums, which means we do not
+    /// infer `Literal[...]` types for the `.value` / `._value_` attributes of those literals. This is permitted in
+    /// the spec although not optimal for most cases; we are handling it this way in part because generic enum
+    /// behavior is not yet well-specified.
     ///
     /// We currently skip the check for `_value_` if the class defines `__new__`, since that can
     /// change the value of the enum member. https://docs.python.org/3/howto/enum.html#when-to-use-new-vs-init
@@ -251,6 +375,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         name: &Name,
         direct_annotation: Option<&Annotation>,
         ty: &Type,
+        raw_value_ty: &Type,
         alias_of: Option<&Name>,
         is_initialized_on_class_body: bool,
         is_descriptor: bool,
@@ -284,11 +409,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             {
                 return Some(aliased_member_lit.to_implicit_type());
             }
+            let enum_value_ty = raw_value_ty.clone();
             Some(
                 Lit::Enum(Box::new(LitEnum {
                     class: enum_.cls.clone(),
                     member: name.clone(),
-                    ty: ty.clone(),
+                    ty: enum_value_ty,
                 }))
                 .to_implicit_type(),
             )
