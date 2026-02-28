@@ -83,6 +83,19 @@ def f(x: str | None):
 );
 
 testcase!(
+    test_is_not_none_type,
+    r#"
+from typing import assert_type
+from types import NoneType
+def f(x: str | NoneType):
+    if x is not None:
+        assert_type(x, str)
+    else:
+        assert_type(x, None)
+    "#,
+);
+
+testcase!(
     test_if_else,
     r#"
 from typing import assert_type
@@ -645,6 +658,24 @@ def verify_type(input: int):
 def foo(x: int | None) -> None:
     assert type(x) is int
     verify_type(x)
+    "#,
+);
+
+testcase!(
+    test_type_not_eq_final,
+    r#"
+from typing import assert_type
+def f(x: str | int | bool):
+    # bool is final, so we can narrow it away
+    if type(x) != bool:
+        assert_type(x, str | int)
+    else:
+        assert_type(x, bool)
+    # str is not final, so we can't narrow it away (subclasses of str are possible)
+    if type(x) != str:
+        assert_type(x, str | int | bool)
+    else:
+        assert_type(x, str)
     "#,
 );
 

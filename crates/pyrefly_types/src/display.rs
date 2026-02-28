@@ -360,11 +360,22 @@ impl<'a> TypeDisplayContext<'a> {
             }
             // Display Dim[Unknown] as just "Dim" for cleaner output
             Type::ClassType(class_type)
-                if class_type.qname().id().as_str() == "Dim"
+                if class_type.has_qname("torch_shapes", "Dim")
                     && class_type.targs().as_slice().len() == 1
                     && matches!(
                         class_type.targs().as_slice()[0],
                         Type::Any(AnyStyle::Implicit | AnyStyle::Error)
+                    ) =>
+            {
+                output.write_qname(class_type.qname())
+            }
+            // Display Tensor[*tuple[Unknown, ...]] as just "Tensor"
+            Type::ClassType(class_type)
+                if class_type.has_qname("torch", "Tensor")
+                    && class_type.targs().as_slice().len() == 1
+                    && matches!(
+                        &class_type.targs().as_slice()[0],
+                        Type::Tuple(Tuple::Unbounded(box Type::Any(_)))
                     ) =>
             {
                 output.write_qname(class_type.qname())
@@ -405,6 +416,7 @@ impl<'a> TypeDisplayContext<'a> {
                     output.write_str("]")
                 }
             },
+            Type::Tensor(tensor) => output.write_str(&format!("{}", tensor)),
             Type::Size(dim) => {
                 // Display dimension value directly without Literal wrapper
                 output.write_str(&format!("{}", dim))
@@ -840,19 +852,31 @@ impl<'a> TypeDisplayContext<'a> {
                 output.write_str("]")
             }
             Type::TypeGuard(ty) => {
-                self.maybe_fmt_with_module("typing", "TypeGuard", output)?;
+                if self.always_display_module_name {
+                    output.write_str("typing.")?;
+                }
+                let qname = self.get_special_form_qname("TypeGuard");
+                output.write_builtin("TypeGuard", qname)?;
                 output.write_str("[")?;
                 self.fmt_helper_generic(ty, false, output)?;
                 output.write_str("]")
             }
             Type::TypeIs(ty) => {
-                self.maybe_fmt_with_module("typing", "TypeIs", output)?;
+                if self.always_display_module_name {
+                    output.write_str("typing.")?;
+                }
+                let qname = self.get_special_form_qname("TypeIs");
+                output.write_builtin("TypeIs", qname)?;
                 output.write_str("[")?;
                 self.fmt_helper_generic(ty, false, output)?;
                 output.write_str("]")
             }
             Type::Unpack(box ty @ Type::TypedDict(_)) => {
-                self.maybe_fmt_with_module("typing", "Unpack", output)?;
+                if self.always_display_module_name {
+                    output.write_str("typing.")?;
+                }
+                let qname = self.get_special_form_qname("Unpack");
+                output.write_builtin("Unpack", qname)?;
                 output.write_str("[")?;
                 self.fmt_helper_generic(ty, false, output)?;
                 output.write_str("]")
@@ -1189,6 +1213,7 @@ pub mod tests {
                     class.dupe().module().dupe(),
                     class.dupe(),
                     Name::new(method_name),
+                    None,
                 ),
             }),
         }))
@@ -1231,6 +1256,7 @@ pub mod tests {
                         class.dupe().module().dupe(),
                         class.dupe(),
                         Name::new(method_name),
+                        None,
                     ),
                 },
             }),
@@ -1821,6 +1847,7 @@ pub mod tests {
                 class.dupe().module().dupe(),
                 class.dupe(),
                 Name::new_static("overloaded_func"),
+                None,
             ),
         };
 
@@ -1844,6 +1871,7 @@ pub mod tests {
                 class.dupe().module().dupe(),
                 class.dupe(),
                 Name::new_static("overloaded_func"),
+                None,
             ),
         };
 

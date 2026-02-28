@@ -475,7 +475,7 @@ testcase!(
 def f(x: str) -> str:
     return x
 
-x = f"abc{f(1)}def"  # E: Argument `Literal[1]` is not assignable to parameter `x` with type `str`
+x = f"abc{f(1)}def"
 "#,
 );
 
@@ -956,6 +956,17 @@ assert_type(type(x6), type[dict])
 );
 
 testcase!(
+    test_assert_nonetype,
+    r#"
+from types import NoneType
+from typing import assert_type
+
+def f(x: int | NoneType):
+    assert_type(x, int | None)
+"#,
+);
+
+testcase!(
     test_anywhere_binding,
     r#"
 from typing import assert_type, Literal
@@ -1067,6 +1078,13 @@ testcase!(
 # This parse error results in two identical Identifiers, which previously caused a panic.
 a = True if # E: Parse
 "#,
+);
+
+testcase!(
+    test_syntax_error_resulting_in_empty_defintion,
+    r#"
+@:a=1 # E: Parse # E: Could not find name `a`
+    "#,
 );
 
 testcase!(

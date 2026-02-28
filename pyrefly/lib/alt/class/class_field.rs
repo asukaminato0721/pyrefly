@@ -16,6 +16,7 @@ use pyrefly_derive::VisitMut;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::FuncFlags;
 use pyrefly_types::callable::FuncId;
 use pyrefly_types::callable::FunctionKind;
@@ -26,6 +27,7 @@ use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::read_only::IsFinalVariableInitialized;
 use pyrefly_types::simplify::unions;
+use pyrefly_types::tensor::TensorType;
 use pyrefly_types::type_var::PreInferenceVariance;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::TypedDictInner;
@@ -37,6 +39,7 @@ use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
+use ruff_python_ast::ExprTuple;
 use ruff_python_ast::helpers::is_dunder;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -409,7 +412,17 @@ impl ClassField {
     }
 
     pub fn new_synthesized(ty: Type) -> Self {
-        // Detect if this is a property and construct the appropriate variant
+        Self::new_synthesized_inner(ty, false)
+    }
+
+    /// Like `new_synthesized`, but marks the field as a ClassVar.
+    pub fn new_synthesized_classvar(ty: Type) -> Self {
+        Self::new_synthesized_inner(ty, true)
+    }
+
+    fn new_synthesized_inner(ty: Type, is_classvar: bool) -> Self {
+        // Detect if this is a property and construct the appropriate variant.
+        // Properties and methods are never ClassVars.
         if ty.is_property_getter() || ty.is_property_setter_with_getter().is_some() {
             ClassField(
                 ClassFieldInner::Property {
@@ -435,7 +448,7 @@ impl ClassField {
                     annotation: None,
                     initialization: ClassFieldInitialization::ClassBody(None),
                     read_only_reason: None,
-                    is_classvar: false,
+                    is_classvar,
                     is_staticmethod: false,
                     is_foreign_key: false,
                     has_choices: false,
@@ -889,6 +902,22 @@ impl ClassField {
         }
     }
 
+    /// Returns true if this field is a non-ClassVar, non-staticmethod data attribute.
+    /// This includes both annotation-only declarations (`x: int`) and assignments (`x: int = 1`).
+    /// Such fields should not count as proper class-level attributes when checking a class object
+    /// against a protocol, because they are instance variables (or defaults for instance creation),
+    /// not attributes on the class object itself.
+    pub fn is_non_classvar_data_attribute(&self) -> bool {
+        matches!(
+            &self.0,
+            ClassFieldInner::ClassAttribute {
+                is_classvar: false,
+                is_staticmethod: false,
+                ..
+            }
+        )
+    }
+
     pub fn is_uninit_class_var(&self) -> bool {
         match &self.0 {
             ClassFieldInner::Property { .. } => false,
@@ -1085,6 +1114,8 @@ enum InstanceKind {
     Protocol(Type),
     Metaclass(ClassBase),
     LiteralString,
+    /// Tensor instance: Self is substituted with the full tensor type (including shape).
+    Tensor(TensorType),
 }
 
 /// Wrapper to hold a specialized instance of a class , unifying ClassType and TypedDict.
@@ -1152,6 +1183,14 @@ impl<'a> Instance<'a> {
         }
     }
 
+    fn of_tensor(tensor: &'a TensorType) -> Self {
+        Self {
+            kind: InstanceKind::Tensor(tensor.clone()),
+            class: tensor.base_class.class_object(),
+            targs: tensor.base_class.targs(),
+        }
+    }
+
     /// Instantiate a type that is relative to the class type parameters
     /// by substituting in the type arguments.
     fn instantiate_member(&self, raw_member: &mut Type) {
@@ -1173,6 +1212,7 @@ impl<'a> Instance<'a> {
             InstanceKind::Protocol(self_type) => self_type.clone(),
             InstanceKind::Metaclass(cls) => cls.clone().to_type(heap),
             InstanceKind::LiteralString => heap.mk_literal_string(LitStyle::Implicit),
+            InstanceKind::Tensor(tensor) => tensor.clone().to_type(),
         }
     }
 
@@ -1205,7 +1245,8 @@ impl<'a> Instance<'a> {
             | InstanceKind::Protocol(..)
             | InstanceKind::Metaclass(..)
             | InstanceKind::TypeVar(..)
-            | InstanceKind::LiteralString => Some(DescriptorBase::Instance(ClassType::new(
+            | InstanceKind::LiteralString
+            | InstanceKind::Tensor(..) => Some(DescriptorBase::Instance(ClassType::new(
                 self.class.dupe(),
                 self.targs.clone(),
             ))),
@@ -1497,7 +1538,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 ..
             } => {
                 let direct_annotation = annot.map(|a| self.get_idx(a).annotation.clone());
-                let initialization = if let ExprOrBinding::Expr(e) = value
+                let initialization = if let ExprOrBinding::Expr(e) = value.as_ref()
                     && let Some(dm) = metadata.dataclass_metadata()
                     && let Expr::Call(call) = e
                 {
@@ -1737,10 +1778,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             && matches!(&ty, Type::ClassType(cls) if self.is_foreign_key_field(cls.class_object()));
 
         // Check if this is a Django field with choices
-        let has_choices = if let ClassFieldDefinition::AssignedInBody {
-            value: ExprOrBinding::Expr(expr),
-            ..
-        } = field_definition
+        let has_choices = if let ClassFieldDefinition::AssignedInBody { value, .. } =
+            field_definition
+            && let ExprOrBinding::Expr(expr) = value.as_ref()
             && let Some(call_expr) = expr.as_call_expr()
         {
             metadata.is_django_model() && self.has_django_field_choices(call_expr)
@@ -1946,6 +1986,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(errors, x.range(), ErrorInfo::Kind(ErrorKind::UnannotatedAttribute), "This expression is implicitly inferred to be `Any | None`. Please provide an explicit type annotation.".to_owned());
                 self.union(self.heap.mk_none(), self.heap.mk_any_implicit())
             }
+            // We interpret `self.foo = ()` to mean the type of foo is an arbitrary-length tuple,
+            // since an empty tuple base attr almost always means to hold a tuple of something in
+            // derived classes. We exclude `__match_args__` because its value is semantically
+            // significant: `__match_args__ = ()` means "no positional match arguments" and
+            // should have type `tuple[()]`, not `tuple[Any, ...]`.
+            (None, Expr::Tuple(ExprTuple { elts, .. }))
+                if elts.is_empty() && *name != dunder::MATCH_ARGS =>
+            {
+                self.error(errors, x.range(), ErrorInfo::Kind(ErrorKind::UnannotatedAttribute), "This expression is implicitly inferred to be `tuple[Any, ...]`. Please provide an explicit type annotation.".to_owned());
+                self.heap.mk_unbounded_tuple(self.heap.mk_any_implicit())
+            }
             (None, _) => self.expr_infer(x, errors),
         };
         self.expand_vars_mut(&mut ty);
@@ -1991,10 +2042,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
         .or_else(|| {
             let initial_value_expr = match field_definition {
-                ClassFieldDefinition::AssignedInBody {
-                    value: ExprOrBinding::Expr(expr),
-                    ..
-                } => Some(expr),
+                ClassFieldDefinition::AssignedInBody { value, .. } => {
+                    if let ExprOrBinding::Expr(expr) = value.as_ref() {
+                        Some(expr)
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             };
             self.get_django_field_type(ty, class, Some(name), initial_value_expr)
@@ -2527,6 +2581,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         module: module.clone(),
                         cls: None,
                         name: field_name.clone(),
+                        def_index: None,
                     };
                     ty = self.heap.mk_function(Function {
                         signature: callable,
@@ -3015,12 +3070,31 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             {
                 continue;
             }
-            // Substitute `Self` with derived class to support contravariant occurrences of `Self`
-            let want_attribute = self.as_instance_attribute(
-                field_name,
-                &want_class_field,
-                &Instance::of_protocol(parent, self.instantiate(cls)),
-            );
+            let want_attribute = {
+                let mut attr = self.as_instance_attribute(
+                    field_name,
+                    &want_class_field,
+                    // Substitute `Self` with derived class to support contravariant occurrences of `Self`
+                    &Instance::of_protocol(parent, self.instantiate(cls)),
+                );
+                if !want_class_field.has_explicit_annotation() {
+                    match &mut attr {
+                        ClassAttribute::ReadOnly(ty, _) | ClassAttribute::ReadWrite(ty)
+                            if ty.has_toplevel_func_metadata() =>
+                        {
+                            // If parent return type was Never (for example a method that only raises),
+                            // skip override consistency checks on the return type so we don't produce noisy bad-override diagnostics.
+                            ty.transform_toplevel_callable(&mut |callable: &mut Callable| {
+                                if callable.ret.is_never() {
+                                    callable.ret = Type::any_implicit();
+                                }
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                attr
+            };
             if got_attribute.is_none() {
                 // Optimisation: Only compute the `got_attr` once, and only if we actually need it.
                 got_attribute = Some(self.as_instance_attribute(
@@ -3038,21 +3112,43 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Err(
                     box (AttrSubsetError::Covariant {
                         subset_error: SubsetError::PosParamName(child, parent),
+                        ref got,
+                        ref want,
                         ..
                     }
                     | AttrSubsetError::Invariant {
                         subset_error: SubsetError::PosParamName(child, parent),
+                        ref got,
+                        ref want,
                         ..
                     }
                     | AttrSubsetError::Contravariant {
                         subset_error: SubsetError::PosParamName(child, parent),
+                        ref got,
+                        ref want,
                         ..
                     }),
-                ) => Some(OverrideError {
-                    kind: ErrorKind::BadParamNameOverride,
-                    message: format!("Got parameter name `{child}`, expected `{parent}`"),
-                    diff_lines: Vec::new(),
-                }),
+                ) if {
+                    // Only use PosParamName when both signatures have the same
+                    // number of parameters. When the counts differ, the name
+                    // mismatch is an artifact of comparing misaligned parameter
+                    // lists (e.g., a lambda whose `self` wasn't stripped by
+                    // method binding). In that case, fall through to BadOverride
+                    // so we get the signature diff.
+                    let got_sigs = got.callable_signatures();
+                    let want_sigs = want.callable_signatures();
+                    got_sigs.len() == 1
+                        && want_sigs.len() == 1
+                        && got_sigs[0].arg_counts().positional.max
+                            == want_sigs[0].arg_counts().positional.max
+                } =>
+                {
+                    Some(OverrideError {
+                        kind: ErrorKind::BadParamNameOverride,
+                        message: format!("Got parameter name `{child}`, expected `{parent}`"),
+                        diff_lines: Vec::new(),
+                    })
+                }
                 Err(error) => {
                     let mut diff_lines = Vec::new();
                     if let AttrSubsetError::Covariant { got, want, .. }
@@ -3066,6 +3162,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             ctx.set_lsp_display_mode(LspDisplayMode::SignatureHelp);
                             let got_sig = ctx.display(got).to_string();
                             let want_sig = ctx.display(want).to_string();
+
+                            // Normalize function names so both lines show the
+                            // attribute name, not the original function name
+                            // (e.g., when `method = helper`).
+                            let normalize_name = |sig: &str| -> String {
+                                if let Some(rest) = sig.strip_prefix("def ")
+                                    && let Some(paren) = rest.find('(')
+                                {
+                                    return format!("def {field_name}{}", &rest[paren..]);
+                                }
+                                sig.to_owned()
+                            };
+                            let got_sig = normalize_name(&got_sig);
+                            let want_sig = normalize_name(&want_sig);
 
                             if let Some(lines) = render_signature_diff(&want_sig, &got_sig) {
                                 diff_lines = lines;
@@ -3450,11 +3560,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
-    pub(in crate::alt::class) fn get_class_member(
-        &self,
-        cls: &Class,
-        name: &Name,
-    ) -> Option<Arc<ClassField>> {
+    pub(crate) fn get_class_member(&self, cls: &Class, name: &Name) -> Option<Arc<ClassField>> {
         self.get_class_member_with_defining_class(cls, name)
             .map(|member| member.value)
     }
@@ -3467,6 +3573,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn get_self_attribute(&self, cls: &ClassType, name: &Name) -> Option<ClassAttribute> {
         self.get_class_member(cls.class_object(), name)
             .map(|field| self.as_instance_attribute(name, &field, &Instance::of_self_type(cls)))
+    }
+
+    /// Look up an attribute on a tensor instance, substituting Self with the full tensor type.
+    pub fn get_tensor_attribute(&self, tensor: &TensorType, name: &Name) -> Option<ClassAttribute> {
+        self.get_class_member(tensor.base_class.class_object(), name)
+            .map(|field| self.as_instance_attribute(name, &field, &Instance::of_tensor(tensor)))
     }
 
     pub fn get_protocol_attribute(
@@ -4044,8 +4156,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
     ) -> Result<(), Box<AttrSubsetError>> {
         match (got, want) {
-            (_, ClassAttribute::NoAccess(_)) => Ok(()),
-            (ClassAttribute::NoAccess(_), _) => Err(Box::new(AttrSubsetError::NoAccess)),
+            (_, ClassAttribute::NoAccess(_)) => return Ok(()),
+            (ClassAttribute::NoAccess(_), _) => return Err(Box::new(AttrSubsetError::NoAccess)),
+            _ => {}
+        }
+        let got_is_classvar = matches!(got, ClassAttribute::ReadOnly(_, ReadOnlyReason::ClassVar));
+        let want_is_classvar =
+            matches!(want, ClassAttribute::ReadOnly(_, ReadOnlyReason::ClassVar));
+        if got_is_classvar != want_is_classvar {
+            return Err(Box::new(AttrSubsetError::ClassVarMismatch {
+                got_is_classvar,
+            }));
+        }
+        match (got, want) {
+            (_, ClassAttribute::NoAccess(_)) | (ClassAttribute::NoAccess(_), _) => {
+                unreachable!("handled above")
+            }
             (
                 ClassAttribute::Property(_, _, _),
                 ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite(..),
