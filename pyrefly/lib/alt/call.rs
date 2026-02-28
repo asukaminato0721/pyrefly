@@ -1334,7 +1334,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .callable_first_param(self.heap)
                     .unwrap_or_else(|| class_type.clone());
                 let mut t = t;
-                t.visit_toplevel_callable_mut(&mut |c: &mut Callable| c.ret = ret_type.clone());
+                t.transform_toplevel_callable(&mut |c: &mut Callable| c.ret = ret_type.clone());
                 t
             };
             (t, true)

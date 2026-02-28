@@ -3084,7 +3084,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         {
                             // If parent return type was Never (for example a method that only raises),
                             // skip override consistency checks on the return type so we don't produce noisy bad-override diagnostics.
-                            ty.visit_toplevel_callable_mut(&mut |callable: &mut Callable| {
+                            ty.transform_toplevel_callable(&mut |callable: &mut Callable| {
                                 if callable.ret.is_never() {
                                     callable.ret = Type::any_implicit();
                                 }

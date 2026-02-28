@@ -1802,7 +1802,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn bind_dunder_init_for_callable(&self, m: &BoundMethod) -> Option<Type> {
         let mut func_type = m.func.clone().as_type();
         // For each callable, set its return type to its first param's type (i.e. `self`).
-        func_type.visit_toplevel_callable_mut(&mut |c: &mut Callable| {
+        func_type.transform_toplevel_callable(&mut |c: &mut Callable| {
             if let Some(self_type) = c.get_first_param() {
                 c.ret = self_type;
             }

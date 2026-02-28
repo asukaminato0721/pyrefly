@@ -585,7 +585,7 @@ pub fn get_hover(
     let type_display = transaction.ad_hoc_solve(handle, "hover_display", {
         let mut cloned = type_.clone();
         move |solver| {
-            cloned.visit_toplevel_callable_mut(|c| expand_callable_kwargs_for_hover(&solver, c));
+            cloned.transform_toplevel_callable(|c| expand_callable_kwargs_for_hover(&solver, c));
             cloned.as_lsp_string_with_fallback_name(
                 name_for_display.as_deref(),
                 LspDisplayMode::Hover,
