@@ -2109,3 +2109,19 @@ takes_Type_any(Callable) # E: is not assignable to parameter `x` with type `type
 takes_Type_any(Callable[..., int]) # E: is not assignable to parameter `x` with type `type[Any]` in function
 "#,
 );
+
+testcase!(
+    test_string_type_argument_in_expression,
+    r#"
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    class A:
+        pass
+
+class C[T]:
+    pass
+
+x = C["A"]()
+    "#,
+);

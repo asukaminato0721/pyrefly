@@ -40,6 +40,7 @@ use ruff_python_ast::TypeParams;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
 use starlark_map::Hashed;
 use starlark_map::ordered_set::OrderedSet;
 use starlark_map::small_map::Entry;
@@ -5327,6 +5328,33 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         let result = match x {
+            Expr::StringLiteral(literal)
+                if matches!(
+                    type_form_context,
+                    TypeFormContext::TypeArgument
+                        | TypeFormContext::TypeArgumentForType
+                        | TypeFormContext::TypeArgumentCallableReturn
+                        | TypeFormContext::TupleOrCallableParam
+                        | TypeFormContext::TypeVarConstraint
+                        | TypeFormContext::TypeVarDefault
+                        | TypeFormContext::ParamSpecDefault
+                        | TypeFormContext::TypeVarTupleDefault
+                        | TypeFormContext::FunctionArgument
+                        | TypeFormContext::GenericBase
+                        | TypeFormContext::TypeAlias
+                ) =>
+            {
+                if let Some(literal) = literal.as_single_part_string()
+                    && let Ok(expr) = Ast::parse_type_literal(literal)
+                    && let Some(value_ty) =
+                        self.forward_ref_expr_value_type(&expr, x.range(), errors)
+                {
+                    self.untype(value_ty, x.range(), errors)
+                } else {
+                    let inferred_ty = self.expr_infer(x, errors);
+                    self.untype(inferred_ty, x.range(), errors)
+                }
+            }
             Expr::List(x)
                 if matches!(
                     type_form_context,
@@ -5393,5 +5421,113 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         };
         self.validate_type_form(result, x.range(), type_form_context, errors)
+    }
+
+    fn forward_ref_expr_value_type(
+        &self,
+        expr: &Expr,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        match expr {
+            Expr::Name(name) => self.forward_ref_name_value_type(&name.id, range, errors),
+            Expr::Attribute(attr) => {
+                let base = self.forward_ref_expr_value_type(&attr.value, range, errors)?;
+                Some(self.attr_infer_for_type(&base, &attr.attr.id, attr.range, errors, None))
+            }
+            _ => None,
+        }
+    }
+
+    fn forward_ref_name_value_type(
+        &self,
+        name: &Name,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        match self.forward_ref_name_binding_idx(name, range) {
+            Some(idx) => Some(self.get_idx(idx).ty().clone()),
+            None => {
+                self.error(
+                    errors,
+                    range,
+                    ErrorInfo::Kind(ErrorKind::UnknownName),
+                    format!("Could not find name `{name}`"),
+                );
+                None
+            }
+        }
+    }
+
+    fn forward_ref_name_binding_idx(&self, name: &Name, range: TextRange) -> Option<Idx<Key>> {
+        let mut best: Option<(TextSize, Idx<Key>)> = None;
+        let handle_idx = |best: &mut Option<(TextSize, Idx<Key>)>, idx: Idx<Key>| {
+            let key = self.bindings().idx_to_key(idx);
+            match key {
+                Key::Definition(short) => {
+                    let key_range = short.range();
+                    let key_name = self.module().code_at(key_range);
+                    if key_name == name.as_str() {
+                        let start = key_range.start();
+                        match best {
+                            Some((best_start, _)) if *best_start >= start => {}
+                            _ => *best = Some((start, idx)),
+                        }
+                    }
+                }
+                Key::MutableCapture(short) => {
+                    let key_range = short.range();
+                    let key_name = self.module().code_at(key_range);
+                    if key_name == name.as_str() {
+                        let start = key_range.start();
+                        match best {
+                            Some((best_start, _)) if *best_start >= start => {}
+                            _ => *best = Some((start, idx)),
+                        }
+                    }
+                }
+                Key::Import(import) => {
+                    if import.0 == *name {
+                        let start = import.1.start();
+                        match best {
+                            Some((best_start, _)) if *best_start >= start => {}
+                            _ => *best = Some((start, idx)),
+                        }
+                    }
+                }
+                Key::Anywhere(import) => {
+                    if import.0 == *name {
+                        let start = import.1.start();
+                        match best {
+                            Some((best_start, _)) if *best_start >= start => {}
+                            _ => *best = Some((start, idx)),
+                        }
+                    }
+                }
+                Key::ImplicitGlobal(import) => {
+                    if *import.as_ref() == *name {
+                        let start = TextRange::default().start();
+                        match best {
+                            Some((best_start, _)) if *best_start >= start => {}
+                            _ => *best = Some((start, idx)),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        let available = self.bindings().available_definitions(range.start());
+        if !available.is_empty() {
+            for idx in available {
+                handle_idx(&mut best, idx);
+            }
+        }
+        if best.is_none() {
+            for idx in self.bindings().keys::<Key>() {
+                handle_idx(&mut best, idx);
+            }
+        }
+        best.map(|(_, idx)| idx)
     }
 }
