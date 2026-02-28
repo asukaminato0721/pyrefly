@@ -879,8 +879,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
-    /// Returns (params, paramspec, resolved_param_types) where resolved_param_types
-    /// contains the resolved types for unannotated parameters.
+    /// Returns a struct with information about parameters and the param spec,
+    /// including resolved types for unannotated parameters where we can infer
+    /// them from context.
     fn get_params_and_paramspec(
         &self,
         def: &FunctionDefData,
