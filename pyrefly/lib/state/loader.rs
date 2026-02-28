@@ -165,7 +165,7 @@ impl<T> FindingOrError<T> {
         }
     }
 
-    pub fn map<T2>(self, f: impl Fn(T) -> T2) -> FindingOrError<T2> {
+    pub fn map<T2>(self, f: impl FnOnce(T) -> T2) -> FindingOrError<T2> {
         match self {
             Self::Finding(Finding { finding, error }) => FindingOrError::Finding(Finding {
                 finding: f(finding),
@@ -243,8 +243,8 @@ impl LoaderFindCache {
     ) -> FindingOrError<ModulePath> {
         self.cache
             .ensure(&(module.dupe(), origin.cloned()), || {
-                let mut phantom_paths = Vec::new();
-                let result = find_import(&self.config, module, origin, Some(&mut phantom_paths));
+                let phantom_paths = Vec::new();
+                let result = find_import(&self.config, module, origin, None);
                 (result, Arc::new(phantom_paths))
             })
             .0
@@ -261,8 +261,8 @@ impl LoaderFindCache {
         let cached = self
             .cache
             .ensure(&(module.dupe(), origin.cloned()), || {
-                let mut phantom_paths = Vec::new();
-                let result = find_import(&self.config, module, origin, Some(&mut phantom_paths));
+                let phantom_paths = Vec::new();
+                let result = find_import(&self.config, module, origin, None);
                 (result, Arc::new(phantom_paths))
             })
             .0;

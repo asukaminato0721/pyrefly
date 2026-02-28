@@ -80,7 +80,7 @@
         "key": {
           "callee": {
             "id": 0,
-            "key": "os.path.exists"
+            "key": "genericpath.exists"
           },
           "caller": {
             "id": 0,
@@ -1552,7 +1552,7 @@
           ],
           "target": {
             "id": 0,
-            "key": "os.path.exists"
+            "key": "genericpath.exists"
           }
         }
       },
@@ -1565,8 +1565,8 @@
           },
           "spans": [
             {
-              "length": 7,
-              "start": 39
+              "length": 6,
+              "start": 40
             }
           ],
           "target": {
@@ -1785,13 +1785,13 @@
               },
               "target": {
                 "id": 0,
-                "key": "os.path.exists"
+                "key": "genericpath.exists"
               }
             },
             {
               "source": {
-                "length": 7,
-                "start": 39
+                "length": 6,
+                "start": 40
               },
               "target": {
                 "id": 0,
@@ -2171,6 +2171,22 @@
         "id": 0,
         "key": {
           "id": 0,
+          "key": "simple"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "simple"
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
           "key": "simple.hello_world"
         },
         "value": {
@@ -2188,6 +2204,22 @@
                   "key": "simple"
                 }
               }
+            }
+          }
+        }
+      },
+      {
+        "id": 0,
+        "key": {
+          "id": 0,
+          "key": "typing"
+        },
+        "value": {
+          "id": 0,
+          "key": {
+            "local_name": {
+              "id": 0,
+              "key": "typing"
             }
           }
         }

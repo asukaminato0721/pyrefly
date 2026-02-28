@@ -263,6 +263,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         .mk_class_type(self.stdlib.named_tuple_fallback().clone()),
                     x.range(),
                 )),
+                BaseClass::SynthesizedBase(class_idx, _) => {
+                    self.get_idx(*class_idx).as_ref().0.as_ref().map(|cls| {
+                        let ct = self.promote_nontypeddict_silently_to_classtype(cls);
+                        (self.heap.mk_class_type(ct), x.range())
+                    })
+                }
+                BaseClass::TypeOf(inner_expr, _) => {
+                    let (ty, _) = self.base_class_expr_infer(inner_expr, &fake_error_collector);
+                    match self.untype_opt(ty.clone(), inner_expr.range(), &fake_error_collector) {
+                        Some(Type::ClassType(c)) => {
+                            // X is a class. type(X) = metaclass of X.
+                            let class_obj = c.class_object();
+                            let metadata = self.get_metadata_for_class(class_obj);
+                            let metaclass_ct = metadata.metaclass(self.stdlib);
+                            Some((self.heap.mk_class_type(metaclass_ct.clone()), x.range()))
+                        }
+                        None => {
+                            // X is an instance. type(X) = its class.
+                            match &ty {
+                                Type::ClassType(_) => Some((ty, x.range())),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                }
                 BaseClass::InvalidExpr(..) | BaseClass::TypedDict(..) | BaseClass::Generic(..) => {
                     None
                 }
@@ -350,27 +376,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         "Second argument to NewType cannot be an unbound generic".to_owned(),
                     );
                 }
-                if let Some(base_tuple_ancestor) = base_class_bases.tuple_ancestor() {
-                    if let Some(existing_tuple_ancestor) = &tuple_ancestor {
-                        if existing_tuple_ancestor.is_any_tuple() {
-                            tuple_ancestor = Some(base_tuple_ancestor.clone());
-                        } else if !base_tuple_ancestor.is_any_tuple()
-                            && base_tuple_ancestor != existing_tuple_ancestor
-                        {
-                            self.error(
-                                errors,
-                                range,
-                                ErrorInfo::Kind(ErrorKind::InvalidInheritance),
-                                format!(
-                                    "Cannot extend multiple incompatible tuples: `{}` and `{}`",
-                                    self.for_display(Type::Tuple(existing_tuple_ancestor.clone())),
-                                    self.for_display(Type::Tuple(base_tuple_ancestor.clone())),
-                                ),
-                            );
-                        }
-                    } else {
-                        tuple_ancestor = Some(base_tuple_ancestor.clone());
-                    }
+                if let Some(base_tuple_ancestor) = base_class_bases.tuple_ancestor()
+                    && tuple_ancestor.as_ref().is_none_or(|t| t.is_any_tuple())
+                {
+                    tuple_ancestor = Some(base_tuple_ancestor.clone());
                 }
                 (base_class_type, range)
             })
