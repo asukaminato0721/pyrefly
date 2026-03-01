@@ -1194,6 +1194,21 @@ def f(x: Cat | Dog):
 );
 
 testcase!(
+    test_iscoroutinefunction_typeguard,
+    r#"
+from inspect import iscoroutinefunction
+from typing import Awaitable, Callable
+
+MaybeAwaitable = Callable[[], Awaitable[str]] | Callable[[], str]
+
+async def get_value(fn: MaybeAwaitable) -> str:
+    if iscoroutinefunction(fn):
+        return await fn()
+    return fn()
+    "#,
+);
+
+testcase!(
     test_typeis,
     r#"
 from typing import TypeIs, assert_type

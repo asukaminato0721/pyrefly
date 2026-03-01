@@ -238,6 +238,59 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    fn extract_typeguard_return(&self, ret: &Type) -> Option<Type> {
+        let mut guards = Vec::new();
+        for member in ret.clone().into_unions() {
+            match member {
+                Type::TypeGuard(t) => guards.push(*t),
+                _ => return None,
+            }
+        }
+        match guards.len() {
+            0 => None,
+            1 => guards.pop(),
+            _ => Some(self.unions(guards)),
+        }
+    }
+
+    fn extract_typeis_return(&self, ret: &Type) -> Option<Type> {
+        let mut guards = Vec::new();
+        for member in ret.clone().into_unions() {
+            match member {
+                Type::TypeIs(t) => guards.push(*t),
+                _ => return None,
+            }
+        }
+        match guards.len() {
+            0 => None,
+            1 => guards.pop(),
+            _ => Some(self.unions(guards)),
+        }
+    }
+
+    fn is_iscoroutinefunction(&self, ty: &Type) -> bool {
+        ty.visit_toplevel_func_metadata(&|meta| match &meta.kind {
+            FunctionKind::Def(func) => {
+                func.name.as_str() == "iscoroutinefunction"
+                    && (func.module.name().as_str() == "inspect"
+                        || func.module.name().as_str().starts_with("asyncio"))
+            }
+            _ => false,
+        })
+    }
+
+    fn narrow_not_iscoroutinefunction(&self, ty: &Type) -> Type {
+        self.distribute_over_union(ty, |member| {
+            if let Some(callable) = member.clone().to_callable()
+                && self.unwrap_awaitable(&callable.ret).is_some()
+            {
+                self.heap.mk_never()
+            } else {
+                member.clone()
+            }
+        })
+    }
+
     fn narrow_isinstance(&self, left: &Type, right: &Type) -> Type {
         let mut res = Vec::new();
         for right in self.as_class_info(right.clone()) {
@@ -1090,13 +1143,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         None,
                         None,
                     );
-                    if let Type::TypeGuard(t) = ret {
-                        return *t;
+                    if let Some(t) = self.extract_typeguard_return(&ret) {
+                        return t;
                     }
                 }
                 ty.clone()
             }
-            AtomicNarrowOp::NotTypeGuard(_, _) => ty.clone(),
+            AtomicNarrowOp::NotTypeGuard(t, _) => {
+                if self.is_iscoroutinefunction(t) {
+                    return self.narrow_not_iscoroutinefunction(ty);
+                }
+                ty.clone()
+            }
             AtomicNarrowOp::TypeIs(t, arguments) => {
                 if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
                     let args = arguments.args.map(CallArg::expr_maybe_starred);
@@ -1113,7 +1171,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         None,
                         None,
                     );
-                    if let Type::TypeIs(t) = ret {
+                    if let Some(t) = self.extract_typeis_return(&ret) {
                         return self.distribute_over_union(&t, |right| {
                             self.intersect_with_fallback(ty, right, &|| {
                                 // TODO: falling back to Never when the lhs is a union is a hack to get
@@ -1130,7 +1188,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 if ty.is_union() {
                                     self.heap.mk_never()
                                 } else {
-                                    (*t).clone()
+                                    t.clone()
                                 }
                             })
                         });
@@ -1154,7 +1212,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         None,
                         None,
                     );
-                    if let Type::TypeIs(t) = ret {
+                    if let Some(t) = self.extract_typeis_return(&ret) {
                         return self.subtract(ty, &t);
                     }
                 }
