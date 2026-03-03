@@ -452,6 +452,18 @@ def g(x):
 "#,
 );
 
+testcase!(
+    test_isinstance_tuple_from_sequence,
+    r#"
+from typing import Sequence
+
+def f(x: Sequence[int]) -> tuple[int, ...]:
+    if isinstance(x, tuple):
+        return x
+    return tuple(x)
+"#,
+);
+
 #[test]
 fn test_tuple_concat_large_union_no_crash() -> anyhow::Result<()> {
     let code = r#"

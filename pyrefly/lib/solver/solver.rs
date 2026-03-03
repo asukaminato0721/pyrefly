@@ -491,6 +491,15 @@ impl Solver {
         self.simplify_forced_type(result)
     }
 
+    pub fn var_is_type_var_tuple(&self, v: Var) -> bool {
+        let lock = self.variables.lock();
+        let variable = lock.get(v);
+        match &*variable {
+            Variable::Quantified(q) | Variable::PartialQuantified(q) => q.is_type_var_tuple(),
+            _ => false,
+        }
+    }
+
     /// Simplify dimension expressions in a forced type
     fn simplify_forced_type(&self, mut ty: Type) -> Type {
         // Use transform_mut to visit every Type node and simplify dimensions

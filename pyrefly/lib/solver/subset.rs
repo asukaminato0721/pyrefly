@@ -115,6 +115,27 @@ fn any<T>(
 }
 
 impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
+    fn type_var_tuple_iterable_middle(&self, middle: &Type, want: &Type) -> Option<Type> {
+        let Type::Var(var) = middle else {
+            return None;
+        };
+        if !self.solver.var_is_type_var_tuple(*var) {
+            return None;
+        }
+        let Type::ClassType(want_class) = want else {
+            return None;
+        };
+        let iterable_class = self
+            .type_order
+            .stdlib()
+            .iterable(self.solver.heap.mk_any_implicit());
+        let iterable = self
+            .type_order
+            .as_superclass(want_class, iterable_class.class_object())?;
+        let elem = iterable.targs().as_slice().first()?.clone();
+        Some(Type::unbounded_tuple(elem))
+    }
+
     /// Can a function with l_args be called as a function with u_args?
     fn is_subset_param_list(
         &mut self,
@@ -1726,7 +1747,11 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                         .tuple(unions(elts, &self.solver.heap)),
                 );
                 self.is_subset_eq(&tuple_type, want)?;
-                self.is_subset_eq(middle, want)?;
+                if let Some(tuple_middle) = self.type_var_tuple_iterable_middle(middle, want) {
+                    self.is_subset_eq(middle, &tuple_middle)?;
+                } else {
+                    self.is_subset_eq(middle, want)?;
+                }
                 Ok(())
             }
             (Type::Literal(lit), Type::LiteralString(_)) => {
