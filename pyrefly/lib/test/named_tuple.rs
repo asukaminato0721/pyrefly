@@ -81,6 +81,23 @@ Point3(1)  # E: Missing argument `y` in function `Point3.__new__`
 );
 
 testcase!(
+    test_collections_namedtuple_with_collections_abc_import,
+    r#"
+from typing import Any, assert_type
+import collections
+import collections.abc
+
+GetWorkResponse = collections.namedtuple(
+    "GetWorkResponse",
+    ("task_id",),
+)
+
+response = GetWorkResponse(task_id="abc123")
+assert_type(response.task_id, Any)
+    "#,
+);
+
+testcase!(
     test_named_tuple_functional_rename,
     r#"
 from collections import namedtuple

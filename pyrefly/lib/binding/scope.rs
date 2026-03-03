@@ -1783,9 +1783,19 @@ impl Scopes {
             // is a special export.
             let value = self.get_flow_info(base_name)?.value()?;
             match &value.style {
-                FlowStyle::MergeableImport(m) | FlowStyle::ImportAs(m) => {
-                    lookup.is_special_export(*m, name)
+                FlowStyle::MergeableImport(m) => {
+                    lookup.is_special_export(*m, name).or_else(|| {
+                        // `import foo.bar` binds the name `foo`. Special exports are keyed off
+                        // the root module, so fall back to `foo` if needed.
+                        if m.as_str().contains('.') {
+                            let root = ModuleName::from_name(&m.first_component());
+                            lookup.is_special_export(root, name)
+                        } else {
+                            None
+                        }
+                    })
                 }
+                FlowStyle::ImportAs(m) => lookup.is_special_export(*m, name),
                 FlowStyle::Import(m, upstream_name) => lookup.is_special_export(*m, upstream_name),
                 _ => None,
             }
