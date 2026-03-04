@@ -392,13 +392,36 @@ impl<'a> BindingsBuilder<'a> {
         should_infer_return_type: bool,
         stub_or_impl: FunctionStubOrImpl,
     ) {
-        let is_generator =
-            !(yields_and_returns.yields.is_empty() && yields_and_returns.yield_froms.is_empty());
+        let YieldsAndReturns {
+            returns,
+            yields,
+            yield_froms,
+        } = yields_and_returns;
+        let is_generator = !(yields.is_empty() && yield_froms.is_empty());
         let return_ann = return_ann_with_range.as_ref().map(|(_, key)| *key);
+        let is_bare_return =
+            |ret: &StmtReturn| matches!(ret.value.as_deref(), None | Some(Expr::NoneLiteral(_)));
+        // Suppress unreachable yield diagnostics for the common "marker" pattern:
+        // a function that immediately returns (without a value) but still contains a yield
+        // to indicate it is a generator.
+        let has_reachable_yield = yields.iter().any(|(_, _, is_unreachable)| !*is_unreachable)
+            || yield_froms
+                .iter()
+                .any(|(_, _, is_unreachable)| !*is_unreachable);
+        let has_reachable_return = returns
+            .iter()
+            .any(|(_, _, is_unreachable)| !*is_unreachable);
+        let all_reachable_returns_bare = returns
+            .iter()
+            .filter(|(_, _, is_unreachable)| !*is_unreachable)
+            .all(|(_, ret, _)| is_bare_return(ret));
+        let suppress_unreachable_yield = is_generator
+            && !has_reachable_yield
+            && has_reachable_return
+            && all_reachable_returns_bare;
 
         // Collect the keys of explicit returns.
-        let return_keys = yields_and_returns
-            .returns
+        let return_keys = returns
             .into_map(|(idx, x, is_unreachable)| {
                 self.insert_binding_idx(
                     idx,
@@ -415,12 +438,11 @@ impl<'a> BindingsBuilder<'a> {
             .into_boxed_slice();
 
         // Collect the keys of yield expressions.
-        let yield_keys = yields_and_returns
-            .yields
+        let yield_keys = yields
             .into_map(|(idx, x, is_unreachable)| {
                 self.insert_binding_idx(
                     idx,
-                    if is_unreachable {
+                    if is_unreachable && !suppress_unreachable_yield {
                         BindingYield::Unreachable(x)
                     } else {
                         BindingYield::Yield(return_ann, x)
@@ -428,12 +450,11 @@ impl<'a> BindingsBuilder<'a> {
                 )
             })
             .into_boxed_slice();
-        let yield_from_keys = yields_and_returns
-            .yield_froms
+        let yield_from_keys = yield_froms
             .into_map(|(idx, x, is_unreachable)| {
                 self.insert_binding_idx(
                     idx,
-                    if is_unreachable {
+                    if is_unreachable && !suppress_unreachable_yield {
                         BindingYieldFrom::Unreachable(x)
                     } else {
                         BindingYieldFrom::YieldFrom(return_ann, IsAsync::new(is_async), x)

@@ -373,6 +373,17 @@ def test():
 );
 
 testcase!(
+    test_unreachable_yield_after_bare_return_is_ok,
+    r#"
+from typing import Iterable
+
+def test() -> Iterable[str]:
+    return
+    yield ""  # No error: generator marker
+"#,
+);
+
+testcase!(
     test_unreachable_return_after_break,
     r#"
 def test():
