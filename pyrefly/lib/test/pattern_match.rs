@@ -631,3 +631,102 @@ def process(x: A | B | C):
             pass
 "#,
 );
+
+testcase!(
+    test_exhaustiveness_in_enum_method,
+    r#"
+from enum import Enum
+
+class E(Enum):
+    X = 1
+    Y = 2
+
+    def f_exhaustive(self) -> str:
+        match self:
+            case E.X:
+                return "X"
+            case E.Y:
+                return "Y"
+
+    def f_nonexhaustive(self) -> str:  # E: missing an explicit `return`
+        match self:  # E: Missing cases: E.Y
+            case E.X:
+                return "X"
+    "#,
+);
+
+testcase!(
+    test_match_mapping_after_none,
+    r#"
+from typing import Any, assert_type
+
+def test_dict_or_none(dict_or_none: dict[str, Any] | None):
+    match dict_or_none:
+        case None:
+            pass
+        case {"a": "b"}:
+            # After matching None, dict_or_none is narrowed to dict[str, Any]
+            assert_type(dict_or_none, dict[str, Any])
+        case _:
+            assert_type(dict_or_none, dict[str, Any])
+
+def test_sequence_after_none(seq_or_none: list[int] | None):
+    match seq_or_none:
+        case None:
+            pass
+        case [first, *rest]:
+            # After matching None, seq_or_none is narrowed to list[int]
+            assert_type(seq_or_none, list[int])
+        case _:
+            assert_type(seq_or_none, list[int])
+"#,
+);
+
+testcase!(
+    test_match_mapping_before_none,
+    r#"
+from typing import Any, assert_type
+
+def test_dict_first(dict_or_none: dict[str, Any] | None):
+    match dict_or_none:
+        case {"a": "b"}:
+            # IsMapping narrows dict_or_none to dict[str, Any]
+            assert_type(dict_or_none, dict[str, Any])
+        case None:
+            pass
+        case _:
+            pass
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1708
+testcase!(
+    test_match_exhaustive_literal_no_unbound,
+    r#"
+from typing import assert_never, Literal
+
+def func(x: Literal[1, 2]) -> None:
+    match x:
+        case 1:
+            y = 1
+        case 2:
+            y = 1
+        case _:
+            assert_never(x)
+
+    print(y)
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1369
+testcase!(
+    test_match_object_with_tuple_pattern,
+    r#"
+def handle(o: object) -> int:
+    match o:
+        case ("a", 1): return 1
+        case ("b", 1): return 2
+        case ("c", 1): return 3
+    return 1
+"#,
+);

@@ -11,17 +11,18 @@ use lsp_server::RequestId;
 use lsp_types::GotoDefinitionResponse;
 use lsp_types::Location;
 use lsp_types::Url;
+use pyrefly::commands::lsp::IndexingMode;
+use pyrefly::lsp::non_wasm::protocol::Message;
+use pyrefly::lsp::non_wasm::protocol::Request;
 use serde_json::json;
 use tempfile::TempDir;
 
-use crate::lsp::non_wasm::protocol::Message;
-use crate::lsp::non_wasm::protocol::Request;
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
-use crate::test::lsp::lsp_interaction::util::bundled_typeshed_path;
-use crate::test::lsp::lsp_interaction::util::expect_definition_points_to_symbol;
-use crate::test::lsp::lsp_interaction::util::get_test_files_root;
-use crate::test::lsp::lsp_interaction::util::line_at_location;
+use crate::object_model::InitializeSettings;
+use crate::object_model::LspInteraction;
+use crate::util::bundled_typeshed_path;
+use crate::util::expect_definition_points_to_symbol;
+use crate::util::get_test_files_root;
+use crate::util::line_at_location;
 
 fn test_go_to_def(
     root: PathBuf,
@@ -586,21 +587,129 @@ fn test_goto_def_deep_submodule_chain() {
             // `a.b.c.D` -> `a` (line 7, char 0)
             // Should navigate to a/__init__.py
             (7, 0, "a/__init__.py", 0, 0, 0, 0),
-            // BUG: The following assertions are commented out because go-to-definition
-            // on intermediate submodule components (b, c) currently returns empty results.
-            // See also: submodule_access test which works because it only tests one level deep.
-            //
             // `a.b.c.D` -> `b` (line 7, char 2)
             // Should navigate to a/b/__init__.py
-            // (7, 2, "a/b/__init__.py", 0, 0, 0, 0),
-            //
+            (7, 2, "a/b/__init__.py", 0, 0, 0, 0),
             // `a.b.c.D` -> `c` (line 7, char 4)
             // Should navigate to a/b/c.py
-            // (7, 4, "a/b/c.py", 0, 0, 0, 0),
-            //
+            (7, 4, "a/b/c.py", 0, 0, 0, 0),
             // `a.b.c.D` -> `D` (line 7, char 6)
             // Should navigate to class D definition in a/b/c.py
-            // (7, 6, "a/b/c.py", 7, 6, 7, 7),
+            (7, 6, "a/b/c.py", 6, 6, 6, 7),
         ],
     );
+}
+
+#[test]
+fn test_goto_def_deep_submodule_chain_reexport() {
+    // Test go-to-definition on submodule components in `a.b.c.D`
+    // This tests the same pattern as deep_submodule_chain but with explicit re-exports
+    // using `from . import x as x` pattern (similar to D91081404's implicit_submodule test).
+    // Unlike deep_submodule_chain (which has empty __init__.py files), this should work
+    // because the submodules are explicitly re-exported.
+    let root = get_test_files_root();
+    let root_path = root.path().join("deep_submodule_chain_reexport");
+    test_go_to_def(
+        root_path,
+        None,
+        "main.py",
+        vec![
+            // `a.b.c.D` -> `a` (line 7, char 0)
+            // Should navigate to a/__init__.py
+            (7, 0, "a/__init__.py", 0, 0, 0, 0),
+            // `a.b.c.D` -> `b` (line 7, char 2)
+            // Should navigate to a/b/__init__.py
+            (7, 2, "a/b/__init__.py", 0, 0, 0, 0),
+            // `a.b.c.D` -> `c` (line 7, char 4)
+            // Should navigate to a/b/c.py
+            (7, 4, "a/b/c.py", 0, 0, 0, 0),
+            // `a.b.c.D` -> `D` (line 7, char 6)
+            // Should navigate to class D definition in a/b/c.py
+            (7, 6, "a/b/c.py", 6, 6, 6, 7),
+        ],
+    );
+}
+
+#[test]
+fn test_goto_def_dunder_all_submodule() {
+    // Test go-to-definition on a submodule name in __all__.
+    // When __all__ = ["sub"] in pkg/__init__.py, clicking on "sub" should
+    // navigate to pkg/sub.py.
+    let root = get_test_files_root();
+    let root_path = root.path().join("dunder_all_submodule");
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("pkg/__init__.py");
+    // Click on "sub" in __all__ = ["sub"] (line 5, char 12 is inside "sub")
+    interaction
+        .client
+        .definition("pkg/__init__.py", 5, 12)
+        .expect_definition_response_from_root("pkg/sub.py", 0, 0, 0, 0)
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+/// Go-to-definition on the module name part of a relative import
+/// (e.g., clicking on `bar` in `from .bar import value`) does not resolve
+/// because `find_definition` does not resolve relative imports.
+#[test]
+fn definition_relative_import_with_nested_config() {
+    let root = get_test_files_root();
+    let root_path = root
+        .path()
+        .join("nested_config_relative_import/src")
+        .to_path_buf();
+    let scope_uri = Url::from_file_path(&root_path).unwrap();
+    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("main.py");
+    interaction.client.did_open("pkg/foo.py");
+    // Go-to-definition on `bar` module in `from .bar import value` (line 5, char 6)
+    // BUG: returns null because find_definition doesn't resolve relative imports.
+    interaction
+        .client
+        .definition("pkg/foo.py", 5, 6)
+        .expect_response(json!([]))
+        .unwrap();
+    interaction.shutdown().unwrap();
+}
+
+/// Same as above but with workspace root above src/.
+#[test]
+fn definition_relative_import_with_nested_config_workspace_at_root() {
+    let root = get_test_files_root();
+    let root_path = root
+        .path()
+        .join("nested_config_relative_import")
+        .to_path_buf();
+    let scope_uri = Url::from_file_path(&root_path).unwrap();
+    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    interaction.set_root(root_path);
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            ..Default::default()
+        })
+        .unwrap();
+    interaction.client.did_open("src/main.py");
+    interaction.client.did_open("src/pkg/foo.py");
+    // Go-to-definition on `bar` module in `from .bar import value` (line 5, char 6)
+    // BUG: returns empty because find_definition doesn't resolve relative imports.
+    interaction
+        .client
+        .definition("src/pkg/foo.py", 5, 6)
+        .expect_response(json!([]))
+        .unwrap();
+    interaction.shutdown().unwrap();
 }

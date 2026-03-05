@@ -17,15 +17,14 @@ use crossbeam_channel::Sender;
 use lsp_server::RequestId;
 use lsp_types::DidChangeConfigurationParams;
 use lsp_types::DidChangeTextDocumentParams;
-use lsp_types::DidChangeWatchedFilesParams;
 use lsp_types::DidChangeWorkspaceFoldersParams;
 use lsp_types::DidCloseTextDocumentParams;
 use lsp_types::DidOpenTextDocumentParams;
 use lsp_types::DidSaveTextDocumentParams;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryEvent;
 use pyrefly_util::telemetry::TelemetryEventKind;
-use pyrefly_util::telemetry::TelemetryTaskId;
 use tracing::debug;
 use tracing::info;
 
@@ -51,7 +50,7 @@ pub enum LspEvent {
     DidChangeTextDocument(DidChangeTextDocumentParams),
     DidCloseTextDocument(DidCloseTextDocumentParams),
     DidSaveTextDocument(DidSaveTextDocumentParams),
-    DidChangeWatchedFiles(DidChangeWatchedFilesParams),
+    DrainWatchedFileChanges,
     DidChangeWorkspaceFolders(DidChangeWorkspaceFoldersParams),
     DidChangeConfiguration(DidChangeConfigurationParams),
     DidOpenNotebookDocument(DidOpenNotebookDocumentParams),
@@ -76,7 +75,7 @@ impl LspEvent {
             Self::DidChangeTextDocument(_) => "DidChangeTextDocument".to_owned(),
             Self::DidCloseTextDocument(_) => "DidCloseTextDocument".to_owned(),
             Self::DidSaveTextDocument(_) => "DidSaveTextDocument".to_owned(),
-            Self::DidChangeWatchedFiles(_) => "DidChangeWatchedFiles".to_owned(),
+            Self::DrainWatchedFileChanges => "DidChangeWatchedFiles".to_owned(),
             Self::DidChangeWorkspaceFolders(_) => "DidChangeWorkspaceFolders".to_owned(),
             Self::DidChangeConfiguration(_) => "DidChangeConfiguration".to_owned(),
             Self::DidOpenNotebookDocument(_) => "DidOpenNotebookDocument".to_owned(),
@@ -105,7 +104,7 @@ impl LspEvent {
             | Self::DidChangeTextDocument(_)
             | Self::DidCloseTextDocument(_)
             | Self::DidSaveTextDocument(_)
-            | Self::DidChangeWatchedFiles(_)
+            | Self::DrainWatchedFileChanges
             | Self::DidChangeWorkspaceFolders(_)
             | Self::DidChangeConfiguration(_)
             | Self::LspResponse(_)
@@ -196,7 +195,7 @@ impl LspQueue {
 
 pub struct HeavyTask(
     Box<
-        dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, Option<&TelemetryTaskId>)
+        dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, QueueName, Option<usize>)
             + Send
             + Sync
             + 'static,
@@ -209,9 +208,10 @@ impl HeavyTask {
         server: &Server,
         telemetry: &impl Telemetry,
         telemetry_event: &mut TelemetryEvent,
-        task_stats: Option<&TelemetryTaskId>,
+        queue_name: QueueName,
+        task_id: Option<usize>,
     ) {
-        self.0(server, telemetry, telemetry_event, task_stats);
+        self.0(server, telemetry, telemetry_event, queue_name, task_id);
     }
 }
 
@@ -221,12 +221,12 @@ pub struct HeavyTaskQueue {
     task_receiver: Receiver<(HeavyTask, TelemetryEventKind, Instant)>,
     stop_sender: Sender<()>,
     stop_receiver: Receiver<()>,
-    queue_name: &'static str,
+    queue_name: QueueName,
     next_task_id: AtomicUsize,
 }
 
 impl HeavyTaskQueue {
-    pub fn new(queue_name: &'static str) -> Self {
+    pub fn new(queue_name: QueueName) -> Self {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded();
         let (stop_sender, stop_receiver) = crossbeam_channel::unbounded();
         Self {
@@ -243,7 +243,7 @@ impl HeavyTaskQueue {
         &self,
         kind: TelemetryEventKind,
         f: Box<
-            dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, Option<&TelemetryTaskId>)
+            dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, QueueName, Option<usize>)
                 + Send
                 + Sync
                 + 'static,
@@ -275,14 +275,21 @@ impl HeavyTaskQueue {
                         .recv(&self.task_receiver)
                         .expect("Failed to receive heavy task");
                     debug!("Dequeued task on {} heavy task queue", self.queue_name);
-                    let (mut telemetry_event, queue_duration) =
-                        TelemetryEvent::new_dequeued(kind, enqueued, server.telemetry_state());
-                    let task_stats = TelemetryTaskId::new(
+                    let (mut telemetry_event, queue_duration) = TelemetryEvent::new_dequeued(
+                        kind,
+                        enqueued,
+                        server.telemetry_state(),
                         self.queue_name,
-                        Some(self.next_task_id.fetch_add(1, Ordering::Relaxed)),
                     );
-                    task.run(server, telemetry, &mut telemetry_event, Some(&task_stats));
-                    telemetry_event.set_task_stats(task_stats);
+                    let task_id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
+                    task.run(
+                        server,
+                        telemetry,
+                        &mut telemetry_event,
+                        self.queue_name,
+                        Some(task_id),
+                    );
+                    telemetry_event.set_task_id(task_id);
                     let process_duration = telemetry_event.finish_and_record(telemetry, None);
                     info!(
                         "Ran task on {} heavy task queue. Queue time: {:.2}, task time: {:.2}",

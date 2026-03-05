@@ -88,7 +88,7 @@ def identity[**P, R](x: Callable[P, R]) -> Callable[P, R]:
 def foo[T](x: T, y: T) -> T:
     return x
 foo2 = identity(foo)
-reveal_type(foo2)  # E: revealed type: (x: @_, y: @_) -> @_
+reveal_type(foo2)  # E: revealed type: (x: Unknown, y: Unknown) -> Unknown
 "#,
 );
 
@@ -284,7 +284,7 @@ reveal_type(transform(bar)) # Should return (a: str, /, *args: bool) -> bool # E
 );
 
 testcase!(
-    bug = "P.args and P.kwargs should only work when P is in scope",
+    bug = "conformance: P.args and P.kwargs should only work when P is in scope",
     test_paramspec_component_usage,
     r#"
 from typing import Callable, ParamSpec
