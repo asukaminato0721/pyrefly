@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::dunder;
@@ -103,8 +105,9 @@ pub struct Definition {
     /// Does this definition require an `Anywhere` binding at binding time? Typically yes if there
     /// are multiple definitions, but mutable captures and `del` both require special handling.
     pub needs_anywhere: bool,
-    /// If the first statement in a definition (class, function) is a string literal, PEP 257 convention
-    /// states that is the docstring.
+    /// If the definition has an associated docstring, store its range.
+    /// - For functions/classes: first statement in the body (PEP 257).
+    /// - For variables: a string literal statement immediately following the assignment.
     pub docstring_range: Option<TextRange>,
 }
 
@@ -392,8 +395,9 @@ impl Definitions {
 
 impl<'a> DefinitionsBuilder<'a> {
     fn stmts(&mut self, xs: &[Stmt]) {
-        for x in xs {
-            self.stmt(x);
+        for (index, stmt) in xs.iter().enumerate() {
+            let next = xs.get(index + 1);
+            self.stmt_with_next(stmt, next);
         }
     }
 
@@ -414,6 +418,28 @@ impl<'a> DefinitionsBuilder<'a> {
                     style,
                     needs_anywhere: false,
                     docstring_range: body.and_then(Docstring::range_from_stmts),
+                });
+            }
+        }
+    }
+
+    fn add_name_with_docstring(
+        &mut self,
+        x: &Name,
+        range: TextRange,
+        style: DefinitionStyle,
+        docstring_range: Option<TextRange>,
+    ) {
+        match self.inner.definitions.entry(x.clone()) {
+            Entry::Occupied(mut e) => {
+                e.get_mut().merge(style, range);
+            }
+            Entry::Vacant(e) => {
+                e.insert(Definition {
+                    range,
+                    style,
+                    needs_anywhere: false,
+                    docstring_range,
                 });
             }
         }
@@ -445,12 +471,17 @@ impl<'a> DefinitionsBuilder<'a> {
     }
 
     fn expr_lvalue(&mut self, x: &Expr) {
+        self.expr_lvalue_with_docstring(x, None);
+    }
+
+    fn expr_lvalue_with_docstring(&mut self, x: &Expr, docstring_range: Option<TextRange>) {
         let mut add_name = |x: &ExprName| {
-            self.add_name(
+            self.add_name_with_docstring(
                 &x.id,
                 x.range,
                 DefinitionStyle::Unannotated(SymbolKind::Variable),
-            )
+                docstring_range,
+            );
         };
         Ast::expr_lvalue(x, &mut add_name);
         self.named_in_expr(x);
@@ -462,7 +493,11 @@ impl<'a> DefinitionsBuilder<'a> {
         });
     }
 
-    fn stmt(&mut self, x: &Stmt) {
+    fn docstring_range_for_next(&self, next: Option<&Stmt>) -> Option<TextRange> {
+        next.and_then(|stmt| Docstring::range_from_stmts(slice::from_ref(stmt)))
+    }
+
+    fn stmt_with_next(&mut self, x: &Stmt, next: Option<&Stmt>) {
         match x {
             Stmt::Import(x) => {
                 for a in &x.names {
@@ -572,9 +607,10 @@ impl<'a> DefinitionsBuilder<'a> {
                 }
             }
             Stmt::Assign(x) => {
+                let docstring_range = self.docstring_range_for_next(next);
                 self.named_in_expr(&x.value);
                 for t in &x.targets {
-                    self.expr_lvalue(t);
+                    self.expr_lvalue_with_docstring(t, docstring_range);
                     if DunderAllEntry::is_all(t) {
                         match DunderAllEntry::as_list(&x.value) {
                             Some(entries) => {
@@ -594,6 +630,7 @@ impl<'a> DefinitionsBuilder<'a> {
                 }
             }
             Stmt::AnnAssign(x) => {
+                let docstring_range = self.docstring_range_for_next(next);
                 if let Some(value) = &x.value {
                     self.named_in_expr(value);
                 }
@@ -618,19 +655,20 @@ impl<'a> DefinitionsBuilder<'a> {
                 let has_final_annotation = is_final_annotation(&x.annotation);
                 match &*x.target {
                     Expr::Name(x) => {
-                        self.add_name(
+                        self.add_name_with_docstring(
                             &x.id,
                             x.range,
                             DefinitionStyle::Annotated(
                                 SymbolKind::Variable,
                                 ShortIdentifier::expr_name(x),
                             ),
+                            docstring_range,
                         );
                         if has_final_annotation {
                             self.inner.final_names.insert(x.id.clone());
                         }
                     }
-                    _ => self.expr_lvalue(&x.target),
+                    _ => self.expr_lvalue_with_docstring(&x.target, docstring_range),
                 }
             }
             Stmt::AugAssign(x) => {
@@ -735,7 +773,10 @@ impl<'a> DefinitionsBuilder<'a> {
             }
             Stmt::For(x) => {
                 self.named_in_expr(&x.iter);
-                self.expr_lvalue(&x.target)
+                self.expr_lvalue(&x.target);
+                self.stmts(&x.body);
+                self.stmts(&x.orelse);
+                return;
             }
             Stmt::With(x) => {
                 for x in &x.items {
@@ -744,12 +785,19 @@ impl<'a> DefinitionsBuilder<'a> {
                         self.expr_lvalue(target);
                     }
                 }
+                self.stmts(&x.body);
+                return;
             }
             Stmt::Match(x) => {
                 self.named_in_expr(&x.subject);
                 for x in &x.cases {
                     self.pattern(&x.pattern);
+                    if let Some(guard) = &x.guard {
+                        self.named_in_expr(guard);
+                    }
+                    self.stmts(&x.body);
                 }
+                return;
             }
             Stmt::Try(x) => {
                 for x in &x.handlers {
@@ -764,6 +812,17 @@ impl<'a> DefinitionsBuilder<'a> {
                         }
                     }
                 }
+                self.stmts(&x.body);
+                self.stmts(&x.orelse);
+                self.stmts(&x.finalbody);
+                for handler in &x.handlers {
+                    match handler {
+                        ExceptHandler::ExceptHandler(handler) => {
+                            self.stmts(&handler.body);
+                        }
+                    }
+                }
+                return;
             }
             Stmt::If(x) => {
                 self.named_in_expr(&x.test);
@@ -774,6 +833,9 @@ impl<'a> DefinitionsBuilder<'a> {
             }
             Stmt::While(x) => {
                 self.named_in_expr(&x.test);
+                self.stmts(&x.body);
+                self.stmts(&x.orelse);
+                return;
             }
             Stmt::Assert(x) => {
                 self.named_in_expr(&x.test);
@@ -795,7 +857,7 @@ impl<'a> DefinitionsBuilder<'a> {
             | Stmt::Continue(..)
             | Stmt::IpyEscapeCommand(..) => {}
         }
-        x.recurse(&mut |xs| self.stmt(xs))
+        x.recurse(&mut |xs| self.stmt_with_next(xs, None))
     }
 
     /// Accumulate names defined by walrus operators in an expression.

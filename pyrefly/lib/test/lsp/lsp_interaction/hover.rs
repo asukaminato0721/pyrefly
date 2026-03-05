@@ -91,6 +91,29 @@ fn hover_attribute_prefers_py_docstring_over_pyi() {
 }
 
 #[test]
+fn hover_shows_module_variable_docstring() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let file = "variable_docstrings/src.py";
+    interaction.client.did_open(file);
+    interaction
+        .client
+        .hover(file, 4, 11)
+        .expect_hover_response_with_markup(|x| x.is_some_and(|x| x.contains("Some documentation.")))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
 fn hover_shows_third_party_function_name() {
     let root = get_test_files_root();
     let mut interaction = LspInteraction::new();
