@@ -17,6 +17,7 @@ pub(crate) mod inline_parameter;
 pub(crate) mod inline_variable;
 pub(crate) mod introduce_parameter;
 pub(crate) mod invert_boolean;
+pub(crate) mod local_to_field;
 pub(crate) mod move_members;
 pub(crate) mod move_module;
 pub(crate) mod redundant_cast;

@@ -26,6 +26,7 @@ mod hover;
 mod implementation;
 mod inlay_hint;
 mod io;
+mod local_to_field;
 mod notebook_code_action;
 mod notebook_completion;
 mod notebook_definition;

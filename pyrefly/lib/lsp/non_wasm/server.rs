@@ -4110,6 +4110,10 @@ impl Server {
                 transaction.extract_field_code_actions(&handle, range)
             );
             timed_refactor_action!(
+                "local_to_field",
+                transaction.local_to_field_code_actions(&handle, range)
+            );
+            timed_refactor_action!(
                 "extract_variable",
                 transaction.extract_variable_code_actions(&handle, range)
             );

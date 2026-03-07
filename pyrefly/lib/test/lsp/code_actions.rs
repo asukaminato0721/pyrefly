@@ -273,6 +273,36 @@ fn apply_first_inline_variable_action(code: &str) -> Option<String> {
     Some(apply_refactor_edits_for_module(&module_info, &edits))
 }
 
+fn apply_first_local_to_field_action(code: &str) -> Option<String> {
+    let (handles, state) =
+        mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let module_info = transaction.get_module_info(handle).unwrap();
+    let selection = cursor_selection(code);
+    let actions = transaction
+        .local_to_field_code_actions(handle, selection)
+        .unwrap_or_default();
+    let edits = actions.first()?.edits.clone();
+    Some(apply_refactor_edits_for_module(&module_info, &edits))
+}
+
+fn assert_no_local_to_field_action(code: &str) {
+    let (handles, state) =
+        mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
+    let handle = handles.get("main").unwrap();
+    let transaction = state.transaction();
+    let selection = cursor_selection(code);
+    let actions = transaction
+        .local_to_field_code_actions(handle, selection)
+        .unwrap_or_default();
+    assert!(
+        actions.is_empty(),
+        "expected no local-to-field actions, found {}",
+        actions.len()
+    );
+}
+
 fn apply_first_inline_method_action(code: &str) -> Option<String> {
     let (handles, state) =
         mk_multi_file_state_assert_no_errors(&[("main", code)], Require::Everything);
@@ -3593,6 +3623,99 @@ class Outer:
             )
 "#;
         assert_eq!(expected.trim(), updated.trim());
+    }
+}
+
+mod local_to_field_tests {
+    use pretty_assertions::assert_eq;
+
+    use super::apply_first_local_to_field_action;
+    use super::assert_no_local_to_field_action;
+
+    #[test]
+    fn local_to_field_basic_instance_method() {
+        let code = r#"
+class MyClass:
+    def method(self):
+        local_var = 10
+        print(local_var)
+#             ^
+"#;
+        let updated =
+            apply_first_local_to_field_action(code).expect("expected local-to-field action");
+        let expected = r#"
+class MyClass:
+    def method(self):
+        self.local_var = 10
+        print(self.local_var)
+#             ^
+"#;
+        assert_eq!(expected, updated);
+    }
+
+    #[test]
+    fn local_to_field_classmethod_uses_cls_receiver() {
+        let code = r#"
+class MyClass:
+    @classmethod
+    def method(cls):
+        value = 10
+        return value
+#              ^
+"#;
+        let updated =
+            apply_first_local_to_field_action(code).expect("expected local-to-field action");
+        let expected = r#"
+class MyClass:
+    @classmethod
+    def method(cls):
+        cls.value = 10
+        return cls.value
+#              ^
+"#;
+        assert_eq!(expected, updated);
+    }
+
+    #[test]
+    fn local_to_field_rejects_non_local_symbol() {
+        let code = r#"
+import sys
+
+class MyClass:
+    def method(self):
+        local_var = 10
+        print(sys.stdin)
+#             ^
+        return local_var
+"#;
+        assert_no_local_to_field_action(code);
+    }
+
+    #[test]
+    fn local_to_field_rejects_reassignment() {
+        let code = r#"
+class MyClass:
+    def method(self):
+        local_var = 10
+        local_var = 20
+        print(local_var)
+#             ^
+"#;
+        assert_no_local_to_field_action(code);
+    }
+
+    #[test]
+    fn local_to_field_rejects_nested_function_references() {
+        let code = r#"
+class MyClass:
+    def method(self):
+        local_var = 10
+        def inner():
+            return local_var
+        print(local_var)
+#             ^
+"#;
+        assert_no_local_to_field_action(code);
     }
 }
 
