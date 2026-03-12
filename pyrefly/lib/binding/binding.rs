@@ -1954,6 +1954,7 @@ pub struct NameAssign {
     pub name: Name,
     pub annotation: Option<(AnnotationStyle, Idx<KeyAnnotation>)>,
     pub expr: Box<Expr>,
+    pub class_key: Option<Idx<KeyClass>>,
     pub legacy_tparams: Option<Box<[Idx<KeyLegacyTypeParam>]>>,
     pub is_in_function_scope: bool,
     pub first_use: FirstUse,
