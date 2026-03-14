@@ -859,7 +859,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .collect::<Vec<_>>();
             (self_obj, Some(fresh_args), Some(fresh_keywords))
         };
-
+        let checkpoint = self.solver().checkpoint();
         let call_errors = self.error_collector();
         let (res, specialization_errors, expected_types) = self.callable_infer(
             callable.1.signature.clone(),
@@ -880,6 +880,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         );
         if let Ok(errors) = Vec1::try_from_vec(specialization_errors) {
             self.add_specialization_errors(errors, arguments_range, &call_errors, None);
+        }
+        if !call_errors.is_empty() {
+            self.solver().restore_checkpoint(checkpoint);
         }
 
         CalledOverload {
