@@ -652,6 +652,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let mut overload_ctor_targs = ctor_targs.as_ref().map(|x| (**x).clone());
         let tparams = callable.0.as_deref();
 
+        let checkpoint = self.solver().checkpoint();
         let call_errors = self.error_collector();
         let (res, specialization_errors) = self.callable_infer(
             callable.1.signature.clone(),
@@ -672,6 +673,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         );
         if let Ok(errors) = Vec1::try_from_vec(specialization_errors) {
             self.add_specialization_errors(errors, arguments_range, &call_errors, None);
+        }
+        if !call_errors.is_empty() {
+            self.solver().restore_checkpoint(checkpoint);
         }
 
         CalledOverload {

@@ -77,7 +77,7 @@ const VAR_LEAK: &str = "Internal error: a variable has leaked from one module to
 /// due to large enums (Type) and lock guards.
 const INITIAL_GAS: Gas = Gas::new(200);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Variable {
     /// A "partial type" (terminology borrowed from mypy) for an empty container.
     ///
@@ -175,14 +175,14 @@ impl QuantifiedHandle {
 /// Note that RefCell means we need to be careful about how we access
 /// variables. Access is "mutable xor shared" like ordinary references,
 /// except with runtime instead of static enforcement.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Variables(SmallMap<Var, RefCell<VariableNode>>);
 
 /// A union-find node. We store the parent pointer in a Cell so that we
 /// can implement path compression. We use a separate Cell instead of using
 /// the RefCell around the node, because we might find that two vars point
 /// to the same root, which would cause us to borrow_mut twice and panic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum VariableNode {
     Goto(Cell<Var>),
     Root(Variable, usize),
@@ -320,6 +320,12 @@ pub struct Solver {
     pub strict_callable_subtyping: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct SolverCheckpoint {
+    variables: Variables,
+    instantiation_errors: SmallMap<Var, TypeVarSpecializationError>,
+}
+
 impl Display for Solver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (x, y) in self.variables.lock().iter() {
@@ -352,6 +358,18 @@ impl Solver {
 
     pub fn recurse<'a>(&self, var: Var, recurser: &'a VarRecurser) -> Option<Guard<'a, Var>> {
         self.variables.lock().recurse(var, recurser)
+    }
+
+    pub(crate) fn checkpoint(&self) -> SolverCheckpoint {
+        SolverCheckpoint {
+            variables: self.variables.lock().clone(),
+            instantiation_errors: self.instantiation_errors.read().clone(),
+        }
+    }
+
+    pub(crate) fn restore_checkpoint(&self, checkpoint: SolverCheckpoint) {
+        *self.variables.lock() = checkpoint.variables;
+        *self.instantiation_errors.write() = checkpoint.instantiation_errors;
     }
 
     /// Force all non-recursive Vars in `vars`.
