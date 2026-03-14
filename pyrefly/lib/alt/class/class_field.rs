@@ -2232,6 +2232,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> (Type, Option<Annotation>, IsInherited) {
+        let direct_is_type_alias =
+            direct_annotation.is_some_and(|ann| ann.has_qualifier(&Qualifier::TypeAlias));
         // If we have a direct annotation with a type, use it and skip analyzing the value
         let direct_qualifiers = if let Some(ann) = direct_annotation {
             if let Some(ty) = ann.ty.clone() {
@@ -2248,17 +2250,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             None
         };
         // Otherwise, analyze the value to determine the type
-        let (inherited_ty, inherited_annotation) =
-            self.get_inherited_type_and_annotation(class, name);
+        let (inherited_ty, inherited_annotation) = if direct_is_type_alias {
+            (None, None)
+        } else {
+            self.get_inherited_type_and_annotation(class, name)
+        };
         let mut is_inherited = if inherited_ty.is_none() {
             IsInherited::No
         } else {
             IsInherited::Maybe
         };
-        let final_annotation = Self::merge_direct_qualifiers_with_inherited_annotation(
-            inherited_annotation.clone(),
-            direct_qualifiers,
-        );
+        let final_annotation = if direct_is_type_alias {
+            direct_annotation.cloned()
+        } else {
+            Self::merge_direct_qualifiers_with_inherited_annotation(
+                inherited_annotation.clone(),
+                direct_qualifiers,
+            )
+        };
         let inferred_ty = match value {
             ExprOrBinding::Expr(e) => {
                 match inherited_ty {
