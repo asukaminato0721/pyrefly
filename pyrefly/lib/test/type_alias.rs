@@ -446,6 +446,34 @@ bad2: C[int].X  # E: Generic attribute `X` of class `C` is not visible on the cl
     "#,
 );
 
+testcase!(
+    test_type_alias_class_attribute_override,
+    r#"
+from typing import Generic, TypeAlias, TypeVar, assert_type
+
+MagnitudeT = TypeVar("MagnitudeT")
+QuantityT = TypeVar("QuantityT", bound="PlainQuantity")
+
+class PlainQuantity:
+    pass
+
+class GenericPlainRegistry(Generic[QuantityT]):
+    Quantity: type[QuantityT]
+
+class Quantity(Generic[MagnitudeT], PlainQuantity):
+    pass
+
+class UnitRegistry(GenericPlainRegistry[Quantity[MagnitudeT]]):
+    Quantity: TypeAlias = Quantity
+
+Alias = UnitRegistry.Quantity
+
+def f(x: UnitRegistry.Quantity[float], y: Alias[str]) -> None:
+    assert_type(x, Quantity[float])
+    assert_type(y, Quantity[str])
+    "#,
+);
+
 // Type alias scopes (PEP 695) should have access to enclosing class scopes,
 // similar to annotation scopes.
 testcase!(

@@ -105,6 +105,34 @@ class R:
 );
 
 testcase!(
+    test_new_type_class_type_alias_override,
+    r#"
+from typing import Generic, NewType, TypeAlias, TypeVar
+
+MagnitudeT = TypeVar("MagnitudeT")
+QuantityT = TypeVar("QuantityT", bound="PlainQuantity")
+
+class PlainQuantity:
+    pass
+
+class GenericPlainRegistry(Generic[QuantityT]):
+    Quantity: type[QuantityT]
+
+class Quantity(Generic[MagnitudeT], PlainQuantity):
+    pass
+
+class UnitRegistry(GenericPlainRegistry[Quantity[MagnitudeT]]):
+    Quantity: TypeAlias = Quantity
+
+ExportedQuantity = UnitRegistry.Quantity
+Rate = NewType("Rate", ExportedQuantity[float])
+
+def f(x: ExportedQuantity[float]) -> None:
+    pass
+     "#,
+);
+
+testcase!(
     test_new_type_tuple,
     r#"
 from typing import NewType
