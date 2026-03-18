@@ -215,6 +215,8 @@ pub struct DisabledLanguageServices {
     #[serde(default)]
     pub references: bool,
     #[serde(default)]
+    pub code_lens: bool,
+    #[serde(default)]
     pub rename: bool,
     #[serde(default)]
     pub signature_help: bool,
@@ -242,6 +244,7 @@ impl DisabledLanguageServices {
             "textDocument/completion" => self.completion,
             "textDocument/documentHighlight" => self.document_highlight,
             "textDocument/references" => self.references,
+            "textDocument/codeLens" => self.code_lens,
             "textDocument/rename" => self.rename,
             "textDocument/signatureHelp" => self.signature_help,
             "textDocument/hover" => self.hover,

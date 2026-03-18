@@ -40,6 +40,10 @@ use lsp_types::CodeActionParams;
 use lsp_types::CodeActionProviderCapability;
 use lsp_types::CodeActionResponse;
 use lsp_types::CodeActionTriggerKind;
+use lsp_types::CodeLens;
+use lsp_types::CodeLensOptions;
+use lsp_types::CodeLensParams;
+use lsp_types::Command;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionList;
 use lsp_types::CompletionOptions;
@@ -152,6 +156,7 @@ use lsp_types::request::CallHierarchyIncomingCalls;
 use lsp_types::request::CallHierarchyOutgoingCalls;
 use lsp_types::request::CallHierarchyPrepare;
 use lsp_types::request::CodeActionRequest;
+use lsp_types::request::CodeLensRequest;
 use lsp_types::request::Completion;
 use lsp_types::request::DocumentDiagnosticRequest;
 use lsp_types::request::DocumentHighlightRequest;
@@ -941,6 +946,12 @@ struct InitializeResult<C> {
     server_info: Option<ServerInfo>,
 }
 
+#[derive(Debug, Clone)]
+struct CodeLensTarget {
+    range: Range,
+    definition: FindDefinitionItemWithDocstring,
+}
+
 pub fn initialize_finish<C: Serialize>(
     sender: &Sender<Message>,
     reader: &mut MessageReader,
@@ -1156,6 +1167,14 @@ pub fn capabilities(
             ]),
             ..Default::default()
         })),
+        code_lens_provider: match indexing_mode {
+            IndexingMode::None => None,
+            IndexingMode::LazyNonBlockingBackground | IndexingMode::LazyBlocking => {
+                Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                })
+            }
+        },
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_owned(), "'".to_owned(), "\"".to_owned()]),
             resolve_provider: Some(true),
@@ -2018,6 +2037,20 @@ impl Server {
                                     .unwrap_or_default(),
                             )),
                         ));
+                    }
+                } else if let Some(params) = as_request::<CodeLensRequest>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<CodeLensRequest>(
+                            params, &x.id,
+                        )
+                    {
+                        self.set_file_stats(params.text_document.uri.clone(), telemetry_event);
+                        self.code_lens(
+                            x.id,
+                            &transaction,
+                            params,
+                            telemetry_event.activity_key.clone(),
+                        );
                     }
                 } else if let Some(params) = as_request::<WorkspaceSymbolRequest>(&x) {
                     if let Some(params) = self
@@ -4220,6 +4253,61 @@ impl Server {
         (!actions.is_empty()).then_some(actions)
     }
 
+    fn code_lens_targets(
+        &self,
+        transaction: &Transaction<'_>,
+        handle: &Handle,
+        uri: &Url,
+    ) -> Option<Vec<CodeLensTarget>> {
+        fn recurse_symbols<'a>(symbols: &'a [DocumentSymbol], out: &mut Vec<&'a DocumentSymbol>) {
+            for symbol in symbols {
+                if matches!(
+                    symbol.kind,
+                    SymbolKind::CLASS | SymbolKind::FUNCTION | SymbolKind::METHOD
+                ) {
+                    out.push(symbol);
+                }
+                if let Some(children) = symbol.children.as_deref() {
+                    recurse_symbols(children, out);
+                }
+            }
+        }
+
+        let module_info = transaction.get_module_info(handle)?;
+        let symbols = transaction.symbols(handle)?;
+        let mut symbol_defs = Vec::new();
+        recurse_symbols(&symbols, &mut symbol_defs);
+
+        let mut seen = SmallSet::new();
+        let mut targets = Vec::new();
+        for symbol in symbol_defs {
+            let position = self.from_lsp_position(uri, &module_info, symbol.selection_range.start);
+            let Some(definition) = transaction
+                .find_definition(
+                    handle,
+                    position,
+                    FindPreference {
+                        import_behavior: ImportBehavior::StopAtRenamedImports,
+                        ..Default::default()
+                    },
+                )
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let key = (definition.module.path().dupe(), definition.definition_range);
+            if !seen.insert(key) {
+                continue;
+            }
+            targets.push(CodeLensTarget {
+                range: symbol.selection_range,
+                definition,
+            });
+        }
+        Some(targets)
+    }
+
     fn document_highlight(
         &self,
         transaction: &Transaction<'_>,
@@ -4462,6 +4550,113 @@ impl Server {
                 }
                 locations
             },
+        );
+    }
+
+    fn code_lens<'a>(
+        &'a self,
+        request_id: RequestId,
+        transaction: &Transaction<'a>,
+        params: CodeLensParams,
+        activity_key: Option<ActivityKey>,
+    ) {
+        let uri = &params.text_document.uri;
+        if self.open_notebook_cells.read().contains_key(uri) {
+            return self.send_response(new_response(request_id, Ok(Some(Vec::<CodeLens>::new()))));
+        }
+        let Some(handle) = self.make_handle_if_enabled(uri, Some(CodeLensRequest::METHOD)) else {
+            return self.send_response(new_response::<Option<Vec<CodeLens>>>(request_id, Ok(None)));
+        };
+        let Some(targets) = self.code_lens_targets(transaction, &handle, uri) else {
+            return self.send_response(new_response::<Option<Vec<CodeLens>>>(request_id, Ok(None)));
+        };
+        if targets.is_empty() {
+            return self.send_response(new_response(request_id, Ok(Some(Vec::<CodeLens>::new()))));
+        }
+
+        let path_remapper = self.path_remapper.clone();
+        let source_uri = uri.clone();
+        self.find_reference_queue.queue_task(
+            TelemetryEventKind::FindFromDefinition,
+            Box::new(move |server, _telemetry, telemetry_event, _, _| {
+                telemetry_event.set_activity_key(activity_key);
+                let mut transaction = server.state.cancellable_transaction();
+                server
+                    .cancellation_handles
+                    .lock()
+                    .insert(request_id.clone(), transaction.get_cancellation_handle());
+                server.validate_in_memory_for_transaction(
+                    transaction.as_mut(),
+                    telemetry_event,
+                    None,
+                );
+
+                let mut lenses = Vec::new();
+                for target in targets {
+                    let local_results = match transaction.find_global_references_from_definition(
+                        *handle.sys_info(),
+                        target.definition.metadata,
+                        TextRangeWithModule::new(
+                            target.definition.module.clone(),
+                            target.definition.definition_range,
+                        ),
+                        false,
+                    ) {
+                        Ok(results) => results,
+                        Err(Cancelled) => {
+                            let message = format!("Request {request_id} is canceled");
+                            info!("{message}");
+                            server.connection.send(Message::Response(Response::new_err(
+                                request_id,
+                                ErrorCode::RequestCanceled as i32,
+                                message,
+                            )));
+                            return;
+                        }
+                    };
+
+                    let mut locations = Vec::new();
+                    for (info, ranges) in local_results {
+                        if let Some(uri) = module_info_to_uri(&info, path_remapper.as_ref()) {
+                            for range in ranges {
+                                locations.push(Location {
+                                    uri: uri.clone(),
+                                    range: info.to_lsp_range(range),
+                                });
+                            }
+                        }
+                    }
+
+                    let reference_count = locations.len();
+                    let title = if reference_count == 1 {
+                        "1 reference".to_owned()
+                    } else {
+                        format!("{reference_count} references")
+                    };
+                    lenses.push(CodeLens {
+                        range: target.range,
+                        command: Some(Command {
+                            title,
+                            command: "editor.action.showReferences".to_owned(),
+                            arguments: Some(vec![
+                                serde_json::to_value(&source_uri)
+                                    .expect("URI should serialize for code lens"),
+                                serde_json::to_value(target.range.start)
+                                    .expect("Position should serialize for code lens"),
+                                serde_json::to_value(&locations)
+                                    .expect("Locations should serialize for code lens"),
+                            ]),
+                        }),
+                        data: None,
+                    });
+                }
+
+                server.cancellation_handles.lock().remove(&request_id);
+                server.connection.send(Message::Response(new_response(
+                    request_id,
+                    Ok(Some(lenses)),
+                )));
+            }),
         );
     }
 
