@@ -63,7 +63,7 @@ class MyTypedDict(TypedDict):
     let module_ids = ModuleIds::new(&handles);
 
     let test_module_handle = get_handle_for_module_name("test", &transaction);
-    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids).unwrap();
+    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids);
 
     // Builtin types
 
@@ -384,7 +384,7 @@ class MyTypedDict(TypedDict):
         PysaType::from_type(
             &context.answers.heap().mk_quantified(Quantified::type_var(
                 Name::new_static("T"),
-                &UniqueFactory::new(),
+                UniqueFactory::new().fresh(),
                 /* default */ None,
                 Restriction::Bound(context.answers.heap().mk_class_type(ClassType::new(
                     get_class("test", "MyClass", &context),
@@ -412,7 +412,7 @@ class MyTypedDict(TypedDict):
         PysaType::from_type(
             &context.answers.heap().mk_quantified(Quantified::type_var(
                 Name::new_static("T"),
-                &UniqueFactory::new(),
+                UniqueFactory::new().fresh(),
                 /* default */ None,
                 Restriction::Constraints(vec![
                     context.answers.heap().mk_class_type(ClassType::new(
@@ -492,7 +492,7 @@ class MyTypedDict(TypedDict):
 
     assert_eq!(
         PysaType::new(
-            "type[test.A] | type[test.B]".to_owned(),
+            "type[test.A | test.B]".to_owned(),
             ClassNamesFromType::from_classes(
                 vec![
                     get_class_ref("test", "A", &context),

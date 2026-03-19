@@ -23,7 +23,6 @@ use crate::report::pysa::function::FunctionRef;
 use crate::report::pysa::function::get_all_functions;
 use crate::report::pysa::global_variable::GlobalVariableRef;
 use crate::report::pysa::location::PysaLocation;
-use crate::report::pysa::module::ModuleKey;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::state::state::Transaction;
@@ -62,10 +61,7 @@ pub fn get_class(module_name: &str, class_name: &str, context: &ModuleContext) -
 
 pub fn get_class_ref(module_name: &str, class_name: &str, context: &ModuleContext) -> ClassRef {
     let class = get_class(module_name, class_name, context);
-    let module_id = context
-        .module_ids
-        .get(ModuleKey::from_module(class.module()))
-        .expect("indexed module");
+    let module_id = context.module_ids.get_from_module(class.module());
 
     ClassRef {
         class_id: ClassId::from_class(&class),
@@ -80,7 +76,7 @@ pub fn get_function_ref(
     context: &ModuleContext,
 ) -> FunctionRef {
     let handle = get_handle_for_module_name(module_name, context.transaction);
-    let context = ModuleContext::create(handle, context.transaction, context.module_ids).unwrap();
+    let context = ModuleContext::create(handle, context.transaction, context.module_ids);
 
     // This is slow, but we don't care in tests.
     get_all_functions(&context)
@@ -100,7 +96,7 @@ fn get_method_ref_with_predicate(
     predicate: impl Fn(&FunctionNode) -> bool,
 ) -> FunctionRef {
     let handle = get_handle_for_module_name(module_name, context.transaction);
-    let context = ModuleContext::create(handle, context.transaction, context.module_ids).unwrap();
+    let context = ModuleContext::create(handle, context.transaction, context.module_ids);
 
     // This is slow, but we don't care in tests.
     get_all_functions(&context)
@@ -153,7 +149,7 @@ pub fn get_global_ref(
     context: &ModuleContext,
 ) -> GlobalVariableRef {
     let handle = get_handle_for_module_name(module_name, context.transaction);
-    let context = ModuleContext::create(handle, context.transaction, context.module_ids).unwrap();
+    let context = ModuleContext::create(handle, context.transaction, context.module_ids);
     GlobalVariableRef {
         module_id: context.module_id,
         module_name: context.handle.module(),

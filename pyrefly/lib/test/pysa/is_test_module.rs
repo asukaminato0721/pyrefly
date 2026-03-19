@@ -18,7 +18,7 @@ fn test_is_test_module(python_code: &str, expected: bool) {
     let module_ids = ModuleIds::new(&handles);
 
     let test_module_handle = get_handle_for_module_name("test", &transaction);
-    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids).unwrap();
+    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids);
 
     let result = is_test_module(&context);
     assert_eq!(result, expected);

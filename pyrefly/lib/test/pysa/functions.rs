@@ -25,7 +25,8 @@ use crate::report::pysa::function::FunctionSignature;
 use crate::report::pysa::function::collect_function_base_definitions;
 use crate::report::pysa::function::export_function_definitions;
 use crate::report::pysa::module::ModuleIds;
-use crate::report::pysa::override_graph::build_reversed_override_graph;
+use crate::report::pysa::module_index::build_pysa_module_index;
+use crate::report::pysa::override_graph::create_reversed_override_graph_for_module;
 use crate::report::pysa::scope::ScopeParent;
 use crate::report::pysa::types::ClassNamesFromType;
 use crate::report::pysa::types::PysaType;
@@ -56,11 +57,11 @@ fn create_function_definition(
             is_stub: false,
             is_def_statement: true,
             defining_class: None,
-            overridden_base_method: None,
         },
         undecorated_signatures,
         captured_variables: Vec::new(),
         decorator_callees: HashMap::new(),
+        overridden_base_method: None,
     }
 }
 
@@ -86,21 +87,19 @@ fn test_exported_functions(
 
     let test_module_handle = get_handle_for_module_name(module_name, &transaction);
 
-    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids).unwrap();
+    let context = ModuleContext::create(test_module_handle, &transaction, &module_ids);
 
     let expected_function_definitions = create_expected_function_definitions(&context);
 
-    let reversed_override_graph =
-        build_reversed_override_graph(&handles, &transaction, &module_ids);
+    let pysa_module_index = build_pysa_module_index(&handles, &transaction, &module_ids);
     let captured_variables = HashMap::new();
+    let module_reversed_override_graph =
+        create_reversed_override_graph_for_module(&context, &pysa_module_index);
     let actual_function_definitions = export_function_definitions(
-        &collect_function_base_definitions(
-            &handles,
-            &transaction,
-            &module_ids,
-            &reversed_override_graph,
-        ),
+        &pysa_module_index,
+        &collect_function_base_definitions(&handles, &transaction, &module_ids),
         &captured_variables,
+        &module_reversed_override_graph,
         &context,
     );
 

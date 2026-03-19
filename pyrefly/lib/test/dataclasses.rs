@@ -793,6 +793,21 @@ C()
 );
 
 testcase!(
+    test_frozen_classvar_class_assignment,
+    r#"
+import dataclasses
+from typing import ClassVar
+
+@dataclasses.dataclass(frozen=True)
+class C:
+    x: ClassVar[bool] = True
+
+    def set_x(self) -> None:
+        self.__class__.x = False
+    "#,
+);
+
+testcase!(
     test_hashable,
     r#"
 from typing import Hashable
@@ -1729,7 +1744,6 @@ assert_type(dc2.y, str)  # E: assert_type(Desc2[str], str) failed
 );
 
 testcase!(
-    bug = "conformance: Dataclass with slots=True should error when setting undeclared attributes",
     test_dataclass_slots_undeclared_attr_conformance,
     r#"
 from dataclasses import dataclass
@@ -1741,7 +1755,7 @@ class DC2:
     def __init__(self):
         self.x = 3
         # should error: y is not in slots
-        self.y = 3
+        self.y = 3  # E: not declared in `__slots__`
 
 @dataclass(slots=False)
 class DC3:
@@ -1751,6 +1765,23 @@ class DC3:
     def __init__(self):
         self.x = 3
         # should error: y is not in slots
-        self.y = 3
+        self.y = 3  # E: not declared in `__slots__`
+"#,
+);
+
+testcase!(
+    test_dataclass_protocol_dataclass_fields,
+    r#"
+from dataclasses import dataclass, Field
+from typing import Any, ClassVar, Protocol
+
+class P(Protocol):
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
+@dataclass
+class C(P):
+    x: int
+
+C(42)
 "#,
 );

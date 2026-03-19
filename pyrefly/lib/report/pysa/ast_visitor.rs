@@ -42,7 +42,6 @@ pub enum Scope {
         decorated_function: DecoratedFunction,
     },
     ExportedClass {
-        #[allow(dead_code)]
         class_id: ClassId,
         #[allow(dead_code)]
         class_name: Name,
@@ -81,7 +80,6 @@ pub enum ExportFunctionDecorators {
     InDecoratedFunction,
     InParentScope,
     InDecoratedTarget,
-    #[allow(dead_code)]
     Ignore,
 }
 
@@ -89,14 +87,12 @@ pub enum ExportClassDecorators {
     #[allow(dead_code)]
     InDecoratedClassTopLevel,
     InParentScope,
-    #[allow(dead_code)]
     Ignore,
 }
 
 pub enum ExportDefaultArguments {
     InFunction,
     InParentScope,
-    #[allow(dead_code)]
     Ignore,
 }
 

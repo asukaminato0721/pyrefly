@@ -77,7 +77,43 @@ impl ModuleIds {
         ModuleIds(result)
     }
 
-    pub fn get(&self, key: ModuleKey) -> Option<ModuleId> {
-        self.0.get(&key).copied()
+    pub fn get_opt(&self, key: &ModuleKey) -> Option<ModuleId> {
+        self.0.get(key).copied()
+    }
+
+    pub fn get_from_handle(&self, handle: &Handle) -> ModuleId {
+        let key = ModuleKey::from_handle(handle);
+        self.get_opt(&key).unwrap_or_else(|| {
+            panic!(
+                "ModuleIds missing entry for handle module={}, path={:?} — was the module indexed?",
+                handle.module(),
+                handle.path().details(),
+            )
+        })
+    }
+
+    pub fn get_from_module(&self, module: &Module) -> ModuleId {
+        let key = ModuleKey::from_module(module);
+        self.get_opt(&key).unwrap_or_else(|| {
+            panic!(
+                "ModuleIds missing entry for module={}, path={:?} — was the module indexed?",
+                module.name(),
+                module.path().details(),
+            )
+        })
+    }
+
+    /// Returns the ModuleId for the given handle, or None if the handle is not indexed.
+    /// Use this for handles from LSP functions that may lazy-load modules not present
+    /// when ModuleIds was built.
+    pub fn get_from_handle_opt(&self, handle: &Handle) -> Option<ModuleId> {
+        self.get_opt(&ModuleKey::from_handle(handle))
+    }
+
+    /// Returns the ModuleId for the given module, or None if the module is not indexed.
+    /// Use this for modules from LSP functions that may lazy-load modules not present
+    /// when ModuleIds was built.
+    pub fn get_from_module_opt(&self, module: &Module) -> Option<ModuleId> {
+        self.get_opt(&ModuleKey::from_module(module))
     }
 }

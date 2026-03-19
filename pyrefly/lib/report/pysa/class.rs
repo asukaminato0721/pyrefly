@@ -11,14 +11,19 @@ use std::ops::Not;
 use std::sync::Arc;
 
 use dupe::Dupe;
-use pyrefly_build::handle::Handle;
 use pyrefly_python::ast::Ast;
 use pyrefly_types::class::Class;
+use pyrefly_types::class::ClassFields;
 use pyrefly_types::class::ClassType;
 use ruff_python_ast::AnyNodeRef;
+use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::name::Name;
+use ruff_python_ast::statement_visitor::StatementVisitor;
+use ruff_python_ast::statement_visitor::walk_stmt;
 use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
+use ruff_text_size::TextSize;
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 use starlark_map::Hashed;
@@ -45,7 +50,7 @@ use crate::report::pysa::function::WholeProgramFunctionDefinitions;
 use crate::report::pysa::location::PysaLocation;
 use crate::report::pysa::module::ModuleId;
 use crate::report::pysa::module::ModuleIds;
-use crate::report::pysa::module::ModuleKey;
+use crate::report::pysa::module_index::WholeProgramPysaModuleIndex;
 use crate::report::pysa::scope::ScopeParent;
 use crate::report::pysa::scope::get_scope_parent;
 use crate::report::pysa::types::PysaType;
@@ -80,9 +85,7 @@ pub struct ClassRef {
 impl ClassRef {
     pub fn from_class(class: &Class, module_ids: &ModuleIds) -> ClassRef {
         ClassRef {
-            module_id: module_ids
-                .get(ModuleKey::from_module(class.module()))
-                .unwrap(),
+            module_id: module_ids.get_from_module(class.module()),
             class_id: ClassId::from_class(class),
             class: class.clone(),
         }
@@ -243,7 +246,7 @@ pub fn get_class_field_from_current_class_only(
 ) -> Option<Arc<ClassField>> {
     context
         .transaction
-        .ad_hoc_solve(&context.handle, |solver| {
+        .ad_hoc_solve(&context.handle, "pysa_class_field", |solver| {
             solver.get_field_from_current_class_only(class, field_name)
         })
         .unwrap()
@@ -257,22 +260,10 @@ pub fn get_super_class_member(
 ) -> Option<WithDefiningClass<Arc<ClassField>>> {
     context
         .transaction
-        .ad_hoc_solve(&context.handle, |solver| {
+        .ad_hoc_solve(&context.handle, "pysa_super_class_member", |solver| {
             solver.get_super_class_member(class, start_lookup_cls, field_name)
         })
         .flatten()
-}
-
-pub fn get_context_from_class<'a>(
-    class: &'a Class,
-    context: &'a ModuleContext<'a>,
-) -> ModuleContext<'a> {
-    let handle = Handle::new(
-        class.module_name(),
-        class.module_path().clone(),
-        context.handle.sys_info().clone(),
-    );
-    ModuleContext::create(handle, context.transaction, context.module_ids).unwrap()
 }
 
 pub fn get_class_field_declaration<'a>(
@@ -301,10 +292,19 @@ pub fn get_class_fields<'a>(
     class: &'a Class,
     context: &'a ModuleContext<'a>,
 ) -> impl Iterator<Item = (Cow<'a, Name>, Arc<ClassField>)> {
-    let regular_fields = class.fields().filter_map(|name| {
-        get_class_field_from_current_class_only(class, name, context)
-            .map(|field| (Cow::Borrowed(name), field))
-    });
+    let class_fields = context
+        .bindings
+        .get_class_fields(class.index())
+        .cloned()
+        .unwrap_or_else(ClassFields::empty);
+    let regular_fields = class_fields
+        .names()
+        .filter_map(|name| {
+            get_class_field_from_current_class_only(class, name, context)
+                .map(|field| (Cow::Owned(name.clone()), field))
+        })
+        .collect::<Vec<_>>()
+        .into_iter();
 
     let synthesized_fields_idx = context
         .bindings
@@ -312,7 +312,7 @@ pub fn get_class_fields<'a>(
     let synthesized_fields = context.answers.get_idx(synthesized_fields_idx).unwrap();
     let synthesized_fields = synthesized_fields
         .fields()
-        .filter(|(name, _)| !class.contains(name))
+        .filter(|(name, _)| !class_fields.contains(name))
         .map(|(name, field)| (Cow::Owned(name.clone()), field.inner.dupe()))
         // Required by the borrow checker.
         // This is fine since the amount of synthesized fields should be small.
@@ -322,9 +322,51 @@ pub fn get_class_fields<'a>(
     regular_fields.chain(synthesized_fields)
 }
 
-pub fn export_class_fields(
+/// Maps the start position of each `StmtAnnAssign` target to the `TextRange` of its annotation.
+///
+/// This allows O(1) lookup of annotations by target position, avoiding repeated
+/// full AST traversals via `Ast::locate_node`.
+struct AnnAssignMap {
+    map: HashMap<TextSize, TextRange>,
+}
+
+impl AnnAssignMap {
+    /// Build a map from target start position to annotation range for all
+    /// `StmtAnnAssign` statements in the module AST.
+    fn build(ast: &ruff_python_ast::ModModule) -> AnnAssignMap {
+        let mut collector = AnnAssignCollector {
+            map: HashMap::new(),
+        };
+        collector.visit_body(&ast.body);
+        AnnAssignMap { map: collector.map }
+    }
+
+    /// Look up the annotation range for a given target start position.
+    fn get(&self, target_start: TextSize) -> Option<&TextRange> {
+        self.map.get(&target_start)
+    }
+}
+
+/// Walks the AST and collects all `StmtAnnAssign` nodes, mapping each target's
+/// start position to the annotation's text range.
+struct AnnAssignCollector {
+    map: HashMap<TextSize, TextRange>,
+}
+
+impl<'a> StatementVisitor<'a> for AnnAssignCollector {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        if let Stmt::AnnAssign(assign) = stmt {
+            self.map
+                .insert(assign.target.range().start(), assign.annotation.range());
+        }
+        walk_stmt(self, stmt);
+    }
+}
+
+fn export_class_fields(
     class: &Class,
     context: &ModuleContext,
+    ann_assign_map: &AnnAssignMap,
 ) -> HashMap<Name, PysaClassField> {
     assert_eq!(class.module(), &context.module_info);
     get_class_fields(class, context)
@@ -334,7 +376,7 @@ pub fn export_class_fields(
 
             let explicit_annotation = match field_binding {
                 Some(BindingClassField {
-                    definition: ClassFieldDefinition::DeclaredByAnnotation { annotation },
+                    definition: ClassFieldDefinition::DeclaredByAnnotation { annotation, .. },
                     ..
                 }) => Some(*annotation),
                 Some(BindingClassField {
@@ -353,19 +395,11 @@ pub fn export_class_fields(
                 // We cannot use the answer for `key_annotation` (which wraps a `Type`),
                 // because it contains a normalized type where some elements have
                 // been stripped out (most notably, `typing.Annotated`).
-                KeyAnnotation::Annotation(identifier) => {
-                    // `Ast::locate_node` returns all covering AST nodes, from innermost to outermost.
-                    // The innermost will be the Name node, so we need the second node.
-                    match Ast::locate_node(&context.ast, identifier.range().start()).get(1) {
-                        Some(AnyNodeRef::StmtAnnAssign(assign)) => Some(
-                            context
-                                .module_info
-                                .code_at(assign.annotation.range())
-                                .to_owned(),
-                        ),
-                        _ => None,
-                    }
-                }
+                KeyAnnotation::Annotation(identifier) => ann_assign_map
+                    .get(identifier.range().start())
+                    .map(|annotation_range| {
+                        context.module_info.code_at(*annotation_range).to_owned()
+                    }),
                 KeyAnnotation::AttrAnnotation(range) => {
                     Some(context.module_info.code_at(*range).to_owned())
                 }
@@ -423,6 +457,7 @@ fn find_definition_ast<'a>(
 
 fn get_decorator_callees(
     class: &Class,
+    pysa_module_index: &WholeProgramPysaModuleIndex,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
     context: &ModuleContext,
 ) -> HashMap<PysaLocation, Vec<Target<FunctionRef>>> {
@@ -430,6 +465,7 @@ fn get_decorator_callees(
     if let Some(class_def) = find_definition_ast(class, context) {
         resolve_decorator_callees(
             &class_def.decorator_list,
+            pysa_module_index,
             function_base_definitions,
             context,
         )
@@ -439,10 +475,12 @@ fn get_decorator_callees(
 }
 
 pub fn export_all_classes(
+    pysa_module_index: &WholeProgramPysaModuleIndex,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
     context: &ModuleContext,
 ) -> HashMap<PysaLocation, ClassDefinition> {
     let mut class_definitions = HashMap::new();
+    let ann_assign_map = AnnAssignMap::build(&context.ast);
 
     for class_idx in context.bindings.keys::<KeyClass>() {
         let class = context
@@ -460,11 +498,11 @@ pub fn export_all_classes(
             .unwrap();
 
         let is_synthesized = match context.bindings.get(class_idx) {
-            BindingClass::FunctionalClassDef(_, _, _, _) => true,
+            BindingClass::FunctionalClassDef(_, _, _) => true,
             BindingClass::ClassDef(_) => false,
         };
 
-        let fields = export_class_fields(&class, context);
+        let fields = export_class_fields(&class, context, &ann_assign_map);
 
         let bases = metadata
             .base_class_objects()
@@ -483,7 +521,12 @@ pub fn export_all_classes(
             ClassMro::Cyclic => PysaClassMro::Cyclic,
         };
 
-        let decorator_callees = get_decorator_callees(&class, function_base_definitions, context);
+        let decorator_callees = get_decorator_callees(
+            &class,
+            pysa_module_index,
+            function_base_definitions,
+            context,
+        );
 
         let class_definition = ClassDefinition {
             class_id: ClassId::from_class(&class),

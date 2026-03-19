@@ -22,6 +22,7 @@ use ruff_text_size::Ranged;
 
 use crate::binding::binding::Binding;
 use crate::binding::binding::BindingExpect;
+use crate::binding::binding::ExhaustiveBinding;
 use crate::binding::binding::ExhaustivenessKind;
 use crate::binding::binding::Key;
 use crate::binding::binding::KeyExpect;
@@ -148,11 +149,17 @@ impl<'a> BindingsBuilder<'a> {
                     // Add the combined narrow op to the returned narrow_ops.
                     // We insert directly instead of using and_all twice to avoid
                     // Placeholder issues when starting from an empty NarrowOps.
-                    let name = match subject {
-                        NarrowingSubject::Name(name) => name.clone(),
-                        NarrowingSubject::Facets(name, _) => name.clone(),
+                    let (name, facet) = match subject {
+                        NarrowingSubject::Name(name) => (name.clone(), None),
+                        NarrowingSubject::Facets(name, facets) => {
+                            (name.clone(), Some(facets.clone()))
+                        }
                     };
-                    narrow_ops.0.insert(name, (combined_narrow_op, x.range));
+                    let scope_narrow_op = NarrowOp::And(vec![
+                        NarrowOp::Atomic(facet.clone(), AtomicNarrowOp::IsSequence),
+                        NarrowOp::Atomic(facet, len_narrow_op.clone()),
+                    ]);
+                    narrow_ops.0.insert(name, (scope_narrow_op, x.range));
                 }
                 let mut seen_star = false;
                 for (i, x) in x.patterns.into_iter().enumerate() {
@@ -181,7 +188,7 @@ impl<'a> BindingsBuilder<'a> {
                             );
                             let subject_for_subpattern = match_subject.clone().and_then(|s| {
                                 if !seen_star {
-                                    Some(s.with_facet(UnresolvedFacetKind::Index(i)))
+                                    Some(s.with_facet(UnresolvedFacetKind::Index(i as i64)))
                                 } else {
                                     None
                                 }
@@ -241,7 +248,7 @@ impl<'a> BindingsBuilder<'a> {
                         };
                         let match_key_idx = self.insert_binding_current(
                             match_key,
-                            Binding::PatternMatchMapping(match_key_expr, subject_idx),
+                            Binding::PatternMatchMapping(Box::new(match_key_expr), subject_idx),
                         );
                         let subject_at_key = key_name.and_then(|key| {
                             match_subject
@@ -361,7 +368,11 @@ impl<'a> BindingsBuilder<'a> {
                             .map(|s| s.with_facet(UnresolvedFacetKind::Attribute(attr.id.clone())));
                         let attr_key = self.insert_binding(
                             Key::Anon(attr.range()),
-                            Binding::PatternMatchClassKeyword(x.cls.clone(), attr, subject_idx),
+                            Binding::PatternMatchClassKeyword(Box::new((
+                                x.cls.clone(),
+                                attr,
+                                subject_idx,
+                            ))),
                         );
                         narrow_ops.and_all(self.bind_pattern(subject_for_attr, pattern, attr_key))
                     },
@@ -406,7 +417,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut subject = self.declare_current_idx(Key::Anon(x.subject.range()));
         self.ensure_expr(&mut x.subject, subject.usage());
         let subject_idx =
-            self.insert_binding_current(subject, Binding::Expr(None, *x.subject.clone()));
+            self.insert_binding_current(subject, Binding::Expr(None, Box::new(*x.subject.clone())));
         let match_narrowing_subject = expr_to_subjects(&x.subject).first().cloned();
         let mut exhaustive = false;
         self.start_fork(x.range);
@@ -470,7 +481,10 @@ impl<'a> BindingsBuilder<'a> {
                     NarrowUseLocation::Span(guard.range()),
                     &Usage::Narrowing(None),
                 );
-                self.insert_binding(Key::Anon(guard.range()), Binding::Expr(None, *guard));
+                self.insert_binding(
+                    Key::Anon(guard.range()),
+                    Binding::Expr(None, Box::new(*guard)),
+                );
                 new_narrow_ops.and_all(guard_narrow_ops)
             }
             negated_prev_ops.and_all(new_narrow_ops.negate());
@@ -480,41 +494,36 @@ impl<'a> BindingsBuilder<'a> {
         if exhaustive {
             self.finish_exhaustive_fork();
         } else {
-            self.finish_non_exhaustive_fork(&negated_prev_ops);
-            // Compute exhaustiveness info if we can determine the narrowing subject
-            // and have accumulated narrow ops for it.
-            let exhaustiveness_info = match_narrowing_subject.and_then(|narrowing_subject| {
-                negated_prev_ops
-                    .0
-                    .get(narrowing_subject.name())
-                    .map(|(op, range)| (narrowing_subject, (Box::new(op.clone()), *range)))
-            });
-            // Create BindingExpect only if we have the info (for exhaustiveness warnings)
-            if let Some((ref narrowing_subject, ref narrow_ops_for_fall_through)) =
-                exhaustiveness_info
+            // Build narrow_entries from negated_prev_ops.
+            // For match, all entries use the same subject_idx since there's one subject.
+            let narrow_entries: Vec<_> = negated_prev_ops
+                .0
+                .iter()
+                .map(|(_name, (op, range))| (subject_idx, Box::new(op.clone()), *range))
+                .collect();
+            // Create BindingExpect only if we have a narrowing subject (for exhaustiveness warnings)
+            if let Some(narrowing_subject) = &match_narrowing_subject
+                && let Some((op, range)) = negated_prev_ops.0.get(narrowing_subject.name())
             {
                 self.insert_binding(
                     KeyExpect::MatchExhaustiveness(x.range),
                     BindingExpect::MatchExhaustiveness {
                         subject_idx,
                         narrowing_subject: narrowing_subject.clone(),
-                        narrow_ops_for_fall_through: narrow_ops_for_fall_through.clone(),
+                        narrow_ops_for_fall_through: (Box::new(op.clone()), *range),
                         subject_range: x.subject.range(),
                     },
                 );
             }
-            // Always create Key::Exhaustive binding for return analysis.
-            // When exhaustiveness_info is None, the solver will conservatively
-            // assume the match is not exhaustive (resolves to Type::None).
-            self.insert_binding(
+            // Always create Key::Exhaustive binding for return analysis and control-flow checks.
+            let exhaustive_key = self.insert_binding(
                 Key::Exhaustive(ExhaustivenessKind::Match, x.range),
-                Binding::Exhaustive {
+                Binding::Exhaustive(Box::new(ExhaustiveBinding {
                     kind: ExhaustivenessKind::Match,
-                    subject_idx,
-                    subject_range: x.subject.range(),
-                    exhaustiveness_info,
-                },
+                    narrow_entries,
+                })),
             );
+            self.finish_non_exhaustive_fork(&negated_prev_ops, Some(exhaustive_key));
         }
     }
 }

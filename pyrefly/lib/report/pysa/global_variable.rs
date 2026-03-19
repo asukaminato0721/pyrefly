@@ -28,7 +28,6 @@ use crate::report::pysa::context::ModuleContext;
 use crate::report::pysa::location::PysaLocation;
 use crate::report::pysa::module::ModuleId;
 use crate::report::pysa::module::ModuleIds;
-use crate::report::pysa::module::ModuleKey;
 use crate::report::pysa::slow_fun_monitor::slow_fun_monitor_scope;
 use crate::report::pysa::step_logger::StepLogger;
 use crate::report::pysa::types::PysaType;
@@ -71,6 +70,10 @@ impl ModuleGlobalVariables {
 
     pub fn get(&self, short_identifier: ShortIdentifier) -> Option<&GlobalVariableBase> {
         self.0.get(&short_identifier)
+    }
+
+    pub fn contains(&self, name: &Name) -> bool {
+        self.0.values().any(|global| global.name == *name)
     }
 }
 
@@ -220,9 +223,8 @@ pub fn collect_global_variables(
     ThreadPool::new().install(|| {
         slow_fun_monitor_scope(|slow_function_monitor| {
             handles.par_iter().for_each(|handle| {
-                let module_id = module_ids.get(ModuleKey::from_handle(handle)).unwrap();
-                let context =
-                    ModuleContext::create(handle.clone(), transaction, module_ids).unwrap();
+                let module_id = module_ids.get_from_handle(handle);
+                let context = ModuleContext::create(handle.clone(), transaction, module_ids);
                 let globals_for_module = slow_function_monitor.monitor_function(
                     move || {
                         let mut global_variables = ModuleGlobalVariables::new();

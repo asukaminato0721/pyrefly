@@ -16,6 +16,7 @@ pub mod global_variable;
 pub mod is_test_module;
 pub mod location;
 pub mod module;
+pub mod module_index;
 pub mod override_graph;
 pub mod scope;
 pub mod slow_fun_monitor;
@@ -25,6 +26,7 @@ pub mod types;
 
 use core::panic;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufWriter;
 use std::ops::Not;
@@ -48,9 +50,11 @@ use serde::Serialize;
 use crate::error::error::Error as TypeError;
 use crate::module::bundled::BundledStub;
 use crate::module::typeshed::typeshed;
+use crate::module::typeshed_third_party::typeshed_third_party;
 use crate::report::pysa::call_graph::CallGraph;
 use crate::report::pysa::call_graph::ExpressionIdentifier;
 use crate::report::pysa::call_graph::export_call_graphs;
+use crate::report::pysa::captured_variable::ModuleCapturedVariables;
 use crate::report::pysa::captured_variable::WholeProgramCapturedVariables;
 use crate::report::pysa::captured_variable::collect_captured_variables;
 use crate::report::pysa::captured_variable::export_captured_variables_for_module;
@@ -74,9 +78,10 @@ use crate::report::pysa::global_variable::export_global_variables;
 use crate::report::pysa::location::PysaLocation;
 use crate::report::pysa::module::ModuleId;
 use crate::report::pysa::module::ModuleIds;
-use crate::report::pysa::module::ModuleKey;
-use crate::report::pysa::override_graph::OverrideGraph;
-use crate::report::pysa::override_graph::build_reversed_override_graph;
+use crate::report::pysa::module_index::WholeProgramPysaModuleIndex;
+use crate::report::pysa::module_index::build_pysa_module_index;
+use crate::report::pysa::override_graph::ModuleReversedOverrideGraph;
+use crate::report::pysa::override_graph::create_reversed_override_graph_for_module;
 use crate::report::pysa::slow_fun_monitor::slow_fun_monitor_scope;
 use crate::report::pysa::step_logger::StepLogger;
 use crate::report::pysa::type_of_expression::export_type_of_expressions;
@@ -99,6 +104,8 @@ struct PysaProjectModule {
     is_interface: bool, // Is this a .pyi file?
     #[serde(skip_serializing_if = "<&bool>::not")]
     is_init: bool, // Is this a __init__.py(i) file?
+    #[serde(skip_serializing_if = "<&bool>::not")]
+    is_internal: bool, // Is this a module from the project (as opposed to a dependency)?
 }
 
 /// Format of the index file `pyrefly.pysa.json`
@@ -147,15 +154,23 @@ pub struct PysaModuleCallGraphs {
 
 pub fn export_module_definitions(
     context: &ModuleContext,
+    pysa_module_index: &WholeProgramPysaModuleIndex,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
     global_variables: &WholeProgramGlobalVariables,
     captured_variables: &WholeProgramCapturedVariables,
+    reversed_override_graph: &ModuleReversedOverrideGraph,
 ) -> PysaModuleDefinitions {
     let global_variables_exported = export_global_variables(global_variables, context);
-    let class_definitions = export_all_classes(function_base_definitions, context);
+    let class_definitions =
+        export_all_classes(pysa_module_index, function_base_definitions, context);
     let captured_variables = export_captured_variables_for_module(captured_variables, context);
-    let function_definitions =
-        export_function_definitions(function_base_definitions, &captured_variables, context);
+    let function_definitions = export_function_definitions(
+        pysa_module_index,
+        function_base_definitions,
+        &captured_variables,
+        reversed_override_graph,
+        context,
+    );
     PysaModuleDefinitions {
         format_version: 1,
         module_id: context.module_id,
@@ -180,15 +195,15 @@ pub fn export_module_type_of_expressions(context: &ModuleContext) -> PysaModuleT
 
 pub fn export_module_call_graphs(
     context: &ModuleContext,
+    pysa_module_index: &WholeProgramPysaModuleIndex,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
-    override_graph: &OverrideGraph,
     global_variables: &WholeProgramGlobalVariables,
-    captured_variables: &WholeProgramCapturedVariables,
+    captured_variables: &ModuleCapturedVariables<FunctionRef>,
 ) -> PysaModuleCallGraphs {
     let call_graphs = export_call_graphs(
         context,
+        pysa_module_index,
         function_base_definitions,
-        override_graph,
         global_variables,
         captured_variables,
     )
@@ -207,13 +222,17 @@ pub fn export_module_call_graphs(
 
 fn build_module_mapping(
     handles: &Vec<Handle>,
+    project_handles: &[Handle],
     module_ids: &ModuleIds,
 ) -> HashMap<ModuleId, PysaProjectModule> {
     let step = StepLogger::start("Building module list", "Built module list");
 
+    // Set of handles from the "project-includes", i.e only handles that are typed checked.
+    let project_handles: HashSet<&Handle> = project_handles.iter().collect();
+
     let mut project_modules = HashMap::new();
     for handle in handles {
-        let module_id = module_ids.get(ModuleKey::from_handle(handle)).unwrap();
+        let module_id = module_ids.get_from_handle(handle);
 
         // Path where we will store the information on the module.
         let info_filename = match handle.path().details() {
@@ -267,6 +286,7 @@ fn build_module_mapping(
                         is_test: false,
                         is_interface: handle.path().is_interface(),
                         is_init: handle.path().is_init(),
+                        is_internal: project_handles.contains(handle),
                     }
                 )
                 .is_none(),
@@ -294,6 +314,7 @@ fn make_module_work_list(
 
 fn write_module_definitions_files(
     module_work_list: &Vec<(Handle, ModuleId, PathBuf)>,
+    pysa_module_index: &WholeProgramPysaModuleIndex,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
     global_variables: &WholeProgramGlobalVariables,
     captured_variables: &WholeProgramCapturedVariables,
@@ -310,15 +331,20 @@ fn write_module_definitions_files(
         slow_fun_monitor_scope(|slow_function_monitor| {
             module_work_list.par_iter().try_for_each(
                 |(handle, _, info_filename)| -> anyhow::Result<()> {
-                    let context =
-                        ModuleContext::create(handle.clone(), transaction, module_ids).unwrap();
+                    let context = ModuleContext::create(handle.clone(), transaction, module_ids);
                     let module_definitions = slow_function_monitor.monitor_function(
                         || {
+                            let reversed_override_graph = create_reversed_override_graph_for_module(
+                                &context,
+                                pysa_module_index,
+                            );
                             export_module_definitions(
                                 &context,
+                                pysa_module_index,
                                 function_base_definitions,
                                 global_variables,
                                 captured_variables,
+                                &reversed_override_graph,
                             )
                         },
                         format!(
@@ -355,8 +381,7 @@ fn write_module_type_of_expressions_files(
         slow_fun_monitor_scope(|slow_function_monitor| {
             module_work_list.par_iter().try_for_each(
                 |(handle, _, info_filename)| -> anyhow::Result<()> {
-                    let context =
-                        ModuleContext::create(handle.clone(), transaction, module_ids).unwrap();
+                    let context = ModuleContext::create(handle.clone(), transaction, module_ids);
                     let module_type_of_expressions = slow_function_monitor.monitor_function(
                         || export_module_type_of_expressions(&context),
                         format!(
@@ -382,12 +407,12 @@ fn write_module_type_of_expressions_files(
 fn write_module_call_graph_files(
     module_work_list: &Vec<(Handle, ModuleId, PathBuf)>,
     function_base_definitions: &WholeProgramFunctionDefinitions<FunctionBaseDefinition>,
-    override_graph: &OverrideGraph,
     global_variables: &WholeProgramGlobalVariables,
     captured_variables: &WholeProgramCapturedVariables,
     transaction: &Transaction,
     module_ids: &ModuleIds,
     call_graphs_directory: &Path,
+    pysa_module_index: &WholeProgramPysaModuleIndex,
 ) -> anyhow::Result<()> {
     let step = StepLogger::start(
         "Exporting module call graphs",
@@ -398,16 +423,18 @@ fn write_module_call_graph_files(
         slow_fun_monitor_scope(|slow_function_monitor| {
             module_work_list.par_iter().try_for_each(
                 |(handle, _, info_filename)| -> anyhow::Result<()> {
-                    let context =
-                        ModuleContext::create(handle.clone(), transaction, module_ids).unwrap();
+                    let context = ModuleContext::create(handle.clone(), transaction, module_ids);
+                    let module_captured_variables = captured_variables
+                        .get_for_module(context.module_id)
+                        .unwrap();
                     let module_call_graphs = slow_function_monitor.monitor_function(
                         || {
                             export_module_call_graphs(
                                 &context,
+                                pysa_module_index,
                                 function_base_definitions,
-                                override_graph,
                                 global_variables,
-                                captured_variables,
+                                module_captured_variables,
                             )
                         },
                         format!("Exporting call graphs for `{}`", handle.module().as_str()),
@@ -439,8 +466,7 @@ fn add_module_is_test_flags(
         slow_fun_monitor_scope(|slow_function_monitor| {
             module_work_list.par_iter().try_for_each(
                 |(handle, module_id, _)| -> anyhow::Result<()> {
-                    let context =
-                        ModuleContext::create(handle.clone(), transaction, module_ids).unwrap();
+                    let context = ModuleContext::create(handle.clone(), transaction, module_ids);
                     slow_function_monitor.monitor_function(
                         || {
                             if is_test_module::is_test_module(&context) {
@@ -471,21 +497,35 @@ fn add_module_is_test_flags(
         .unwrap())
 }
 
+fn write_bundle_stubs(bundle: &impl BundledStub, directory: &Path) -> anyhow::Result<()> {
+    for module in bundle.modules() {
+        let module_path = bundle.find(module).unwrap();
+        let relative_path = match module_path.details() {
+            ModulePathDetails::BundledTypeshed(path) => &**path,
+            ModulePathDetails::BundledTypeshedThirdParty(path) => &**path,
+            _ => panic!("unexpected module path for typeshed module"),
+        };
+        let content = bundle.load(relative_path).unwrap();
+        let target_path = directory.join(relative_path);
+        fs_anyhow::create_dir_all(target_path.parent().unwrap())?;
+        fs_anyhow::write(&target_path, content.as_bytes())?;
+    }
+
+    Ok(())
+}
+
 // Dump all typeshed files, so we can parse them.
 fn write_typeshed_files(results_directory: &Path) -> anyhow::Result<()> {
     let step = StepLogger::start("Exporting typeshed files", "Exported typeshed files");
-    let typeshed = typeshed()?;
 
-    for typeshed_module in typeshed.modules() {
-        let module_path = typeshed.find(typeshed_module).unwrap();
-        let relative_path = match module_path.details() {
-            ModulePathDetails::BundledTypeshed(path) => &**path,
-            _ => panic!("unexpected module path for typeshed module"),
-        };
-        let content = typeshed.load(relative_path).unwrap();
-        let target_path = results_directory.join("typeshed").join(relative_path);
-        fs_anyhow::create_dir_all(target_path.parent().unwrap())?;
-        fs_anyhow::write(&target_path, content.as_bytes())?;
+    let typeshed = typeshed()?;
+    write_bundle_stubs(typeshed, &results_directory.join("typeshed"))?;
+
+    if let Ok(typeshed_third_party) = typeshed_third_party() {
+        write_bundle_stubs(
+            typeshed_third_party,
+            &results_directory.join("typeshed_third_party"),
+        )?;
     }
 
     step.finish();
@@ -521,9 +561,7 @@ fn write_errors_file(
             errors: errors
                 .iter()
                 .map(|error| PysaTypeError {
-                    module_id: module_ids
-                        .get(ModuleKey::from_module(error.module()))
-                        .unwrap(),
+                    module_id: module_ids.get_from_module(error.module()),
                     location: PysaLocation::from_text_range(error.range(), error.module()),
                     kind: error.error_kind(),
                     message: error.msg(),
@@ -539,6 +577,7 @@ fn write_errors_file(
 pub fn write_results(
     results_directory: &Path,
     transaction: &Transaction,
+    project_handles: &[Handle],
     errors: &[TypeError],
 ) -> anyhow::Result<()> {
     let step = StepLogger::start(
@@ -556,24 +595,18 @@ pub fn write_results(
 
     let handles = transaction.handles();
     let module_ids = ModuleIds::new(&handles);
-    let project_modules = build_module_mapping(&handles, &module_ids);
+    let project_modules = build_module_mapping(&handles, project_handles, &module_ids);
     let module_work_list = make_module_work_list(&project_modules);
 
-    let reversed_override_graph = build_reversed_override_graph(&handles, transaction, &module_ids);
-    let function_base_definitions = collect_function_base_definitions(
-        &handles,
-        transaction,
-        &module_ids,
-        &reversed_override_graph,
-    );
+    let pysa_module_index = build_pysa_module_index(&handles, transaction, &module_ids);
+    let function_base_definitions =
+        collect_function_base_definitions(&handles, transaction, &module_ids);
     let global_variables = collect_global_variables(&handles, transaction, &module_ids);
     let captured_variables = collect_captured_variables(&handles, transaction, &module_ids);
 
-    let override_graph =
-        OverrideGraph::from_reversed(&reversed_override_graph, &function_base_definitions);
-
     write_module_definitions_files(
         &module_work_list,
+        &pysa_module_index,
         &function_base_definitions,
         &global_variables,
         &captured_variables,
@@ -592,12 +625,12 @@ pub fn write_results(
     write_module_call_graph_files(
         &module_work_list,
         &function_base_definitions,
-        &override_graph,
         &global_variables,
         &captured_variables,
         transaction,
         &module_ids,
         &call_graphs_directory,
+        &pysa_module_index,
     )?;
 
     let project_modules =
@@ -633,14 +666,10 @@ pub fn write_results(
         &PysaProjectFile {
             format_version: 1,
             modules: project_modules,
-            builtin_module_id: module_ids
-                .get(ModuleKey::from_handle(builtin_module))
-                .unwrap(),
+            builtin_module_id: module_ids.get_from_handle(builtin_module),
             object_class_id,
             dict_class_id,
-            typing_module_id: module_ids
-                .get(ModuleKey::from_handle(typing_module))
-                .unwrap(),
+            typing_module_id: module_ids.get_from_handle(typing_module),
             typing_mapping_class_id,
         },
     )?;
