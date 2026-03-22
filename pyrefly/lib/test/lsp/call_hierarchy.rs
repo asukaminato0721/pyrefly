@@ -45,7 +45,7 @@ fn get_callers_report(state: &State, handle: &Handle, position: TextSize) -> Str
     let definition = TextRangeWithModule::new(def_item.module.clone(), def_item.definition_range);
 
     let callers = match transaction.find_global_incoming_calls_from_function_definition(
-        handle.sys_info(),
+        *handle.sys_info(),
         def_item.metadata.clone(),
         &definition,
     ) {
@@ -57,11 +57,14 @@ fn get_callers_report(state: &State, handle: &Handle, position: TextSize) -> Str
         callers
             .into_iter()
             .flat_map(|(module_info, calls)| {
-                calls
-                    .into_iter()
-                    .map(move |(call_range, caller_name, _caller_range)| {
-                        format_call_site("Caller", &caller_name, module_info.contents(), call_range)
-                    })
+                calls.into_iter().map(move |caller| {
+                    format_call_site(
+                        "Caller",
+                        &caller.name,
+                        module_info.contents(),
+                        caller.call_range,
+                    )
+                })
             })
             .join("\n")
     } else {
@@ -207,6 +210,38 @@ def level1():
     let report = get_batched_lsp_operations_report(&[("main", code)], get_callers_report);
     assert!(report.contains("# main.py"));
     assert!(report.contains("Caller: main.level1"));
+}
+
+#[test]
+fn find_callers_nested_in_print_statement_works_at_definition_test() {
+    let code = r#"
+def main():
+#    ^
+    print("Hello")
+
+def calling_from_print_statement():
+    print(main())
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_callers_report);
+    assert!(report.contains("# main.py"));
+    assert!(report.contains("Caller: main.calling_from_print_statement"));
+    assert!(report.contains("main()"));
+}
+
+#[test]
+fn find_callers_in_dunder_main_at_definition_test() {
+    let code = r#"
+def main():
+#    ^
+    print("Hello")
+
+if __name__ == "__main__":
+    main()
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_callers_report);
+    assert!(report.contains("# main.py"));
+    assert!(report.contains("Caller: main.<module>"));
+    assert!(report.contains("main()"));
 }
 
 #[test]
