@@ -62,10 +62,10 @@ impl Restriction {
         matches!(self, Self::Bound(_) | Self::Constraints(_))
     }
 
-    pub fn as_type(&self, stdlib: &Stdlib) -> Type {
+    pub fn as_type(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
         match self {
             Self::Bound(t) => t.clone(),
-            Self::Constraints(ts) => unions(ts.clone()),
+            Self::Constraints(ts) => unions(ts.clone(), heap),
             Self::Unrestricted => stdlib.object().clone().to_type(),
         }
     }
@@ -97,7 +97,6 @@ pub enum Variance {
     Covariant,
     Contravariant,
     Invariant,
-    #[allow(dead_code)]
     Bivariant,
 }
 
