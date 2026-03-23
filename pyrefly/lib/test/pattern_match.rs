@@ -138,6 +138,30 @@ def f0(x: A | B):
 );
 
 testcase!(
+    test_match_exhaustive_keyword_wildcard_class_pattern,
+    r#"
+from dataclasses import dataclass
+from typing import assert_never
+
+@dataclass
+class A: ...
+
+@dataclass
+class B:
+    x: int
+
+def test(x: A | B):
+    match x:
+        case A():
+            pass
+        case B(x=_):
+            pass
+        case _:
+            assert_never(x)
+"#,
+);
+
+testcase!(
     test_match_exhaustive_enum_assign,
     r#"
 from enum import IntEnum

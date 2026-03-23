@@ -291,11 +291,21 @@ impl<'a> BindingsBuilder<'a> {
                     false
                 };
 
+                let keyword_subpatterns_are_wildcards = x
+                    .arguments
+                    .keywords
+                    .iter()
+                    .all(|keyword| keyword.pattern.is_wildcard());
+
                 // For single-slot builtins with exactly one positional arg, the pattern matches
                 // all instances of the type, so we don't need a placeholder
                 let is_exhaustive_single_slot = is_single_slot_builtin
                     && x.arguments.patterns.len() == 1
                     && x.arguments.keywords.is_empty();
+
+                let class_pattern_is_exhaustive = is_exhaustive_single_slot
+                    || (x.arguments.patterns.is_empty() && x.arguments.keywords.is_empty())
+                    || (x.arguments.patterns.is_empty() && keyword_subpatterns_are_wildcards);
 
                 let mut narrow_ops = if let Some(ref subject) = match_subject {
                     let mut narrow_for_subject = NarrowOps::from_single_narrow_op_for_subject(
@@ -303,13 +313,10 @@ impl<'a> BindingsBuilder<'a> {
                         narrow_op,
                         x.cls.range(),
                     );
-                    // We're not sure whether the pattern matches all possible instances of a class, and
-                    // the placeholder prevents negative narrowing from removing the class in later branches.
-                    // However, if there are no arguments, it's just an isinstance check, so we don't need
-                    // the placeholder. Similarly, single-slot builtins with one positional arg are exhaustive.
-                    if (!x.arguments.patterns.is_empty() || !x.arguments.keywords.is_empty())
-                        && !is_exhaustive_single_slot
-                    {
+                    // The placeholder prevents negative narrowing from removing the class in later
+                    // branches. Keep it only when some subpattern can still reject an instance after
+                    // the class check succeeds.
+                    if !class_pattern_is_exhaustive {
                         let placeholder = NarrowOps::from_single_narrow_op_for_subject(
                             subject.clone(),
                             AtomicNarrowOp::Placeholder,
@@ -374,7 +381,11 @@ impl<'a> BindingsBuilder<'a> {
                                 subject_idx,
                             ))),
                         );
-                        narrow_ops.and_all(self.bind_pattern(subject_for_attr, pattern, attr_key))
+                        let inner_narrow_ops =
+                            self.bind_pattern(subject_for_attr, pattern, attr_key);
+                        if !class_pattern_is_exhaustive || !inner_narrow_ops.0.is_empty() {
+                            narrow_ops.and_all(inner_narrow_ops);
+                        }
                     },
                 );
                 narrow_ops

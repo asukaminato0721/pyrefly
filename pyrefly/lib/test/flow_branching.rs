@@ -599,7 +599,7 @@ def fun(foo: Foo, bar: Bar, baz: Baz) -> None:
         case Foo(x = b, y = a):
             assert_type(a, str)
             assert_type(b, int)
-        case Foo(a, b, c):  # E: Cannot match positional sub-patterns in `Foo`\n  Index 2 out of range for `__match_args__`
+        case Foo(a, b, c):  # E: Cannot match positional sub-patterns in `Never` # E: Cannot match positional sub-patterns in `Never` # E: Cannot match positional sub-patterns in `Never`
             pass
     match bar:
         case Bar(1):  # E: Object of class `Bar` has no attribute `__match_args__`
@@ -672,7 +672,6 @@ def test(x: Foo | Bar) -> None:
             assert_type(a, str)
             assert_type(b, int)
         case Foo(x = 1, y = ""):
-            assert_type(x, Foo)
             assert_type(x.x, Literal[1])
             assert_type(x.y, Literal[""])
         case Bar("bar"):
