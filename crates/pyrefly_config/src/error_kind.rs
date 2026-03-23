@@ -31,7 +31,8 @@ use yansi::Painted;
     Eq,
     Hash,
     Deserialize,
-    Serialize
+    Serialize,
+    ValueEnum
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -155,6 +156,9 @@ pub enum ErrorKind {
     InconsistentInheritance,
     /// An inconsistency between the signature of a function overload and the implementation.
     InconsistentOverload,
+    /// An inconsistency between a function parameter's type in an overload signature and its
+    /// default value in the implementation.
+    InconsistentOverloadDefault,
     /// Internal Pyrefly error.
     InternalError,
     /// Attempting to write an annotation that is invalid for some reason.
@@ -191,6 +195,8 @@ pub enum ErrorKind {
     InvalidTypeVar,
     /// An error caused by incorrect usage or definition of a TypeVarTuple.
     InvalidTypeVarTuple,
+    /// An error caused by a type variable being used in a position incompatible with its declared variance,
+    InvalidVariance,
     /// Attempting to use `yield` in a way that is not allowed.
     /// e.g. `yield from` with something that's not an iterable.
     InvalidYield,
@@ -213,6 +219,9 @@ pub enum ErrorKind {
     NoAccess,
     /// Attempting to call an overloaded function, but none of the signatures match.
     NoMatchingOverload,
+    /// The SCC fixpoint iteration did not converge within the maximum number of
+    /// iterations. The inferred type may be incorrect; adding annotations can help.
+    NonConvergentRecursion,
     /// Matching on an enum without covering all possible cases.
     NonExhaustiveMatch,
     /// Attempting to use something that isn't a type where a type is expected.
@@ -254,6 +263,8 @@ pub enum ErrorKind {
     UnexpectedKeyword,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,
+    /// Attempting to use a type checker directive without importing it from `typing`.
+    UnimportedDirective,
     /// Attempting to use a name that is not defined.
     UnknownName,
     /// Identity comparison (`is` or `is not`) between types that are provably disjoint
@@ -263,6 +274,8 @@ pub enum ErrorKind {
     /// This occurs when a return/yield follows a statement that always exits,
     /// such as return, raise, break, or continue.
     Unreachable,
+    /// `__all__` is defined but cannot be statically analyzed.
+    UnresolvableDunderAll,
     /// Protocols decorated with `@runtime_checkable` can be used in `isinstance` checks
     /// The runtime only checks that an attribute with that name is present, so the
     /// type checker must warn if the types are not compatible.
@@ -277,6 +290,11 @@ pub enum ErrorKind {
     UntypedImport,
     /// Result of async function call is never used or awaited
     UnusedCoroutine,
+    /// A suppression comment is unused (no error to suppress, or specific codes are unused)
+    UnusedIgnore,
+    /// The inferred variance of a type variable does not match its declared variance.
+    /// For example, a type variable used only in covariant positions in a protocol should be declared covariant.
+    VarianceMismatch,
 }
 
 impl std::str::FromStr for ErrorKind {
@@ -314,25 +332,40 @@ impl ErrorKind {
     pub fn default_severity(self) -> Severity {
         // IMPORTANT: When updating these, also update error-kinds.mdx in the docs
         match self {
-            ErrorKind::RevealType => Severity::Info,
             ErrorKind::Deprecated => Severity::Warn,
-            ErrorKind::RedundantCast => Severity::Warn,
-            ErrorKind::UnnecessaryComparison => Severity::Warn,
-            // TODO: up severity to Warn when https://github.com/facebook/pyrefly/issues/1950 is fixed
-            ErrorKind::UntypedImport => Severity::Ignore,
-            ErrorKind::NotRequiredKeyAccess => Severity::Ignore,
-            ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
             ErrorKind::ImplicitAbstractClass => Severity::Ignore,
             ErrorKind::ImplicitAny => Severity::Ignore,
+            ErrorKind::ImplicitImport => Severity::Warn,
+            ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::MissingOverrideDecorator => Severity::Ignore,
+            ErrorKind::MissingSource => Severity::Ignore,
+            ErrorKind::NonExhaustiveMatch => Severity::Warn,
+            ErrorKind::NonConvergentRecursion => Severity::Warn,
+            ErrorKind::NotRequiredKeyAccess => Severity::Ignore,
+            ErrorKind::OpenUnpacking => Severity::Ignore,
+            ErrorKind::RedundantCast => Severity::Warn,
+            ErrorKind::RedundantCondition => Severity::Warn,
+            ErrorKind::RevealType => Severity::Info,
+            ErrorKind::UnannotatedAttribute => Severity::Ignore,
             ErrorKind::UnannotatedParameter => Severity::Ignore,
             ErrorKind::UnannotatedReturn => Severity::Ignore,
-            ErrorKind::UnannotatedAttribute => Severity::Ignore,
-            ErrorKind::MissingSource => Severity::Ignore,
-            ErrorKind::MissingOverrideDecorator => Severity::Ignore,
-            ErrorKind::OpenUnpacking => Severity::Ignore,
-            ErrorKind::NonExhaustiveMatch => Severity::Warn,
+            ErrorKind::UnnecessaryComparison => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::UnresolvableDunderAll => Severity::Warn,
+            // TODO: up severity to Warn when https://github.com/facebook/pyrefly/issues/1950 is fixed
+            ErrorKind::UntypedImport => Severity::Ignore,
+            ErrorKind::UnusedIgnore => Severity::Ignore,
+            ErrorKind::VarianceMismatch => Severity::Warn,
             _ => Severity::Error,
         }
+    }
+
+    /// Returns true if this error kind is a type checker directive rather than
+    /// a real diagnostic. Directives bypass suppression, baseline exclusion,
+    /// and min-severity filtering, but can still be disabled via explicit
+    /// per-kind severity overrides (e.g. `--ignore reveal-type`).
+    pub fn is_directive(self) -> bool {
+        matches!(self, ErrorKind::RevealType)
     }
 
     /// Returns the public documentation URL for this error kind.
@@ -352,6 +385,7 @@ mod tests {
     use pulldown_cmark::HeadingLevel;
     use pulldown_cmark::Parser;
     use pulldown_cmark::Tag;
+    use pulldown_cmark::TagEnd;
 
     use super::*;
     #[test]
@@ -374,14 +408,17 @@ mod tests {
         let mut last_error_kind = None;
         for event in Parser::new(&doc_contents) {
             match event {
-                Event::End(Tag::Heading(HeadingLevel::H1, ..)) => {
+                Event::End(TagEnd::Heading(HeadingLevel::H1)) => {
                     // Don't start checking for error kinds until we get past the document title
                     start = true;
                 }
-                Event::Start(Tag::Heading(HeadingLevel::H2, ..)) => {
+                Event::Start(Tag::Heading {
+                    level: HeadingLevel::H2,
+                    ..
+                }) => {
                     in_header = true;
                 }
-                Event::End(Tag::Heading(HeadingLevel::H2, ..)) => {
+                Event::End(TagEnd::Heading(HeadingLevel::H2)) => {
                     in_header = false;
                 }
                 Event::Text(doc_error_kind) if start && in_header => {

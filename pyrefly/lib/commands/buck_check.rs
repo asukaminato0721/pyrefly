@@ -14,7 +14,7 @@ use clap::Parser;
 use dupe::Dupe;
 use pyrefly_build::source_db::SourceDatabase;
 use pyrefly_build::source_db::buck_check::BuckCheckSourceDatabase;
-use pyrefly_config::base::UntypedDefBehavior;
+use pyrefly_config::base::InferReturnTypes;
 use pyrefly_config::error::ErrorDisplayConfig;
 use pyrefly_config::error_kind::ErrorKind;
 use pyrefly_config::error_kind::Severity;
@@ -23,6 +23,7 @@ use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::fs_anyhow;
+use ruff_text_size::Ranged;
 use serde::Deserialize;
 use tracing::info;
 
@@ -32,6 +33,7 @@ use crate::config::finder::ConfigFinder;
 use crate::error::error::Error;
 use crate::error::legacy::LegacyErrors;
 use crate::state::require::Require;
+use crate::state::require::RequireLevels;
 use crate::state::state::State;
 
 /// Arguments for Buck-powered type checking.
@@ -44,6 +46,11 @@ pub struct BuckCheckArgs {
     /// Path to output JSON file containing Pyrefly type check results.
     #[arg(long = "output", short = 'o', value_name = "FILE")]
     output_path: Option<PathBuf>,
+
+    /// Minimum severity level for errors to be displayed.
+    /// Errors below this severity will not be shown. Defaults to "error".
+    #[arg(long, value_enum)]
+    min_severity: Option<Severity>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -76,9 +83,11 @@ fn compute_errors(sys_info: SysInfo, sourcedb: impl SourceDatabase + 'static) ->
     // Modifications to make it more like Pyre.
     // Should probably figure out how to move these into PACKAGE files, or put them in Pyrefly.toml.
     config.root.permissive_ignores = Some(true);
-    config.root.untyped_def_behavior = Some(UntypedDefBehavior::CheckAndInferReturnAny);
+    config.root.check_unannotated_defs = Some(false);
+    config.root.infer_return_types = Some(InferReturnTypes::Annotated);
     let mut error_config = ErrorDisplayConfig::default();
     error_config.set_error_severity(ErrorKind::Deprecated, Severity::Ignore);
+    error_config.set_error_severity(ErrorKind::UnusedIgnore, Severity::Info);
     config.root.errors = Some(error_config);
 
     config.configure();
@@ -87,16 +96,33 @@ fn compute_errors(sys_info: SysInfo, sourcedb: impl SourceDatabase + 'static) ->
     let state = State::new(ConfigFinder::new_constant(config));
     state.run(
         &modules_to_check,
-        Require::Errors,
-        Require::Exports,
+        RequireLevels {
+            specified: Require::Errors,
+            default: Require::Exports,
+        },
+        None,
         None,
         None,
     );
     let transaction = state.transaction();
-    transaction
-        .get_errors(&modules_to_check)
-        .collect_errors()
-        .shown
+    let errors = transaction.get_errors(&modules_to_check);
+
+    // Collect main errors (done once, shared with unused ignore check)
+    let collected = errors.collect_errors();
+    let unused = errors.collect_unused_ignore_errors_for_display(&collected);
+    let mut output_errors = collected.ordinary;
+    output_errors.extend(collected.directives);
+    output_errors.extend(unused.ordinary);
+    output_errors.sort_by_cached_key(|e| {
+        (
+            e.module().name(),
+            e.path().dupe(),
+            e.range().start(),
+            e.range().end(),
+        )
+    });
+
+    output_errors
 }
 
 fn write_output_to_file(path: &Path, legacy_errors: &LegacyErrors) -> anyhow::Result<()> {
@@ -133,8 +159,13 @@ impl BuckCheckArgs {
             sys_info.dupe(),
         )?;
         let type_errors = compute_errors(sys_info, sourcedb);
-        info!("Found {} type errors", type_errors.len());
-        write_output(&type_errors, self.output_path.as_deref())?;
+        let min_severity = self.min_severity.unwrap_or(Severity::Error);
+        let displayed_errors: Vec<Error> = type_errors
+            .into_iter()
+            .filter(|e| e.error_kind().is_directive() || e.severity() >= min_severity)
+            .collect();
+        info!("Found {} type errors", displayed_errors.len());
+        write_output(&displayed_errors, self.output_path.as_deref())?;
         Ok(CommandExitStatus::Success)
     }
 }

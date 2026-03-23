@@ -660,7 +660,7 @@ testcase!(
     test_bad_keyword,
     r#"
 from dataclasses import dataclass
-@dataclass(flibbertigibbet=True)  # E: No matching overload found
+@dataclass(flibbertigibbet=True)  # E: Unexpected keyword argument `flibbertigibbet`
 class C:
     pass
     "#,
@@ -789,6 +789,21 @@ import dataclasses
 class C:
     replace: ClassVar = dataclasses.replace
 C()
+    "#,
+);
+
+testcase!(
+    test_frozen_classvar_class_assignment,
+    r#"
+import dataclasses
+from typing import ClassVar
+
+@dataclasses.dataclass(frozen=True)
+class C:
+    x: ClassVar[bool] = True
+
+    def set_x(self) -> None:
+        self.__class__.x = False
     "#,
 );
 
@@ -1497,7 +1512,7 @@ class Bad1:
     x: int
     y: InitVar[str]
     z: InitVar[bytes]
-    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `BoundMethod[Bad1, (self: Bad1, y: bytes, z: str) -> None]` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
+    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `(self: Bad1, y: bytes, z: str) -> None` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
 @dataclass
 class Bad2:
     x: int
@@ -1517,7 +1532,7 @@ class Desc:
     def __set__(self, obj, value: str) -> None: ...
 @dataclass
 class C:
-    x: Desc = Desc()  # E: Data descriptor `x` has incompatible default
+    x: Desc = Desc()  # E: Cannot set field `x` to data descriptor `Desc` with inconsistent types
 c = C('')
 assert_type(c.x, int)
 c.x = 'cat'
@@ -1654,7 +1669,7 @@ class DescB:
 
 @dataclass
 class C:
-    x: DescA = DescA()  # E: Non-data descriptor `x` in dataclass is unsound. The dataclass __init__ writes to the instance dict, shadowing the descriptor. Add a __set__ method to make it a data descriptor.
+    x: DescA = DescA()  # E: Cannot set field `x` to non-data descriptor `DescA`\n  Hint: add a `__set__` method to make `DescA` a data descriptor
     y: DescB = DescB()
 
 # Regardless of any errors, any descriptors assigned in the class body do have default values.
@@ -1683,7 +1698,7 @@ class DescB:
 @dataclass
 class C:
     x: DescA = DescA()
-    y: DescB = DescB()  # E: Data descriptor `y` has incompatible default: `__get__` returns `int` which is not assignable to `__set__` value type `str`. The class-level descriptor value cannot be used as a default.
+    y: DescB = DescB()  # E: Cannot set field `y` to data descriptor `DescB` with inconsistent types\n  Return type `int` of `DescB.__get__` is not assignable to value type `str` of `DescB.__set__`
 
 # The field has a default, and accepts the `__set__` type if provided.
 c = C()
@@ -1693,4 +1708,80 @@ c = C(x=42, y='42')
 assert_type(c.x, int)
 assert_type(c.y, int)
     "#,
+);
+
+testcase!(
+    bug = "conformance: Dataclass with generic non-data descriptor should work correctly",
+    test_dataclass_generic_descriptor_conformance,
+    r#"
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar, assert_type, overload
+
+T = TypeVar("T")
+
+class Desc2(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: Any) -> list[T]: ...
+    @overload
+    def __get__(self, instance: object, owner: Any) -> T: ...
+    def __get__(self, instance: object | None, owner: Any) -> list[T] | T: ...
+
+@dataclass
+class DC2:
+    x: Desc2[int]
+    y: Desc2[str]
+    z: Desc2[str] = Desc2()  # E: Cannot set field `z` to non-data descriptor `Desc2`
+
+# pyrefly incorrectly returns Desc2[T] instead of list[T] for class attribute access
+assert_type(DC2.x, list[int])  # E: assert_type(Desc2[int], list[int]) failed
+assert_type(DC2.y, list[str])  # E: assert_type(Desc2[str], list[str]) failed
+
+dc2 = DC2(Desc2(), Desc2(), Desc2())
+# pyrefly incorrectly returns Desc2[T] instead of T for instance attribute access
+assert_type(dc2.x, int)  # E: assert_type(Desc2[int], int) failed
+assert_type(dc2.y, str)  # E: assert_type(Desc2[str], str) failed
+"#,
+);
+
+testcase!(
+    test_dataclass_slots_undeclared_attr_conformance,
+    r#"
+from dataclasses import dataclass
+
+@dataclass(slots=True)
+class DC2:
+    x: int
+
+    def __init__(self):
+        self.x = 3
+        # should error: y is not in slots
+        self.y = 3  # E: not declared in `__slots__`
+
+@dataclass(slots=False)
+class DC3:
+    x: int
+    __slots__ = ("x",)
+
+    def __init__(self):
+        self.x = 3
+        # should error: y is not in slots
+        self.y = 3  # E: not declared in `__slots__`
+"#,
+);
+
+testcase!(
+    test_dataclass_protocol_dataclass_fields,
+    r#"
+from dataclasses import dataclass, Field
+from typing import Any, ClassVar, Protocol
+
+class P(Protocol):
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
+@dataclass
+class C(P):
+    x: int
+
+C(42)
+"#,
 );

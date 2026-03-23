@@ -14,10 +14,10 @@ use anyhow::Context as _;
 use dupe::Dupe as _;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
-use pyrefly_python::module_path::ModulePathBuf;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::fs_anyhow;
+use pyrefly_util::interned_path::InternedPath;
 use pyrefly_util::telemetry::TelemetrySourceDbRebuildInstanceStats;
 use pyrefly_util::watch_pattern::WatchPattern;
 use starlark_map::small_map::SmallMap;
@@ -59,8 +59,14 @@ fn read_manifest_file_data(data: &[u8]) -> anyhow::Result<Vec<ManifestItem>> {
                 // We deliberately stick with relative paths, as sometimes we are run on RE,
                 // so the absolute path on RE will not match the users absolute path.
                 let path = PathBuf::from(raw_item[1].clone());
-                if path.iter().any(|x| x == "pyre_buck_typeshed") {
-                    // We sometimes get Pyre typeshed files in the manifest, which don't match the versions we expect.
+                if path
+                    .iter()
+                    .any(|x| x == "pyre_buck_typeshed" || x == "__flattened__")
+                {
+                    // Filter out Pyre typeshed files from the manifest. These don't
+                    // match the versions Pyrefly expects and cause spurious errors.
+                    // This catches both the default target (pyre_buck_typeshed:flattened)
+                    // and user overrides (e.g. tools/pyre/stubs/typeshed/typeshed:flattened).
                     // Once Pyre is retired, we can remove this filtering.
                     continue;
                 }
@@ -176,13 +182,13 @@ impl SourceDatabase for BuckCheckSourceDatabase {
 
     fn query_source_db(
         &self,
-        _: SmallSet<ModulePathBuf>,
+        _: SmallSet<InternedPath>,
         _: bool,
     ) -> (anyhow::Result<bool>, TelemetrySourceDbRebuildInstanceStats) {
         (Ok(false), TelemetrySourceDbRebuildInstanceStats::default())
     }
 
-    fn get_paths_to_watch(&self) -> SmallSet<WatchPattern<'_>> {
+    fn get_paths_to_watch(&self) -> SmallSet<WatchPattern> {
         SmallSet::new()
     }
 
@@ -190,7 +196,7 @@ impl SourceDatabase for BuckCheckSourceDatabase {
         None
     }
 
-    fn get_generated_files(&self) -> SmallSet<ModulePathBuf> {
+    fn get_generated_files(&self) -> SmallSet<InternedPath> {
         SmallSet::new()
     }
 }

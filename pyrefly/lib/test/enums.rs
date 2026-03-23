@@ -24,8 +24,10 @@ class E(enum.Enum):
         "#,
     );
     let cls = get_class("E", &handle, &state);
-    let fields = cls
-        .fields()
+    let bindings = state.transaction().get_bindings(&handle).unwrap();
+    let class_fields = bindings.get_class_fields(cls.index()).unwrap();
+    let fields = class_fields
+        .names()
         .map(|f| f.as_str())
         .sorted()
         .collect::<Vec<_>>();
@@ -222,7 +224,7 @@ class MyEnum(Enum):
     def D(self) -> None: pass
 
 reveal_type(MyEnum.A)  # E: revealed type: Literal[MyEnum.A]
-reveal_type(MyEnum.B)  # E: revealed type: nonmember[int]
+reveal_type(MyEnum.B)  # E: revealed type: int
 reveal_type(MyEnum.C)  # E: revealed type: Literal[MyEnum.C]
 reveal_type(MyEnum.D)  # E: revealed type: (self: MyEnum) -> None
 "#,
@@ -476,6 +478,24 @@ class A(enum.IntEnum):
         return member
 
 assert_type(A.B, Literal[A.B])
+    "#,
+);
+
+testcase!(
+    test_intenum_numeric_tower,
+    r#"
+import enum
+from typing import assert_type
+
+class Period(enum.IntEnum):
+    DAY = 24
+
+def takes_float(x: float) -> float:
+    return x
+
+assert_type(takes_float(Period.DAY), float)
+assert_type(takes_float(24), float)
+assert_type(takes_float(24.0), float)
     "#,
 );
 
@@ -734,6 +754,55 @@ class IntEnum(int, Enum):
 );
 
 testcase!(
+    test_enum_call_uses_metaclass_signature,
+    r#"
+from enum import Enum
+from typing import Callable, assert_type
+
+class SeFileType(Enum):
+    ALL = ("a", "all files")
+    REGULAR = ("f", "regular file")
+    DIRECTORY = ("d", "directory")
+
+    def __new__(cls, code: str, description: str) -> "SeFileType":
+        obj = object.__new__(cls)
+        obj._value_ = code
+        return obj
+
+    @classmethod
+    def from_code(cls, code: str) -> "SeFileType":
+        assert_type(cls(code), SeFileType)
+        return cls(code)
+
+assert_type(SeFileType("a"), SeFileType)
+constructor: Callable[[str], SeFileType] = SeFileType
+    "#,
+);
+
+testcase!(
+    test_enum_call_with_self_type,
+    r#"
+from enum import Enum
+from typing import Self, assert_type
+
+class SeFileType(Enum):
+    ALL = ("a", "all files")
+    REGULAR = ("f", "regular file")
+
+    def __new__(cls, code: str, description: str) -> "SeFileType":
+        obj = object.__new__(cls)
+        obj._value_ = code
+        return obj
+
+    @classmethod
+    def from_code(cls, code: str) -> Self:
+        assert_type(cls, type[Self])
+        assert_type(cls(code), Self)
+        return cls(code)
+    "#,
+);
+
+testcase!(
     test_enum_alias,
     r#"
 from typing import assert_type, Literal
@@ -744,5 +813,32 @@ class TrafficLight(Enum):
     AMBER = YELLOW  # Alias for YELLOW
 
 assert_type(TrafficLight.AMBER, Literal[TrafficLight.YELLOW])
+    "#,
+);
+
+testcase!(
+    test_illegal_unpacking_in_def,
+    r#"
+from enum import Enum
+def f() -> dict: ...
+X = Enum("X", {'FOO': 1, **f()})  # E: Unpacking is not supported
+    "#,
+);
+
+testcase!(
+    test_enum_classmethod,
+    r#"
+from enum import Enum
+
+class Foo(str, Enum):
+    A = "a"
+    B = "b"
+
+    @classmethod
+    def from_dict(cls, default=None):
+        if default is None:
+            default = cls.A
+        return cls(default)
+Foo.from_dict({})
     "#,
 );

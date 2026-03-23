@@ -16,29 +16,7 @@ use serde_json::Value;
 use serde_repr::*;
 
 use crate::report::glean::schema::*;
-
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct XRefsByTarget {
-    pub id: u64,
-    pub key: Box<XRefsByTarget_key>,
-}
-
-impl XRefsByTarget {
-    pub fn GLEAN_name() -> String {
-        String::from("python.xrefs.XRefsByTarget.1")
-    }
-
-    pub fn new(target: python::DeclarationLocation, file: src::File, spans: Vec<src::ByteSpan>) -> Self {
-        XRefsByTarget {
-            id: 0,
-            key: Box::new(XRefsByTarget_key {
-                target,
-                file,
-                spans
-            }),
-        }
-    }
-}
+use crate::report::glean::facts::GleanPredicate;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct XRefsByFile {
@@ -47,10 +25,6 @@ pub struct XRefsByFile {
 }
 
 impl XRefsByFile {
-    pub fn GLEAN_name() -> String {
-        String::from("python.xrefs.XRefsByFile.1")
-    }
-
     pub fn new(file: src::File, xrefs: Vec<XRef>) -> Self {
         XRefsByFile {
             id: 0,
@@ -62,11 +36,11 @@ impl XRefsByFile {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct XRefsByTarget_key {
-    pub target: python::DeclarationLocation,
-    pub file: src::File,
-    pub spans: Vec<src::ByteSpan>,
+impl GleanPredicate for XRefsByFile {
+    fn GLEAN_name() -> String {
+        String::from("python.xrefs.XRefsByFile.1")
+    }
+
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

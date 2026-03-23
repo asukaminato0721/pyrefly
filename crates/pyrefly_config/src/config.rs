@@ -32,7 +32,6 @@ use pyrefly_python::ignore::Tool;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
-use pyrefly_python::module_path::ModulePathBuf;
 use pyrefly_python::sys_info::PythonPlatform;
 use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_python::sys_info::SysInfo;
@@ -42,6 +41,7 @@ use pyrefly_util::fs_anyhow;
 use pyrefly_util::globs::FilteredGlobs;
 use pyrefly_util::globs::Glob;
 use pyrefly_util::globs::Globs;
+use pyrefly_util::interned_path::InternedPath;
 use pyrefly_util::lock::RwLock;
 use pyrefly_util::prelude::VecExt;
 use pyrefly_util::telemetry::SubTaskTelemetry;
@@ -57,17 +57,19 @@ use tracing::debug;
 use tracing::error;
 
 use crate::base::ConfigBase;
-use crate::base::UntypedDefBehavior;
+use crate::base::InferReturnTypes;
+use crate::base::RecursionLimitConfig;
 use crate::environment::environment::PythonEnvironment;
 use crate::environment::interpreters::Interpreters;
 use crate::error::ErrorConfig;
 use crate::error::ErrorDisplayConfig;
+use crate::error_kind::Severity;
 use crate::finder::ConfigError;
 use crate::module_wildcard::Match;
 use crate::pyproject::PyProject;
 
 pub static GENERATED_FILE_CONFIG_OVERRIDE: LazyLock<
-    RwLock<SmallMap<ModulePathBuf, ArcId<ConfigFile>>>,
+    RwLock<SmallMap<InternedPath, ArcId<ConfigFile>>>,
 > = LazyLock::new(|| RwLock::new(SmallMap::new()));
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
@@ -89,6 +91,13 @@ pub enum ConfigSource {
     /// This config was read from a file
     File(PathBuf),
     /// This config was synthesized with path-specific defaults, based on the location of a
+    /// `pyproject.toml` file that lacks `[tool.pyrefly]` but has sections for other Python
+    /// tools (e.g., `[tool.ruff]`, `[tool.mypy]`, `[tool.pyright]`), making it a strong
+    /// signal that this directory is a Python project root. Treated like `Marker` for
+    /// downstream behavior, but given higher priority during config discovery to prevent
+    /// a parent directory's config from shadowing a nested Python project.
+    PythonToolMarker(PathBuf),
+    /// This config was synthesized with path-specific defaults, based on the location of a
     /// "marker" file that contains no pyrefly configuration but marks a project root (e.g., a
     /// `pyproject.toml` file with no `[tool.pyrefly]` section)
     Marker(PathBuf),
@@ -99,7 +108,7 @@ pub enum ConfigSource {
 impl ConfigSource {
     pub fn root(&self) -> Option<&Path> {
         match &self {
-            Self::File(path) | Self::Marker(path) => path.parent(),
+            Self::File(path) | Self::PythonToolMarker(path) | Self::Marker(path) => path.parent(),
             Self::Synthetic => None,
         }
     }
@@ -515,6 +524,11 @@ pub struct ConfigFile {
     #[derivative(PartialEq = "ignore")]
     pub source_db: Option<ArcId<Box<dyn SourceDatabase>>>,
 
+    /// Minimum severity level for errors to be displayed.
+    /// Errors below this severity will not be shown. Defaults to "error".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<Severity>,
+
     /// Should we let Pyrefly try to index the project's files? Disabling this
     /// may speed up LSP operations on large projects.
     #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
@@ -548,6 +562,7 @@ impl Default for ConfigFile {
             use_ignore_files: true,
             typeshed_path: None,
             baseline: None,
+            min_severity: None,
             skip_lsp_config_indexing: false,
         }
     }
@@ -780,12 +795,14 @@ impl ConfigFile {
         found_match == Some(true)
     }
 
-    pub fn untyped_def_behavior(&self, path: &Path) -> UntypedDefBehavior {
-        self.get_from_sub_configs(ConfigBase::get_untyped_def_behavior, path)
-            .unwrap_or_else(||
-                 // we can use unwrap here, because the value in the root config must
-                 // be set in `ConfigFile::configure()`.
-                 self.root.untyped_def_behavior.unwrap())
+    pub fn check_unannotated_defs(&self, path: &Path) -> bool {
+        self.get_from_sub_configs(ConfigBase::get_check_unannotated_defs, path)
+            .unwrap_or_else(|| self.root.check_unannotated_defs.unwrap())
+    }
+
+    pub fn infer_return_types(&self, path: &Path) -> InferReturnTypes {
+        self.get_from_sub_configs(ConfigBase::get_infer_return_types, path)
+            .unwrap_or_else(|| self.root.infer_return_types.unwrap())
     }
 
     pub fn disable_type_errors_in_ide(&self, path: &Path) -> bool {
@@ -809,12 +826,34 @@ impl ConfigFile {
                  self.root.infer_with_first_use.unwrap())
     }
 
+    pub fn tensor_shapes(&self, path: &Path) -> bool {
+        self.get_from_sub_configs(ConfigBase::get_tensor_shapes, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.tensor_shapes.unwrap())
+    }
+
+    pub fn strict_callable_subtyping(&self, path: &Path) -> bool {
+        self.get_from_sub_configs(ConfigBase::get_strict_callable_subtyping, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.strict_callable_subtyping.unwrap())
+    }
+
     pub fn enabled_ignores(&self, path: &Path) -> &SmallSet<Tool> {
         self.get_from_sub_configs(ConfigBase::get_enabled_ignores, path)
             .unwrap_or_else(||
                  // we can use unwrap here, because the value in the root config must
                  // be set in `ConfigFile::configure()`.
                  self.root.enabled_ignores.as_ref().unwrap())
+    }
+
+    /// Get the recursion limit configuration.
+    /// Returns None if not set (disabled).
+    pub fn recursion_limit_config(&self) -> Option<RecursionLimitConfig> {
+        ConfigBase::get_recursion_limit_config(&self.root)
     }
 
     pub fn get_error_config(&self, path: &Path) -> ErrorConfig<'_> {
@@ -857,16 +896,23 @@ impl ConfigFile {
         {
             Some(handle) => handle.dupe(),
             None => {
+                // Check site-package paths before search paths so that files
+                // in site-packages (which live under the project root) get their
+                // module name from the more specific site-packages prefix rather
+                // than from the project root.
                 let module_kind = if fallback_search_path.is_empty() {
-                    let name = ModuleName::from_path(module_path.as_path(), self.search_path())
-                        .unwrap_or_else(ModuleName::unknown);
+                    let name = ModuleName::from_path(
+                        module_path.as_path(),
+                        self.search_path().chain(self.site_package_path()),
+                    )
+                    .unwrap_or_else(ModuleName::unknown);
                     ModuleNameWithKind::guaranteed(name)
                 } else {
                     let fallback_paths =
                         fallback_search_path.for_directory(Some(module_path.as_path()));
                     ModuleName::from_path_with_fallback(
                         module_path.as_path(),
-                        self.search_path(),
+                        self.search_path().chain(self.site_package_path()),
                         fallback_paths.iter(),
                     )
                     .unwrap_or(ModuleNameWithKind::guaranteed(ModuleName::unknown()))
@@ -879,23 +925,34 @@ impl ConfigFile {
     /// Get glob patterns that should be watched by a file watcher.
     /// We return a tuple of root (non-pattern part of the path) and a pattern.
     /// If pattern is None, then the root should contain the whole path to watch.
-    pub fn get_paths_to_watch(&self) -> Vec<WatchPattern<'_>> {
-        let mut result = Vec::new();
-        if let Some(source_db) = &self.source_db {
-            result.extend(source_db.get_paths_to_watch())
+    pub fn get_paths_to_watch(configs: &SmallSet<ArcId<ConfigFile>>) -> SmallSet<WatchPattern> {
+        let mut result = SmallSet::new();
+        let mut source_dbs = SmallSet::new();
+        for config in configs {
+            if let Some(source_db) = &config.source_db {
+                source_dbs.insert(source_db);
+            }
+            if let Some(config_root) = config.source.root() {
+                let config_root = InternedPath::from_path(config_root);
+                ConfigFile::CONFIG_FILE_NAMES.iter().for_each(|config| {
+                    result.insert(WatchPattern::root(config_root, format!("**/{config}")));
+                });
+            }
+            config
+                .search_path()
+                .chain(config.site_package_path())
+                .cartesian_product(PYTHON_EXTENSIONS.iter().chain(COMPILED_FILE_SUFFIXES))
+                .for_each(|(s, suffix)| {
+                    result.insert(WatchPattern::root(
+                        InternedPath::from_path(s),
+                        format!("**/*.{suffix}"),
+                    ));
+                });
         }
-        let config_root = self.source.root();
-        if let Some(config_root) = config_root {
-            Self::CONFIG_FILE_NAMES.iter().for_each(|config| {
-                result.push(WatchPattern::root(config_root, format!("**/{config}")));
-            });
+
+        for source_db in source_dbs {
+            result.extend(source_db.get_paths_to_watch());
         }
-        self.search_path()
-            .chain(self.site_package_path())
-            .cartesian_product(PYTHON_EXTENSIONS.iter().chain(COMPILED_FILE_SUFFIXES))
-            .for_each(|(s, suffix)| {
-                result.push(WatchPattern::root(s, format!("**/*.{suffix}")));
-            });
         result
     }
 
@@ -1039,8 +1096,11 @@ impl ConfigFile {
             self.root.ignore_missing_imports = Some(Default::default());
         }
 
-        if self.root.untyped_def_behavior.is_none() {
-            self.root.untyped_def_behavior = Some(Default::default());
+        // Resolve the deprecated untyped_def_behavior into the two new fields
+        // for both root and sub-configs.
+        self.root.resolve_legacy_untyped_def_behavior();
+        for sub in &mut self.sub_configs {
+            sub.settings.resolve_legacy_untyped_def_behavior();
         }
 
         if self.root.ignore_errors_in_generated_code.is_none() {
@@ -1049,6 +1109,14 @@ impl ConfigFile {
 
         if self.root.infer_with_first_use.is_none() {
             self.root.infer_with_first_use = Some(true);
+        }
+
+        if self.root.tensor_shapes.is_none() {
+            self.root.tensor_shapes = Some(false);
+        }
+
+        if self.root.strict_callable_subtyping.is_none() {
+            self.root.strict_callable_subtyping = Some(false);
         }
 
         let tools_from_permissive_ignores = match self.root.permissive_ignores {
@@ -1095,36 +1163,6 @@ impl ConfigFile {
                 Err(error) => Some(error),
             }
         };
-
-        // TODO(connernilsen): remove once PyTorch performs an upgrade
-        #[allow(unexpected_cfgs)]
-        if cfg!(fbcode_build) {
-            let root = match &self.source {
-                ConfigSource::File(path) => {
-                    let mut root = path.to_path_buf();
-                    root.pop();
-                    Some(root)
-                }
-                _ => None,
-            };
-            if let Some(root) = root
-                && root.ends_with("fbsource/fbcode/caffe2")
-            {
-                self.build_system = Some(BuildSystem::new(
-                    Some(".pyrelsp".to_owned()),
-                    Some(vec![
-                        "--oncall=pyre".to_owned(),
-                        "--client-metadata=id=pyrefly".to_owned(),
-                    ]),
-                    true,
-                    vec![
-                        "python/typeshed_experimental".into(),
-                        "python/typeshed_internal".into(),
-                        "python/pyre_temporary_stubs".into(),
-                    ],
-                ));
-            }
-        }
 
         if let Some(build_system) = &mut self.build_system
             && let Some(error) = configure_source_db(build_system)
@@ -1204,25 +1242,35 @@ impl ConfigFile {
     }
 
     pub fn from_file(config_path: &Path) -> (ConfigFile, Vec<ConfigError>) {
-        fn read_path(config_path: &Path) -> anyhow::Result<Option<ConfigFile>> {
+        /// Read a config path and determine both the config content (if any)
+        /// and the appropriate `ConfigSource` classification.
+        fn read_path(config_path: &Path) -> anyhow::Result<(Option<ConfigFile>, ConfigSource)> {
             let config_str = fs_anyhow::read_to_string(config_path)?;
+            let path = config_path.to_path_buf();
             if config_path.file_name() == Some(OsStr::new(ConfigFile::PYPROJECT_FILE_NAME)) {
-                Ok(ConfigFile::parse_pyproject_toml(&config_str)?)
+                let (config, has_python_tools) = ConfigFile::parse_pyproject_toml(&config_str)?;
+                match config {
+                    Some(config) => Ok((Some(config), ConfigSource::File(path))),
+                    None if has_python_tools => Ok((None, ConfigSource::PythonToolMarker(path))),
+                    None => Ok((None, ConfigSource::Marker(path))),
+                }
             } else if config_path.file_name().is_some_and(|fi| {
                 fi.to_str()
                     .is_some_and(|fi| ConfigFile::ADDITIONAL_ROOT_FILE_NAMES.contains(&fi))
             }) {
                 // We'll create a file with default options but treat config_root as the project root.
-                Ok(None)
+                Ok((None, ConfigSource::Marker(path)))
             } else {
-                Ok(Some(ConfigFile::parse_config(&config_str)?))
+                Ok((
+                    Some(ConfigFile::parse_config(&config_str)?),
+                    ConfigSource::File(path),
+                ))
             }
         }
         fn f(config_path: &Path) -> (ConfigFile, Vec<ConfigError>) {
             let mut errors = Vec::new();
             let (maybe_config, config_source) = match read_path(config_path) {
-                Ok(Some(config)) => (Some(config), ConfigSource::File(config_path.to_path_buf())),
-                Ok(None) => (None, ConfigSource::Marker(config_path.to_path_buf())),
+                Ok(result) => result,
                 Err(e) => {
                     errors.push(ConfigError::error(e));
                     (None, ConfigSource::File(config_path.to_path_buf()))
@@ -1276,10 +1324,14 @@ impl ConfigFile {
         toml::from_str::<ConfigFile>(config_str).map_err(|err| anyhow::Error::msg(err.to_string()))
     }
 
-    fn parse_pyproject_toml(config_str: &str) -> anyhow::Result<Option<ConfigFile>> {
-        Ok(toml::from_str::<PyProject>(config_str)
-            .map_err(|err| anyhow::Error::msg(err.to_string()))?
-            .pyrefly())
+    /// Parse a pyproject.toml file. Returns a tuple of:
+    /// - `Option<ConfigFile>`: the pyrefly config, if `[tool.pyrefly]` was present
+    /// - `bool`: whether Python tool sections like `[tool.ruff]` were detected
+    fn parse_pyproject_toml(config_str: &str) -> anyhow::Result<(Option<ConfigFile>, bool)> {
+        let pyproject = toml::from_str::<PyProject>(config_str)
+            .map_err(|err| anyhow::Error::msg(err.to_string()))?;
+        let has_python_tools = pyproject.has_python_tools();
+        Ok((pyproject.pyrefly(), has_python_tools))
     }
 }
 
@@ -1338,6 +1390,7 @@ mod tests {
 
     use super::*;
     use crate::base::ExtraConfigs;
+    use crate::base::UntypedDefBehavior;
     use crate::error_kind::ErrorKind;
     use crate::error_kind::Severity;
     use crate::module_wildcard::ModuleWildcard;
@@ -1372,6 +1425,7 @@ mod tests {
              ignore-missing-imports = []
              ignore-errors-in-generated-code = false
              infer-with-first-use = false
+             strict-callable-subtyping = false
              [sub-config.errors]
              assert-type = false
              invalid-yield = false
@@ -1424,11 +1478,17 @@ mod tests {
                     disable_type_errors_in_ide: None,
                     ignore_errors_in_generated_code: Some(true),
                     infer_with_first_use: None,
+                    strict_callable_subtyping: None,
+                    tensor_shapes: None,
                     replace_imports_with_any: Some(vec![ModuleWildcard::new("fibonacci").unwrap()]),
                     ignore_missing_imports: Some(vec![ModuleWildcard::new("sprout").unwrap()]),
                     untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
+                    check_unannotated_defs: None,
+                    infer_return_types: None,
                     permissive_ignores: None,
                     enabled_ignores: None,
+                    recursion_depth_limit: None,
+                    recursion_overflow_handler: None,
                 },
                 source_db: Default::default(),
                 sub_configs: vec![SubConfig {
@@ -1442,15 +1502,22 @@ mod tests {
                         disable_type_errors_in_ide: None,
                         ignore_errors_in_generated_code: Some(false),
                         infer_with_first_use: Some(false),
+                        strict_callable_subtyping: Some(false),
+                        tensor_shapes: None,
                         replace_imports_with_any: Some(Vec::new()),
                         ignore_missing_imports: Some(Vec::new()),
                         untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnAny),
+                        check_unannotated_defs: None,
+                        infer_return_types: None,
                         permissive_ignores: None,
                         enabled_ignores: None,
+                        recursion_depth_limit: None,
+                        recursion_overflow_handler: None,
                     }
                 }],
                 typeshed_path: None,
                 baseline: None,
+                min_severity: None,
                 skip_lsp_config_indexing: false,
             }
         );
@@ -1539,6 +1606,7 @@ mod tests {
                  "#;
         let config = ConfigFile::parse_pyproject_toml(config_str)
             .unwrap()
+            .0
             .unwrap();
         assert_eq!(
             config,
@@ -1569,8 +1637,9 @@ mod tests {
     #[test]
     fn deserialize_pyproject_toml_defaults() {
         let config_str = "";
-        let config = ConfigFile::parse_pyproject_toml(config_str).unwrap();
+        let (config, has_python_tools) = ConfigFile::parse_pyproject_toml(config_str).unwrap();
         assert!(config.is_none());
+        assert!(!has_python_tools);
     }
 
     #[test]
@@ -1586,6 +1655,7 @@ mod tests {
         "#;
         let config = ConfigFile::parse_pyproject_toml(config_str)
             .unwrap()
+            .0
             .unwrap();
         assert_eq!(
             config,
@@ -1618,8 +1688,9 @@ mod tests {
                  [tool.pysa]
                  pysa_value = 2
                      ";
-        let config = ConfigFile::parse_pyproject_toml(config_str).unwrap();
+        let (config, has_python_tools) = ConfigFile::parse_pyproject_toml(config_str).unwrap();
         assert!(config.is_none());
+        assert!(!has_python_tools);
     }
 
     #[test]
@@ -1636,6 +1707,7 @@ mod tests {
                          "#;
         let config = ConfigFile::parse_pyproject_toml(config_str)
             .unwrap()
+            .0
             .unwrap();
         assert_eq!(
             config.root.extras.0,
@@ -1684,6 +1756,7 @@ mod tests {
             }],
             typeshed_path: Some(PathBuf::from(typeshed)),
             baseline: Some(PathBuf::from("baseline.json")),
+            min_severity: None,
             skip_lsp_config_indexing: false,
         };
 
@@ -1743,6 +1816,7 @@ mod tests {
             }],
             typeshed_path: Some(expected_typeshed),
             baseline: Some(test_path.join("baseline.json")),
+            min_severity: None,
             skip_lsp_config_indexing: false,
         };
         assert_eq!(config, expected_config);
@@ -1823,12 +1897,18 @@ baseline = "baseline.json"
                 replace_imports_with_any: Some(vec![ModuleWildcard::new("root").unwrap()]),
                 ignore_missing_imports: None,
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
+                check_unannotated_defs: None,
+                infer_return_types: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),
+                strict_callable_subtyping: Some(false),
+                tensor_shapes: None,
                 extras: Default::default(),
                 permissive_ignores: Some(false),
                 enabled_ignores: None,
+                recursion_depth_limit: None,
+                recursion_overflow_handler: None,
             },
             sub_configs: vec![
                 SubConfig {
@@ -2130,12 +2210,18 @@ baseline = "baseline.json"
                 ]),
                 ignore_missing_imports: None,
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
+                check_unannotated_defs: None,
+                infer_return_types: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),
+                strict_callable_subtyping: Some(false),
+                tensor_shapes: None,
                 extras: Default::default(),
                 permissive_ignores: Some(false),
                 enabled_ignores: None,
+                recursion_depth_limit: None,
+                recursion_overflow_handler: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -2162,12 +2248,18 @@ baseline = "baseline.json"
                 ]),
                 ignore_missing_imports: None,
                 untyped_def_behavior: Some(UntypedDefBehavior::CheckAndInferReturnType),
+                check_unannotated_defs: None,
+                infer_return_types: None,
                 disable_type_errors_in_ide: Some(true),
                 ignore_errors_in_generated_code: Some(false),
                 infer_with_first_use: Some(true),
+                strict_callable_subtyping: Some(false),
+                tensor_shapes: None,
                 extras: Default::default(),
                 permissive_ignores: Some(false),
                 enabled_ignores: None,
+                recursion_depth_limit: None,
+                recursion_overflow_handler: None,
             },
             sub_configs: vec![],
             ..Default::default()
