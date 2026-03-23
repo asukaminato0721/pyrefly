@@ -1671,23 +1671,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             sig.ret = self.heap.mk_any_implicit();
             sig
         };
-        // Collect param name -> default map from implementation so we can check for
-        // inconsistencies between the default and the param type in overloads.
-        let mut defaults = match &impl_sig.params {
-            Params::List(params) => params
-                .items()
-                .iter()
-                .filter_map(|param| match param {
-                    Param::PosOnly(Some(name), _, Required::Optional(Some(default)))
-                    | Param::Pos(name, _, Required::Optional(Some(default)))
-                    | Param::KwOnly(name, _, Required::Optional(Some(default))) => {
-                        Some((name, default))
-                    }
-                    _ => None,
-                })
-                .collect::<SmallMap<_, _>>(),
-            _ => SmallMap::new(),
-        };
         for (range, overload) in overloads.iter() {
             let (overload_tparams, original_overload_func) = match overload {
                 OverloadType::Function(func) => (None, func),
@@ -1758,37 +1741,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 errors,
                 &|| TypeCheckContext::of_kind(TypeCheckKind::OverloadReturn),
             );
-            match &overload_func.signature.params {
-                Params::List(params) => {
-                    for param in params.items() {
-                        match param {
-                            Param::PosOnly(
-                                Some(name),
-                                ty,
-                                Required::Optional(overload_default),
-                            )
-                            | Param::Pos(name, ty, Required::Optional(overload_default))
-                            | Param::KwOnly(name, ty, Required::Optional(overload_default)) => {
-                                // We only check a parameter's default against the first signature that has a default for the parameter.
-                                // This avoids false positives in situations in which Python syntax forces subsequent signatures to have
-                                // `= ...` even though the first signature is always matched.
-                                let default = defaults.shift_remove(name);
-                                if overload_default.is_none()
-                                    && let Some(default) = default
-                                {
-                                    self.check_type(default, ty, *range, errors, &|| {
-                                        TypeCheckContext::of_kind(TypeCheckKind::OverloadDefault(
-                                            name.clone(),
-                                        ))
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
