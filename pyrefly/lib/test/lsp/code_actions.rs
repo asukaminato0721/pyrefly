@@ -776,6 +776,74 @@ np
 }
 
 #[test]
+fn insertion_test_exact_module_import_stays_in_initial_menu() {
+    let code = r#"
+foo
+# ^
+"#;
+    let files = [("foo", "value = 1\n"), ("main", code)];
+    let (handles, state) = mk_multi_file_state(&files, Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(code)[0];
+    let actions = state
+        .transaction()
+        .local_quickfix_code_actions_sorted(
+            handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default();
+    assert!(actions.iter().any(|(title, _, _, insert_text)| {
+        title == "Insert import: `import foo`" && insert_text.trim() == "import foo"
+    }));
+}
+
+#[test]
+fn insertion_test_additional_matches_are_deferred() {
+    let code = r#"
+foo
+# ^
+"#;
+    let files = [("a", "foo = 1\n"), ("b", "foobar = 1\n"), ("main", code)];
+    let (handles, state) = mk_multi_file_state(&files, Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(code)[0];
+    let transaction = state.transaction();
+    let initial_actions = transaction
+        .local_quickfix_code_actions_sorted(
+            handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default();
+    assert!(
+        initial_actions
+            .iter()
+            .any(|(title, _, _, _)| { title == "Insert import: `from a import foo`" })
+    );
+    assert!(
+        !initial_actions
+            .iter()
+            .any(|(title, _, _, _)| { title == "Insert import: `from b import foobar`" })
+    );
+
+    let additional_actions = transaction
+        .additional_import_match_code_actions_sorted(
+            handle,
+            TextRange::new(position, position),
+            ImportFormat::Absolute,
+            None,
+        )
+        .unwrap_or_default();
+    assert!(additional_actions.iter().any(|(title, _, _, insert_text)| {
+        title == "Insert import: `from b import foobar`"
+            && insert_text.trim() == "from b import foobar"
+    }));
+}
+
+#[test]
 fn insertion_test_comments() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[

@@ -2149,6 +2149,19 @@ impl<'a> Transaction<'a> {
         results.into_map(|(_, module_name)| module_name)
     }
 
+    pub(crate) fn search_modules_exact(&self, pattern: &str) -> Vec<ModuleName> {
+        self.modules()
+            .into_iter()
+            .filter(|module_name| {
+                module_name.as_str() != "builtins"
+                    && module_name
+                        .components()
+                        .last()
+                        .is_some_and(|component| component.as_str() == pattern)
+            })
+            .collect()
+    }
+
     /// Produce code actions that makes edits local to the file.
     pub fn local_quickfix_code_actions_sorted(
         &self,
@@ -2192,33 +2205,16 @@ impl<'a> Transaction<'a> {
                             &mut import_actions,
                             unknown_name,
                         );
-                        for module_name in self.search_modules_fuzzy(unknown_name) {
+                        for module_name in self.search_modules_exact(unknown_name) {
                             if module_name == handle.module() {
                                 continue;
                             }
                             if aliased_module.is_some_and(|m| m == module_name) {
                                 continue;
                             }
-                            if let Some((_submodule_name, position, insert_text, _)) = self
-                                .submodule_autoimport_edit(handle, &ast, module_name, import_format)
-                            {
-                                let range = TextRange::at(position, TextSize::new(0));
-                                let title = format!("Insert import: `{}`", insert_text.trim());
-                                let is_private_import = module_name
-                                    .components()
-                                    .last()
-                                    .is_some_and(|component| component.as_str().starts_with('_'));
-                                import_actions.push(QuickfixAction {
-                                    title,
-                                    module_info: module_info.dupe(),
-                                    range,
-                                    insert_text,
-                                    is_deprecated: false,
-                                    is_private_import,
-                                });
-                            }
-                            self.create_quickfix_action_for_fuzzy_match(
+                            self.create_quickfix_actions_for_module_name(
                                 handle,
+                                import_format,
                                 &module_info,
                                 &ast,
                                 &mut import_actions,
@@ -2269,6 +2265,84 @@ impl<'a> Transaction<'a> {
         (!actions.is_empty()).then_some(actions)
     }
 
+    pub fn has_additional_import_match_code_action(
+        &self,
+        handle: &Handle,
+        range: TextRange,
+    ) -> bool {
+        self.get_errors(vec![handle])
+            .collect_errors()
+            .ordinary
+            .into_iter()
+            .any(|error| {
+                matches!(error.error_kind(), ErrorKind::UnknownName)
+                    && error.range().contains_range(range)
+            })
+    }
+
+    pub fn additional_import_match_code_actions_sorted(
+        &self,
+        handle: &Handle,
+        range: TextRange,
+        import_format: ImportFormat,
+        custom_thread_pool: Option<&ThreadPool>,
+    ) -> Option<Vec<(String, Module, TextRange, String)>> {
+        let module_info = self.get_module_info(handle)?;
+        let ast = self.get_ast(handle)?;
+        let errors = self.get_errors(vec![handle]).collect_errors().ordinary;
+        let mut import_actions = Vec::new();
+        for error in errors {
+            if !matches!(error.error_kind(), ErrorKind::UnknownName) {
+                continue;
+            }
+            let error_range = error.range();
+            if !error_range.contains_range(range) {
+                continue;
+            }
+            let unknown_name = module_info.code_at(error_range);
+            let exact_modules = self.search_modules_exact(unknown_name);
+            for (handle_to_import_from, name, export) in self
+                .search_exports_fuzzy(unknown_name, custom_thread_pool)
+                .unwrap_or_default()
+            {
+                if name == unknown_name
+                    || handle_to_import_from.module() == handle.module()
+                    || handle_to_import_from.module() == ModuleName::builtins()
+                {
+                    continue;
+                }
+                self.create_quickfix_action_for_export(
+                    handle,
+                    import_format,
+                    &module_info,
+                    &ast,
+                    &mut import_actions,
+                    &name,
+                    handle_to_import_from,
+                    export,
+                );
+            }
+            for module_name in self.search_modules_fuzzy(unknown_name) {
+                if module_name == handle.module() || exact_modules.contains(&module_name) {
+                    continue;
+                }
+                self.create_quickfix_actions_for_module_name(
+                    handle,
+                    import_format,
+                    &module_info,
+                    &ast,
+                    &mut import_actions,
+                    module_name,
+                );
+            }
+        }
+
+        import_actions.sort();
+        import_actions.dedup_by(|a, b| a.insert_text == b.insert_text);
+        (!import_actions.is_empty())
+            .then_some(import_actions.into_iter().map(|a| a.to_tuple()).collect())
+    }
+
     fn create_quickfix_action_for_common_alias_import(
         &self,
         handle: &Handle,
@@ -2302,14 +2376,33 @@ impl<'a> Transaction<'a> {
         Some(module_name)
     }
 
-    fn create_quickfix_action_for_fuzzy_match(
+    fn create_quickfix_actions_for_module_name(
         &self,
         handle: &Handle,
+        import_format: ImportFormat,
         module_info: &Module,
         ast: &std::sync::Arc<ModModule>,
         import_actions: &mut Vec<QuickfixAction>,
         module_name: ModuleName,
     ) {
+        if let Some((_submodule_name, position, insert_text, _)) =
+            self.submodule_autoimport_edit(handle, ast, module_name, import_format)
+        {
+            let range = TextRange::at(position, TextSize::new(0));
+            let title = format!("Insert import: `{}`", insert_text.trim());
+            let is_private_import = module_name
+                .components()
+                .last()
+                .is_some_and(|component| component.as_str().starts_with('_'));
+            import_actions.push(QuickfixAction {
+                title,
+                module_info: module_info.dupe(),
+                range,
+                insert_text,
+                is_deprecated: false,
+                is_private_import,
+            });
+        }
         if let Some(module_handle) = self.import_handle(handle, module_name, None).finding() {
             let (position, insert_text, _) = import_regular_import_edit(ast, module_handle, None);
             let range = TextRange::at(position, TextSize::new(0));

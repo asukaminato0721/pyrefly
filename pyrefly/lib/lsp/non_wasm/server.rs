@@ -43,6 +43,7 @@ use lsp_types::CodeActionParams;
 use lsp_types::CodeActionProviderCapability;
 use lsp_types::CodeActionResponse;
 use lsp_types::CodeActionTriggerKind;
+use lsp_types::Command;
 use lsp_types::CompletionItem;
 use lsp_types::CompletionList;
 use lsp_types::CompletionOptions;
@@ -226,6 +227,7 @@ use pyrefly_util::watch_pattern::WatchPattern;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -919,6 +921,26 @@ struct InitializeResult<C> {
     capabilities: C,
     #[serde(skip_serializing_if = "Option::is_none")]
     server_info: Option<ServerInfo>,
+}
+
+const ADDITIONAL_IMPORT_MATCH_CODE_ACTION_TITLE: &str = "Search for additional matching imports";
+const ADDITIONAL_IMPORT_MATCH_COMMAND: &str = "pyrefly.searchAdditionalImportMatches";
+const ADDITIONAL_IMPORT_MATCH_REQUEST: &str = "pyrefly/textDocument/additionalImportMatches";
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdditionalImportMatchesParams {
+    text_document: TextDocumentIdentifier,
+    range: Range,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdditionalImportMatch {
+    title: String,
+    text_document: TextDocumentIdentifier,
+    range: Range,
+    new_text: String,
 }
 
 pub fn initialize_finish<C: Serialize>(
@@ -2297,6 +2319,13 @@ impl Server {
                             Ok(TypeErrorDisplayStatus::NoConfigFile),
                         ));
                     }
+                } else if x.method == ADDITIONAL_IMPORT_MATCH_REQUEST {
+                    let params: AdditionalImportMatchesParams = serde_json::from_value(x.params)?;
+                    self.set_file_stats(params.text_document.uri.clone(), telemetry_event);
+                    let matches = self
+                        .additional_import_matches(&transaction, &params)
+                        .unwrap_or_default();
+                    self.send_response(new_response(x.id, Ok(matches)));
                 } else if &x.method == "testing/doNotCommitNextRecheck" {
                     self.do_not_commit_recheck.store(true, Ordering::SeqCst);
                     info!("Set do_not_commit_recheck flag to true");
@@ -4130,42 +4159,13 @@ impl Server {
             ) {
                 actions.extend(quickfixes.into_iter().filter_map(
                     |(title, info, range, insert_text)| {
-                        let lsp_location = self.to_lsp_location(&TextRangeWithModule {
-                            module: info.clone(),
+                        let (edit_uri, edit_range, new_text) = self.local_quickfix_lsp_edit(
+                            uri,
+                            triggered_cell_index,
+                            &info,
                             range,
-                        })?;
-                        let mut edit_uri = lsp_location.uri;
-                        let mut edit_range = lsp_location.range;
-                        // For notebook cells: if the import quick-fix targets a different
-                        // cell than the one where the action was triggered, redirect the
-                        // edit to the top of the current cell.  This mirrors Pylance's
-                        // behaviour where "insert import" always goes into the active cell.
-                        if let Some(current_cell_idx) = triggered_cell_index {
-                            let edit_cell_idx = info.to_cell_for_lsp(range.start());
-                            if edit_cell_idx != Some(current_cell_idx) {
-                                // Redirect to the current cell, inserting at line 0.
-                                let open_files = self.open_files.read();
-                                let notebook_path =
-                                    self.open_notebook_cells.read().get(uri).cloned();
-                                let cell_url = notebook_path.and_then(|path| {
-                                    if let Some(LspFile::Notebook(notebook)) =
-                                        open_files.get(&path).map(|f| &**f)
-                                    {
-                                        notebook.get_cell_url(current_cell_idx).cloned()
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(cell_url) = cell_url {
-                                    let top_of_cell = lsp_types::Range {
-                                        start: lsp_types::Position::new(0, 0),
-                                        end: lsp_types::Position::new(0, 0),
-                                    };
-                                    edit_uri = cell_url;
-                                    edit_range = top_of_cell;
-                                }
-                            }
-                        };
+                            insert_text,
+                        )?;
                         Some(CodeActionOrCommand::CodeAction(CodeAction {
                             title,
                             kind: Some(CodeActionKind::QUICKFIX),
@@ -4174,7 +4174,7 @@ impl Server {
                                     edit_uri,
                                     vec![TextEdit {
                                         range: edit_range,
-                                        new_text: insert_text,
+                                        new_text,
                                     }],
                                 )])),
                                 ..Default::default()
@@ -4183,6 +4183,24 @@ impl Server {
                         }))
                     },
                 ));
+            }
+            if transaction.has_additional_import_match_code_action(&handle, range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: ADDITIONAL_IMPORT_MATCH_CODE_ACTION_TITLE.to_owned(),
+                    kind: Some(CodeActionKind::QUICKFIX),
+                    command: Some(Command {
+                        title: ADDITIONAL_IMPORT_MATCH_CODE_ACTION_TITLE.to_owned(),
+                        command: ADDITIONAL_IMPORT_MATCH_COMMAND.to_owned(),
+                        arguments: Some(vec![
+                            serde_json::to_value(AdditionalImportMatchesParams {
+                                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                                range: params.range,
+                            })
+                            .expect("additional import match params should serialize"),
+                        ]),
+                    }),
+                    ..Default::default()
+                }));
             }
             record_code_action_telemetry("quickfix", start);
         }
@@ -4349,6 +4367,91 @@ impl Server {
         }
         record_code_action_telemetry("safe_delete_file", start);
         (!actions.is_empty()).then_some(actions)
+    }
+
+    fn local_quickfix_lsp_edit(
+        &self,
+        request_uri: &Url,
+        triggered_cell_index: Option<usize>,
+        info: &ModuleInfo,
+        range: TextRange,
+        insert_text: String,
+    ) -> Option<(Url, Range, String)> {
+        let lsp_location = self.to_lsp_location(&TextRangeWithModule {
+            module: info.dupe(),
+            range,
+        })?;
+        let mut edit_uri = lsp_location.uri;
+        let mut edit_range = lsp_location.range;
+        // For notebook cells: if the import quick-fix targets a different
+        // cell than the one where the action was triggered, redirect the
+        // edit to the top of the current cell. This mirrors Pylance's
+        // behavior where "insert import" always goes into the active cell.
+        if let Some(current_cell_idx) = triggered_cell_index {
+            let edit_cell_idx = info.to_cell_for_lsp(range.start());
+            if edit_cell_idx != Some(current_cell_idx) {
+                let open_files = self.open_files.read();
+                let notebook_path = self.open_notebook_cells.read().get(request_uri).cloned();
+                let cell_url = notebook_path.and_then(|path| {
+                    if let Some(LspFile::Notebook(notebook)) = open_files.get(&path).map(|f| &**f) {
+                        notebook.get_cell_url(current_cell_idx).cloned()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(cell_url) = cell_url {
+                    edit_uri = cell_url;
+                    edit_range = Range {
+                        start: Position::new(0, 0),
+                        end: Position::new(0, 0),
+                    };
+                }
+            }
+        }
+        Some((edit_uri, edit_range, insert_text))
+    }
+
+    fn additional_import_matches(
+        &self,
+        transaction: &Transaction<'_>,
+        params: &AdditionalImportMatchesParams,
+    ) -> Option<Vec<AdditionalImportMatch>> {
+        let uri = &params.text_document.uri;
+        let (handle, lsp_config) = self.make_handle_with_lsp_analysis_config_if_enabled(
+            uri,
+            Some(ADDITIONAL_IMPORT_MATCH_REQUEST),
+        )?;
+        let import_format = lsp_config.and_then(|c| c.import_format).unwrap_or_default();
+        let module_info = transaction.get_module_info(&handle)?;
+        let range = self.from_lsp_range(uri, &module_info, params.range);
+        let triggered_cell_index = self.maybe_get_cell_index(uri);
+        transaction
+            .additional_import_match_code_actions_sorted(
+                &handle,
+                range,
+                import_format,
+                Some(&self.lsp_thread_pool),
+            )
+            .map(|actions| {
+                actions
+                    .into_iter()
+                    .filter_map(|(title, info, range, insert_text)| {
+                        let (edit_uri, edit_range, new_text) = self.local_quickfix_lsp_edit(
+                            uri,
+                            triggered_cell_index,
+                            &info,
+                            range,
+                            insert_text,
+                        )?;
+                        Some(AdditionalImportMatch {
+                            title,
+                            text_document: TextDocumentIdentifier { uri: edit_uri },
+                            range: edit_range,
+                            new_text,
+                        })
+                    })
+                    .collect()
+            })
     }
 
     fn document_highlight(

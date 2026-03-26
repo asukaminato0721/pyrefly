@@ -35,6 +35,44 @@ let client: LanguageClient;
 let outputChannel: vscode.OutputChannel;
 let traceOutputChannel: vscode.OutputChannel;
 
+const additionalImportMatchesCommand = 'pyrefly.searchAdditionalImportMatches';
+const additionalImportMatchesRequest =
+  'pyrefly/textDocument/additionalImportMatches';
+
+type AdditionalImportMatchesParams = {
+  textDocument: {
+    uri: string;
+  };
+  range: {
+    start: {
+      line: number;
+      character: number;
+    };
+    end: {
+      line: number;
+      character: number;
+    };
+  };
+};
+
+type AdditionalImportMatch = {
+  title: string;
+  textDocument: {
+    uri: string;
+  };
+  range: {
+    start: {
+      line: number;
+      character: number;
+    };
+    end: {
+      line: number;
+      character: number;
+    };
+  };
+  newText: string;
+};
+
 /// Get a setting at the path, or throw an error if it's not set.
 function requireSetting<T>(path: string): T {
   const ret: T | undefined = vscode.workspace.getConfiguration().get(path);
@@ -232,6 +270,49 @@ export async function activate(context: ExtensionContext) {
     vscode.commands.registerCommand('pyrefly.unfoldAllDocstrings', async () => {
       await runDocstringFoldingCommand(client, outputChannel, 'editor.unfold');
     }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      additionalImportMatchesCommand,
+      async (params?: AdditionalImportMatchesParams) => {
+        if (params == null) {
+          return;
+        }
+        const matches = await client.sendRequest<AdditionalImportMatch[]>(
+          additionalImportMatchesRequest,
+          params,
+        );
+        if (matches.length === 0) {
+          void vscode.window.showInformationMessage(
+            'No additional matching imports found.',
+          );
+          return;
+        }
+        const selection = await vscode.window.showQuickPick(
+          matches.map(match => ({
+            label: match.title,
+            match,
+          })),
+          {
+            placeHolder: 'Select an import to add',
+          },
+        );
+        if (selection == null) {
+          return;
+        }
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(
+          vscode.Uri.parse(selection.match.textDocument.uri),
+          new vscode.Position(
+            selection.match.range.start.line,
+            selection.match.range.start.character,
+          ),
+          selection.match.newText,
+        );
+        await vscode.workspace.applyEdit(edit);
+      },
+    ),
   );
 
   // When our extension is activated, make sure ms-python knows
