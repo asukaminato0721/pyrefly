@@ -401,6 +401,24 @@ class C(B):
 );
 
 testcase!(
+    test_named_tuple_reserved_method_override_error,
+    r#"
+from typing import NamedTuple
+
+class Record(NamedTuple):
+    name: str
+    value: int
+
+    def _asdict(self) -> dict[str, object]:  # E: Cannot override reserved NamedTuple member `_asdict`
+        return {}
+
+    @classmethod
+    def _make(cls, iterable: object) -> "Record":  # E: Cannot override reserved NamedTuple member `_make`
+        return cls("", 0)
+"#,
+);
+
+testcase!(
     test_named_tuple_invalid_field,
     r#"
 # Used to crash, see https://github.com/facebook/pyrefly/issues/701

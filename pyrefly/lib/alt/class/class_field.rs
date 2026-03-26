@@ -1989,6 +1989,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             );
         }
 
+        if let Some(named_tuple_metadata) = metadata.named_tuple_metadata()
+            && !functional_class_def
+            && !named_tuple_metadata.elements.contains(name)
+            && Self::is_reserved_named_tuple_member(name)
+        {
+            self.error(
+                errors,
+                range,
+                ErrorInfo::Kind(ErrorKind::BadOverride),
+                format!("Cannot override reserved NamedTuple member `{name}`"),
+            );
+        }
+
         if matches!(
             field_definition,
             ClassFieldDefinition::DefinedInMethod { .. }

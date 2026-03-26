@@ -29,7 +29,20 @@ use crate::types::class::ClassType;
 use crate::types::literal::Lit;
 use crate::types::types::Type;
 
+const RESERVED_NAMED_TUPLE_MEMBERS: &[Name] = &[
+    Name::new_static("_field_defaults"),
+    Name::new_static("_fields"),
+    Name::new_static("_make"),
+    Name::new_static("_asdict"),
+    Name::new_static("_replace"),
+    Name::new_static("__replace__"),
+];
+
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    pub(crate) fn is_reserved_named_tuple_member(name: &Name) -> bool {
+        RESERVED_NAMED_TUPLE_MEMBERS.contains(name)
+    }
+
     pub fn get_named_tuple_elements(&self, cls: &Class, errors: &ErrorCollector) -> SmallSet<Name> {
         let Some(class_fields) = self.get_class_fields(cls) else {
             return SmallSet::new();
