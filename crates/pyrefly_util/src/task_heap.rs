@@ -20,6 +20,7 @@ use crate::lock::Condvar;
 use crate::lock::Mutex;
 
 /// Used to signal that all the tasks should be cancelled.
+#[derive(Debug)]
 pub struct Cancelled;
 
 #[derive(Clone, Dupe)]
@@ -30,7 +31,7 @@ impl CancellationHandle {
         Self(Arc::new(AtomicBool::new(false)))
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
 
@@ -112,6 +113,10 @@ impl<K: Ord, V> TaskHeap<K, V> {
 
     pub fn get_cancellation_handle(&self) -> CancellationHandle {
         self.cancellation_handle.dupe()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().heap.is_empty()
     }
 
     /// Push a task into the heap with specified ordering.

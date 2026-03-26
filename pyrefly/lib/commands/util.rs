@@ -55,6 +55,11 @@ impl CommonGlobalArgs {
         init_thread_pool(self.threads);
         init_color(self.color);
     }
+
+    /// Returns the thread count setting from command line args.
+    pub fn thread_count(&self) -> ThreadCount {
+        self.threads
+    }
 }
 
 /// Exit status of a command, if the run is completed.

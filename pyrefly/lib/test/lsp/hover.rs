@@ -12,7 +12,10 @@ use pyrefly_build::handle::Handle;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::get_hover;
+use crate::state::require::Require;
 use crate::state::state::State;
+use crate::test::util::TestEnv;
+use crate::test::util::extract_cursors_for_test;
 use crate::test::util::get_batched_lsp_operations_report;
 use crate::test::util::get_batched_lsp_operations_report_allow_error;
 
@@ -228,6 +231,120 @@ a: int = "test"  # type: ignore
 "#
         .trim(),
         report.trim(),
+    );
+}
+
+#[test]
+fn hover_shows_type_sources_for_narrow_and_first_use() {
+    let code = r#"
+def f(x: int | None) -> None:
+    if x is None:
+        return
+    y = []
+    y.append(1)
+    x
+#   ^
+    y
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: HoverContents::Markup(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
+    assert_eq!(
+        r#"
+# main.py
+7 |     x
+        ^
+```python
+(parameter) x: int
+```
+---
+**Type source**
+- Narrowed by condition at 3:13: `x is not None`
+
+
+9 |     y
+        ^
+```python
+(variable) y: list[int]
+```
+---
+**Type source**
+- Inferred from first use at 6:5: `y.append(1)`
+"#
+        .trim(),
+        report.trim(),
+    );
+    let report_with_links = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report_with_links.contains("Go to ["),
+        "Expected hover to include go-to links, got: {report_with_links}"
+    );
+    assert!(
+        report_with_links.contains("](file://"),
+        "Expected hover links to use file URLs, got: {report_with_links}"
+    );
+    assert!(
+        report_with_links.contains("builtins.pyi"),
+        "Expected hover links to include builtins.pyi, got: {report_with_links}"
+    );
+}
+
+#[test]
+fn hover_type_source_compound_narrow() {
+    let code = r#"
+def f(x: int | str | None) -> None:
+    if isinstance(x, int) and x > 0:
+        x
+#       ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: HoverContents::Markup(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
+    assert!(
+        report.contains("**Type source**"),
+        "Expected type source section in hover, got: {report}"
+    );
+    assert!(
+        report.contains("isinstance(x, int)"),
+        "Expected isinstance narrow in hover, got: {report}"
+    );
+}
+
+#[test]
+fn hover_type_source_no_source_at_first_use_site() {
+    // When hovering at the first-use site itself, we should not show
+    // "Inferred from first use" pointing back to the same location.
+    let code = r#"
+def f() -> None:
+    y = []
+    y.append(1)
+#   ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], |state, handle, position| {
+        match get_hover(&state.transaction(), handle, position, false) {
+            Some(Hover {
+                contents: HoverContents::Markup(markup),
+                ..
+            }) => markup.value,
+            _ => "None".to_owned(),
+        }
+    });
+    assert!(
+        !report.contains("Inferred from first use"),
+        "Should not show first-use source when hovering at the first-use site, got: {report}"
     );
 }
 
@@ -906,7 +1023,7 @@ from mymod.submod.deep import Bar
 }
 
 #[test]
-fn hover_on_constructor_shows_instance_type() {
+fn hover_on_constructor() {
     let code = r#"
 class Person:
     def __init__(self, name: str, age: int) -> None: ...
@@ -916,8 +1033,9 @@ Person()
 "#;
     let report = get_batched_lsp_operations_report_allow_error(&[("main", code)], get_test_report);
     assert!(
-        report
-            .contains("def Person(\n    self: Person,\n    name: str,\n    age: int\n) -> Person"),
+        report.contains(
+            "def __init__(\n    self: Person,\n    name: str,\n    age: int\n) -> Person"
+        ),
         "Expected constructor hover to show complete signature with -> Person, got: {report}"
     );
 }
@@ -1106,5 +1224,66 @@ result = [x for x in x if x in [1]]
     assert!(
         report.contains("__contains__"),
         "Second 'in' should show __contains__ hover, got: {report}"
+    );
+}
+
+#[test]
+fn hover_shows_float_default_value() {
+    let code = r#"
+def f(y: int = 2, x: float = 3.14) -> None:
+    pass
+
+f(y=1, x=1.0)
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("x: float = 3.14"),
+        "Expected hover to show float default value '3.14', got: {report}"
+    );
+    assert!(
+        report.contains("y: int = 2"),
+        "Expected hover to show int default value '2', got: {report}"
+    );
+}
+
+#[test]
+fn hover_shows_negative_float_default_value() {
+    let code = r#"
+def f(x: float = -1.5) -> None:
+    pass
+
+f(x=1.0)
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains("x: float = -1.5"),
+        "Expected hover to show negative float default '-1.5', got: {report}"
+    );
+}
+
+/// When `check_unannotated_defs = false`, hover should still work inside
+/// unannotated function bodies so IDE features remain functional.
+#[test]
+fn hover_works_in_unannotated_function_with_skip_check() {
+    let code = r#"
+def unannotated():
+    x = 42
+#   ^
+    return x
+"#;
+    let mut test_env = TestEnv::new_skip_check_no_infer();
+    test_env.add("main", code);
+    let (state, handle_fn) = test_env
+        .with_default_require_level(Require::Exports)
+        .to_state();
+    let handle = handle_fn("main");
+    let cursors = extract_cursors_for_test(code);
+    assert_eq!(cursors.len(), 1);
+    let result = get_hover(&state.transaction(), &handle, cursors[0], true);
+    assert!(
+        result.is_none(),
+        "Expected no hover result for variable inside unannotated function body when check is skipped"
     );
 }
