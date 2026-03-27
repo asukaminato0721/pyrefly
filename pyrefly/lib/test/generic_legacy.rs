@@ -812,6 +812,31 @@ assert_type(f(0), int)
     "#,
 );
 
+testcase!(
+    test_generic_function_default_argument_does_not_leak_typevars,
+    r#"
+from typing import Any
+import bisect
+
+class Worker:
+    def __init__(self) -> None:
+        self.heartbeats: list[float] = []
+        self.event = self._create_event_handler()
+
+    def _create_event_handler(self):
+        heartbeats = self.heartbeats
+
+        def event(
+            timestamp: float | None = None,
+            insort: Any = bisect.insort,
+        ) -> None:
+            if timestamp is not None:
+                insort(heartbeats, timestamp)
+
+        return event
+"#,
+);
+
 // This test case is needed to avoid a regression resolving special binding-time
 // information that travels through a legacy tparam builder.
 //

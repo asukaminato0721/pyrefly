@@ -156,7 +156,9 @@ use crate::types::type_var::TypeVar;
 use crate::types::type_var::Variance;
 use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
+use crate::types::types::Forall;
 use crate::types::types::Forallable;
+use crate::types::types::OverloadType;
 use crate::types::types::SuperObj;
 use crate::types::types::TParams;
 use crate::types::types::TParamsSource;
@@ -4450,6 +4452,26 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         .forall(Arc::new(TParams::new(tparams)));
                 }
             }
+            Type::Function(func) => {
+                let tparams = self.promote_callable_legacy_typevars(&mut func.signature);
+                if !tparams.is_empty() {
+                    *ty = Forallable::Function((**func).clone())
+                        .forall(Arc::new(TParams::new(tparams)));
+                }
+            }
+            Type::Overload(overload) => {
+                for sig in overload.signatures.iter_mut() {
+                    if let OverloadType::Function(func) = sig {
+                        let tparams = self.promote_callable_legacy_typevars(&mut func.signature);
+                        if !tparams.is_empty() {
+                            *sig = OverloadType::Forall(Forall {
+                                tparams: Arc::new(TParams::new(tparams)),
+                                body: func.clone(),
+                            });
+                        }
+                    }
+                }
+            }
             _ => {}
         })
     }
@@ -4764,7 +4786,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             &Binding::Function(idx, mut pred, class_meta) => {
                 let def = self.get_decorated_function(idx);
-                self.solve_function_binding(def, &mut pred, class_meta.as_ref(), errors)
+                self.wrap_callable_legacy_typevars(self.solve_function_binding(
+                    def,
+                    &mut pred,
+                    class_meta.as_ref(),
+                    errors,
+                ))
             }
             Binding::Import(x) => self
                 .get_from_export(x.0, None, &KeyExport(x.1.clone()))

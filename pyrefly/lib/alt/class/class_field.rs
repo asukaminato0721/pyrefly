@@ -2459,8 +2459,68 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Type {
+        fn strip_callable_default_types(callable: &mut Callable) {
+            if let Params::List(params) = &mut callable.params {
+                for param in params.items_mut() {
+                    match param {
+                        Param::PosOnly(_, _, required)
+                        | Param::Pos(_, _, required)
+                        | Param::KwOnly(_, _, required)
+                            if matches!(required, Required::Optional(Some(_))) =>
+                        {
+                            *required = Required::Optional(None);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        fn strip_default_types(ty: &mut Type) {
+            match ty {
+                Type::Callable(callable) => strip_callable_default_types(callable),
+                Type::Function(func) => strip_callable_default_types(&mut func.signature),
+                Type::BoundMethod(bound_method) => match &mut bound_method.func {
+                    BoundMethodType::Function(func) => {
+                        strip_callable_default_types(&mut func.signature);
+                    }
+                    BoundMethodType::Forall(forall) => {
+                        strip_callable_default_types(&mut forall.body.signature);
+                    }
+                    BoundMethodType::Overload(overload) => {
+                        for sig in overload.signatures.iter_mut() {
+                            match sig {
+                                OverloadType::Function(func) => {
+                                    strip_callable_default_types(&mut func.signature);
+                                }
+                                OverloadType::Forall(forall) => {
+                                    strip_callable_default_types(&mut forall.body.signature);
+                                }
+                            }
+                        }
+                    }
+                },
+                Type::Overload(overload) => {
+                    for sig in overload.signatures.iter_mut() {
+                        match sig {
+                            OverloadType::Function(func) => {
+                                strip_callable_default_types(&mut func.signature);
+                            }
+                            OverloadType::Forall(forall) => {
+                                strip_callable_default_types(&mut forall.body.signature);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            ty.recurse_mut(&mut strip_default_types);
+        }
+
+        let mut ty_without_defaults = ty.clone();
+        strip_default_types(&mut ty_without_defaults);
         let mut qs = SmallSet::new();
-        ty.collect_quantifieds(&mut qs);
+        ty_without_defaults.collect_quantifieds(&mut qs);
         if qs.is_empty() {
             drop(qs);
             return ty;
@@ -2503,7 +2563,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             ty.recurse(&mut |inner| collect_forall_tparams(inner, acc));
         }
-        collect_forall_tparams(&ty, &mut forall_bound);
+        collect_forall_tparams(&ty_without_defaults, &mut forall_bound);
         let allowed: SmallSet<&Quantified> = class_tparams
             .iter()
             .chain(forall_bound.iter().copied())
