@@ -73,6 +73,20 @@ impl<'a, 'b> HintRef<'a, 'b> {
 }
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    fn contextual_decompose_target(&self, hint: &Type) -> Option<Type> {
+        match hint {
+            Type::Var(v) => self
+                .solver()
+                .quantified_var(*v)
+                .map(|q| q.bound_type(self.stdlib, self.heap)),
+            _ => None,
+        }
+    }
+
+    fn keep_contextual_component_hint(ty: Option<Type>) -> Option<Type> {
+        ty.filter(|ty| !ty.is_any())
+    }
+
     fn fresh_var(&self) -> Var {
         self.solver().fresh_unwrap(self.uniques)
     }
@@ -285,15 +299,21 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         &self,
         hint: HintRef<'b, '_>,
     ) -> (Option<Hint<'b>>, Option<Hint<'b>>) {
+        let target_hint = self.contextual_decompose_target(hint.ty());
+        let target = target_hint.as_ref().unwrap_or(hint.ty());
         let key = self.fresh_var();
         let value = self.fresh_var();
         let dict_type = self.heap.mk_class_type(
             self.stdlib
                 .dict(key.to_type(self.heap), value.to_type(self.heap)),
         );
-        if self.is_subset_eq(&dict_type, hint.ty()) {
-            let key = hint.map_ty_opt(|ty| self.resolve_var_opt(ty, key));
-            let value = hint.map_ty_opt(|ty| self.resolve_var_opt(ty, value));
+        if self.is_subset_eq(&dict_type, target) {
+            let key = hint.map_ty_opt(|_| {
+                Self::keep_contextual_component_hint(self.resolve_var_opt(target, key))
+            });
+            let value = hint.map_ty_opt(|_| {
+                Self::keep_contextual_component_hint(self.resolve_var_opt(target, value))
+            });
             (key, value)
         } else {
             (None, None)
@@ -301,24 +321,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     pub fn decompose_set<'b>(&self, hint: HintRef<'b, '_>) -> Option<Hint<'b>> {
+        let target_hint = self.contextual_decompose_target(hint.ty());
+        let target = target_hint.as_ref().unwrap_or(hint.ty());
         let elem = self.fresh_var();
         let set_type = self
             .heap
             .mk_class_type(self.stdlib.set(elem.to_type(self.heap)));
-        if self.is_subset_eq(&set_type, hint.ty()) {
-            hint.map_ty_opt(|ty| self.resolve_var_opt(ty, elem))
+        if self.is_subset_eq(&set_type, target) {
+            hint.map_ty_opt(|_| {
+                Self::keep_contextual_component_hint(self.resolve_var_opt(target, elem))
+            })
         } else {
             None
         }
     }
 
     pub fn decompose_list<'b>(&self, hint: HintRef<'b, '_>) -> Option<Hint<'b>> {
+        let target_hint = self.contextual_decompose_target(hint.ty());
+        let target = target_hint.as_ref().unwrap_or(hint.ty());
         let elem = self.fresh_var();
         let list_type = self
             .heap
             .mk_class_type(self.stdlib.list(elem.to_type(self.heap)));
-        if self.is_subset_eq(&list_type, hint.ty()) {
-            hint.map_ty_opt(|ty| self.resolve_var_opt(ty, elem))
+        if self.is_subset_eq(&list_type, target) {
+            hint.map_ty_opt(|_| {
+                Self::keep_contextual_component_hint(self.resolve_var_opt(target, elem))
+            })
         } else {
             None
         }

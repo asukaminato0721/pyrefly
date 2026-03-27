@@ -544,6 +544,19 @@ impl Solver {
         self.simplify_forced_type(result)
     }
 
+    /// Returns the quantified behind an unfinished quantified var without forcing it.
+    pub fn quantified_var(&self, v: Var) -> Option<Quantified> {
+        let lock = self.variables.lock();
+        match &*lock.get(v) {
+            Variable::Quantified {
+                quantified: q,
+                lower_bounds: _,
+            }
+            | Variable::PartialQuantified(q) => Some(q.clone()),
+            _ => None,
+        }
+    }
+
     /// Simplify dimension expressions in a forced type
     fn simplify_forced_type(&self, mut ty: Type) -> Type {
         // Use transform_mut to visit every Type node and simplify dimensions

@@ -863,6 +863,31 @@ def f[T: bytes](x: T) -> T:
 );
 
 testcase!(
+    test_bounded_typevar_overload_preserves_concrete_container_type,
+    r#"
+from typing import Any, TypeVar, assert_type, overload
+
+EditableData = TypeVar(
+    "EditableData",
+    bound=list[Any] | set[Any] | dict[str, Any],
+)
+
+class EditorMixin:
+    @overload
+    def edit(self, data: EditableData) -> EditableData: ...
+    @overload
+    def edit(self, data: Any) -> object: ...
+    def edit(self, data: Any) -> Any:
+        return data
+
+editor = EditorMixin()
+assert_type(editor.edit([[1, 2], [3, 4]]), list[list[int]])
+assert_type(editor.edit({"k": [1, 2]}), dict[str, list[int]])
+assert_type(editor.edit({1, 2, 3}), set[int])
+    "#,
+);
+
+testcase!(
     test_generic_implementation_multiple_typevars,
     r#"
 from typing import overload
