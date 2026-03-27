@@ -541,7 +541,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let (key_hint, value_hint) =
                     hint.map_or((None, None), |ty| self.decompose_dict(ty));
                 self.ifs_infer(&x.generators, errors);
-                let key_ty = self.expr_infer_with_hint_promote(
+                let key_ty = self.dict_key_infer_with_hint(
                     &x.key,
                     key_hint.as_ref().map(|hint| hint.as_ref()),
                     errors,
@@ -689,6 +689,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         } else {
             ty.promote_implicit_literals(self.stdlib)
         }
+    }
+
+    fn dict_key_infer_with_hint(
+        &self,
+        x: &Expr,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        self.expr_infer_with_hint_promote(x, hint, errors)
+            .transform(&mut |ty| match ty {
+                Type::Literal(lit) => {
+                    *ty = lit.value.general_class_type(self.stdlib).clone().to_type();
+                }
+                Type::LiteralString(_) => {
+                    *ty = self.heap.mk_class_type(self.stdlib.str().clone());
+                }
+                _ => {}
+            })
     }
 
     /// Check whether a type corresponds to a deprecated function or method, and if so, log a deprecation warning.
@@ -1007,7 +1025,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let mut value_tys = Vec::new();
             items.iter().for_each(|x| match &x.key {
                 Some(key) => {
-                    let key_t = self.expr_infer_with_hint_promote(
+                    let key_t = self.dict_key_infer_with_hint(
                         key,
                         key_hint.as_ref().map(|hint| hint.as_ref()),
                         errors,
