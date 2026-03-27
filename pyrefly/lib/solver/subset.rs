@@ -35,13 +35,11 @@ use pyrefly_util::owner::Owner;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
-use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::callable::CallArg;
 use crate::alt::expr::TypeOrExpr;
 use crate::solver::solver::OpenTypedDictSubsetError;
-use crate::solver::solver::SolverSnapshot;
 use crate::solver::solver::Subset;
 use crate::solver::solver::SubsetCacheEntry;
 use crate::solver::solver::SubsetError;
@@ -51,7 +49,6 @@ use crate::types::callable::Param;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
 use crate::types::callable::Required;
-use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::quantified::QuantifiedKind;
 use crate::types::simplify::unions;
@@ -131,37 +128,6 @@ fn any<T>(
 }
 
 impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
-    fn try_with_rollback<T>(
-        &mut self,
-        f: impl FnOnce(&mut Self) -> Result<T, SubsetError>,
-    ) -> Result<T, SubsetError> {
-        let solver = self.solver.snapshot();
-        let subset_cache = self.subset_cache.clone();
-        let class_protocol_assumptions = self.class_protocol_assumptions.clone();
-        match f(self) {
-            Ok(result) => Ok(result),
-            Err(err) => {
-                self.restore_after_failed_tentative_check(
-                    solver,
-                    subset_cache,
-                    class_protocol_assumptions,
-                );
-                Err(err)
-            }
-        }
-    }
-
-    fn restore_after_failed_tentative_check(
-        &mut self,
-        solver: SolverSnapshot,
-        subset_cache: SmallMap<(Type, Type), SubsetCacheEntry>,
-        class_protocol_assumptions: SmallSet<(Class, Class)>,
-    ) {
-        self.solver.restore(solver);
-        self.subset_cache = subset_cache;
-        self.class_protocol_assumptions = class_protocol_assumptions;
-    }
-
     /// Can a function with l_args be called as a function with u_args?
     fn is_subset_param_list(
         &mut self,
@@ -1104,7 +1070,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
 
     fn is_subset_overload(&mut self, overload: &Overload, want: &Type) -> Result<(), SubsetError> {
         if any(overload.signatures.iter(), |l| {
-            self.try_with_rollback(|this| this.is_subset_eq(&l.as_type(), want))
+            self.is_subset_eq(&l.as_type(), want)
         })
         .is_ok()
         {
@@ -1156,7 +1122,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                         ret.clone(),
                     )));
                     any(overload.signatures.iter(), |l| {
-                        self.try_with_rollback(|this| this.is_subset_eq(&l.as_type(), &callable))
+                        self.is_subset_eq(&l.as_type(), &callable)
                     })
                 })
                 .is_ok()

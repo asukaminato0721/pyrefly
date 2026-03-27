@@ -77,7 +77,7 @@ const VAR_LEAK: &str = "Internal error: a variable has leaked from one module to
 /// due to large enums (Type) and lock guards.
 const INITIAL_GAS: Gas = Gas::new(200);
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Variable {
     /// A "partial type" (terminology borrowed from mypy) for an empty container.
     ///
@@ -182,7 +182,7 @@ struct Variables(SmallMap<Var, RefCell<VariableNode>>);
 /// can implement path compression. We use a separate Cell instead of using
 /// the RefCell around the node, because we might find that two vars point
 /// to the same root, which would cause us to borrow_mut twice and panic.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum VariableNode {
     Goto(Cell<Var>),
     Root(Variable, usize),
@@ -198,20 +198,6 @@ impl Display for VariableNode {
 }
 
 impl Variables {
-    fn snapshot(&self) -> SmallMap<Var, VariableNode> {
-        self.0
-            .iter()
-            .map(|(var, node)| (*var, node.borrow().clone()))
-            .collect()
-    }
-
-    fn restore(&mut self, snapshot: SmallMap<Var, VariableNode>) {
-        self.0 = snapshot
-            .into_iter()
-            .map(|(var, node)| (var, RefCell::new(node)))
-            .collect();
-    }
-
     fn get<'a>(&'a self, x: Var) -> Ref<'a, Variable> {
         let root = self.get_root(x);
         let variable = self.get_node(root).borrow();
@@ -334,12 +320,6 @@ pub struct Solver {
     pub strict_callable_subtyping: bool,
 }
 
-#[derive(Clone)]
-pub(crate) struct SolverSnapshot {
-    variables: SmallMap<Var, VariableNode>,
-    instantiation_errors: SmallMap<Var, TypeVarSpecializationError>,
-}
-
 impl Display for Solver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (x, y) in self.variables.lock().iter() {
@@ -372,18 +352,6 @@ impl Solver {
 
     pub fn recurse<'a>(&self, var: Var, recurser: &'a VarRecurser) -> Option<Guard<'a, Var>> {
         self.variables.lock().recurse(var, recurser)
-    }
-
-    pub(crate) fn snapshot(&self) -> SolverSnapshot {
-        SolverSnapshot {
-            variables: self.variables.lock().snapshot(),
-            instantiation_errors: self.instantiation_errors.read().clone(),
-        }
-    }
-
-    pub(crate) fn restore(&self, snapshot: SolverSnapshot) {
-        self.variables.lock().restore(snapshot.variables);
-        *self.instantiation_errors.write() = snapshot.instantiation_errors;
     }
 
     /// Force all non-recursive Vars in `vars`.
