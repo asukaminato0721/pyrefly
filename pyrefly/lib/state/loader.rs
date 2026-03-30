@@ -6,6 +6,7 @@
  */
 
 use std::fmt::Debug;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dupe::Dupe;
@@ -20,10 +21,12 @@ use vec1::vec1;
 
 use crate::config::config::ConfigFile;
 use crate::config::config::ConfigSource;
+use crate::config::config::FallbackSearchPath;
 use crate::config::config::ImportLookupPathPart;
 use crate::error::context::ErrorContext;
 use crate::module::finder::find_import;
 use crate::module::finder::find_import_filtered;
+use crate::module::finder::suggest_stdlib_import;
 
 #[derive(Debug, Clone, Dupe, PartialEq, Eq)]
 pub enum FindError {
@@ -51,11 +54,10 @@ impl FindError {
         path: Vec<ImportLookupPathPart>,
         module: ModuleName,
         config_source: &ConfigSource,
-        suggestion: Option<ModuleName>,
     ) -> FindError {
         let config_suffix = match config_source {
             ConfigSource::File(p) => format!(" (from config in `{}`)", p.display()),
-            ConfigSource::Marker(p) => {
+            ConfigSource::PythonToolMarker(p) | ConfigSource::Marker(p) => {
                 format!(
                     " (from default config for project root marked by `{}`)",
                     p.display()
@@ -79,18 +81,22 @@ impl FindError {
             format!("Looked in these locations{config_suffix}:")
         }];
         explanation.extend(nonempty_paths);
-        if let Some(suggested) = suggestion {
-            explanation.insert(0, format!("Did you mean `{suggested}`?"));
-        }
         FindError::NotFound(module, Arc::new(explanation))
     }
 
     pub fn display(&self) -> (Option<Box<dyn Fn() -> ErrorContext + '_>>, Vec1<String>) {
         match self {
-            Self::NotFound(module, err) => (
-                Some(Box::new(|| ErrorContext::ImportNotFound(*module))),
-                (**err).clone(),
-            ),
+            Self::NotFound(module, err) => {
+                let mut lines = (**err).clone();
+                // Compute suggestion lazily at display time, using global cache
+                if let Some(suggested) = suggest_stdlib_import(*module) {
+                    lines.insert(0, format!("Did you mean `{suggested}`?"));
+                }
+                (
+                    Some(Box::new(|| ErrorContext::ImportNotFound(*module))),
+                    lines,
+                )
+            }
             Self::Ignored => (None, vec1!["Ignored import".to_owned()]),
             Self::NoSource(module) => (
                 None,
@@ -160,7 +166,7 @@ impl<T> FindingOrError<T> {
         }
     }
 
-    pub fn map<T2>(self, f: impl Fn(T) -> T2) -> FindingOrError<T2> {
+    pub fn map<T2>(self, f: impl FnOnce(T) -> T2) -> FindingOrError<T2> {
         match self {
             Self::Finding(Finding { finding, error }) => FindingOrError::Finding(Finding {
                 finding: f(finding),
@@ -184,15 +190,34 @@ impl<T> FindingOrError<T> {
 #[derive(Debug)]
 pub struct LoaderFindCache {
     config: ArcId<ConfigFile>,
-    cache: LockedMap<(ModuleName, Option<ModulePath>), FindingOrError<ModulePath>>,
+    /// When true, all import resolution steps are origin-independent: no
+    /// source_db, no sub_configs, and fallback_search_path is not
+    /// DirectoryRelative. This lets us cache every module by ModuleName
+    /// alone instead of (ModuleName, Option<ModulePath>).
+    is_origin_independent: bool,
+    cache: LockedMap<
+        (ModuleName, Option<ModulePath>),
+        (FindingOrError<ModulePath>, Arc<Vec<PathBuf>>),
+    >,
     // If a python executable module (excludes .pyi) exists and differs from the imported python module, store it here
     executable_cache: LockedMap<(ModuleName, Option<ModulePath>), Option<ModulePath>>,
 }
 
 impl LoaderFindCache {
     pub fn new(config: ArcId<ConfigFile>) -> Self {
+        // When no config feature uses origin, all import resolutions produce
+        // the same result regardless of which file is importing. We can then
+        // cache by ModuleName alone, reducing millions of cache entries
+        // (112K files × thousands of modules) to just thousands.
+        let is_origin_independent = config.source_db.is_none()
+            && config.sub_configs.is_empty()
+            && !matches!(
+                config.fallback_search_path,
+                FallbackSearchPath::DirectoryRelative(_)
+            );
         Self {
             config,
+            is_origin_independent,
             cache: Default::default(),
             executable_cache: Default::default(),
         }
@@ -233,11 +258,61 @@ impl LoaderFindCache {
         module: ModuleName,
         origin: Option<&ModulePath>,
     ) -> FindingOrError<ModulePath> {
-        self.cache
-            .ensure(&(module.dupe(), origin.cloned()), || {
-                find_import(&self.config, module, origin)
+        // When all resolution steps are origin-independent, use None as the
+        // cache key. This reduces entries from O(files × modules) to O(modules).
+        let effective_origin = if self.is_origin_independent {
+            None
+        } else {
+            origin.cloned()
+        };
+
+        // Fast path: if origin is Some, check (module, None) first for
+        // previously-promoted bundled results that resolve identically
+        // regardless of origin.
+        if effective_origin.is_some()
+            && let Some(cached) = self.cache.get(&(module.dupe(), None))
+        {
+            return cached.0.dupe();
+        }
+
+        let result = self
+            .cache
+            .ensure(&(module.dupe(), effective_origin.clone()), || {
+                let phantom_paths = Vec::new();
+                let result = find_import(&self.config, module, origin, None);
+                (result, Arc::new(phantom_paths))
             })
             .0
-            .dupe()
+            .0
+            .dupe();
+
+        // Promote bundled modules to (module, None) so future lookups from
+        // other origins hit the cache without redundant resolution.
+        if effective_origin.is_some()
+            && let FindingOrError::Finding(ref import) = result
+            && import.finding.is_bundled()
+        {
+            self.cache
+                .insert((module, None), (result.dupe(), Arc::new(Vec::new())));
+        }
+
+        result
+    }
+
+    #[allow(unused)] // will be used soon
+    pub fn find_import_with_phantom_paths(
+        &self,
+        module: ModuleName,
+        origin: Option<&ModulePath>,
+    ) -> (FindingOrError<ModulePath>, Arc<Vec<PathBuf>>) {
+        let cached = self
+            .cache
+            .ensure(&(module.dupe(), origin.cloned()), || {
+                let phantom_paths = Vec::new();
+                let result = find_import(&self.config, module, origin, None);
+                (result, Arc::new(phantom_paths))
+            })
+            .0;
+        (cached.0.dupe(), cached.1.dupe())
     }
 }
