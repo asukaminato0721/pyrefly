@@ -913,6 +913,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     fn join_class_constructor_hints(mut matching: Vec<ClassType>) -> ClassType {
+        if matching.len() == 1 {
+            return matching.remove(0);
+        }
         let mut combined = matching.remove(0);
         for (i, slot) in combined.targs_mut().as_mut().iter_mut().enumerate() {
             *slot = Type::union(
@@ -1058,6 +1061,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     fn join_typed_dict_constructor_hints(mut matching: Vec<TypedDictInner>) -> TypedDictInner {
+        if matching.len() == 1 {
+            return matching.remove(0);
+        }
         let mut combined = matching.remove(0);
         for (i, slot) in combined.targs_mut().as_mut().iter_mut().enumerate() {
             *slot = Type::union(
