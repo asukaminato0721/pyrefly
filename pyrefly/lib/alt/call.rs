@@ -685,7 +685,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         hint: Option<HintRef>,
     ) -> Type {
         // Based on https://typing.readthedocs.io/en/latest/spec/constructors.html.
-        let vs = if let Some(hint) = hint {
+        let hint = hint.map(|hint| hint.map_ty(|ty| self.constructor_hint_for_class(&cls, ty)));
+        let vs = if let Some(hint) = hint.as_ref() {
             let vs = self
                 .solver()
                 .freshen_class_targs(cls.targs_mut(), self.uniques);
@@ -884,6 +885,49 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    /// Prefer exact nominal constructor targets from a union hint before using broader supertypes.
+    fn constructor_hint_for_class(&self, cls: &ClassType, hint: &Type) -> Type {
+        let matching = hint
+            .clone()
+            .into_unions()
+            .into_iter()
+            .filter_map(|member| match member {
+                Type::ClassType(candidate) if candidate.class_object() == cls.class_object() => {
+                    Some(candidate)
+                }
+                Type::SelfType(candidate) if candidate.class_object() == cls.class_object() => {
+                    Some(ClassType::new(
+                        candidate.class_object().dupe(),
+                        candidate.targs().clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            hint.clone()
+        } else {
+            self.heap
+                .mk_class_type(Self::join_class_constructor_hints(matching))
+        }
+    }
+
+    fn join_class_constructor_hints(mut matching: Vec<ClassType>) -> ClassType {
+        let mut combined = matching.remove(0);
+        for (i, slot) in combined.targs_mut().as_mut().iter_mut().enumerate() {
+            *slot = Type::union(
+                iter::once(slot.clone())
+                    .chain(
+                        matching
+                            .iter()
+                            .map(|candidate| candidate.targs().as_slice()[i].clone()),
+                    )
+                    .collect(),
+            );
+        }
+        combined
+    }
+
     /// If the class has a registered init capture, extract constructor arg values
     /// and wrap the result in `Type::NNModule`. Otherwise return the result as-is.
     ///
@@ -949,7 +993,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<HintRef>,
     ) -> Type {
-        let vs = if let Some(hint) = hint {
+        let hint = hint
+            .map(|hint| hint.map_ty(|ty| self.constructor_hint_for_typed_dict(&typed_dict, ty)));
+        let vs = if let Some(hint) = hint.as_ref() {
             let vs = self
                 .solver()
                 .freshen_class_targs(typed_dict.targs_mut(), self.uniques);
@@ -986,6 +1032,45 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.add_specialization_errors(e, arguments_range, errors, context);
         }
         Type::TypedDict(TypedDict::TypedDict(typed_dict))
+    }
+
+    fn constructor_hint_for_typed_dict(&self, typed_dict: &TypedDictInner, hint: &Type) -> Type {
+        let matching = hint
+            .clone()
+            .into_unions()
+            .into_iter()
+            .filter_map(|member| match member {
+                Type::TypedDict(TypedDict::TypedDict(candidate))
+                | Type::PartialTypedDict(TypedDict::TypedDict(candidate))
+                    if candidate.class_object() == typed_dict.class_object() =>
+                {
+                    Some(candidate)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            hint.clone()
+        } else {
+            TypedDict::TypedDict(Self::join_typed_dict_constructor_hints(matching))
+                .to_type(self.heap)
+        }
+    }
+
+    fn join_typed_dict_constructor_hints(mut matching: Vec<TypedDictInner>) -> TypedDictInner {
+        let mut combined = matching.remove(0);
+        for (i, slot) in combined.targs_mut().as_mut().iter_mut().enumerate() {
+            *slot = Type::union(
+                iter::once(slot.clone())
+                    .chain(
+                        matching
+                            .iter()
+                            .map(|candidate| candidate.targs().as_slice()[i].clone()),
+                    )
+                    .collect(),
+            );
+        }
+        combined
     }
 
     fn first_arg_type(&self, args: &[CallArg], errors: &ErrorCollector) -> Option<Type> {
