@@ -41,14 +41,17 @@ use crate::state::state::CancellableTransaction;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
 use crate::types::callable::Params;
+use crate::types::callable::Required;
 use crate::types::types::Type;
 
 pub struct InlayHintData {
     pub position: TextSize,
     /// Label parts with optional location info for click-to-navigate
     pub label_parts: Vec<(String, Option<TextRangeWithModule>)>,
-    /// Whether double-clicking should insert the type annotation.
-    pub insertable: bool,
+    /// Text inserted when the hint is accepted.
+    pub insert_text: Option<String>,
+    /// Extra imports needed to make the inserted text valid Python.
+    pub insert_imports: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -71,6 +74,49 @@ impl<'param> ParamNameMatch<'param> {
             is_vararg_repeat,
         }
     }
+}
+
+const CALLABLE_IMPORT: &str = "from collections.abc import Callable\n";
+
+fn annotation_text(ty: &Type) -> (String, bool) {
+    if let Some(callable) = ty.clone().to_callable() {
+        callable_annotation_text(&callable)
+    } else {
+        (ty.to_string(), false)
+    }
+}
+
+fn callable_annotation_text(callable: &crate::types::callable::Callable) -> (String, bool) {
+    let params_text = match &callable.params {
+        Params::List(params)
+            if params.items().iter().all(|param| {
+                matches!(
+                    param,
+                    Param::PosOnly(_, _, Required::Required) | Param::Pos(_, _, Required::Required)
+                )
+            }) =>
+        {
+            let rendered = params
+                .items()
+                .iter()
+                .map(|param| annotation_text(param.as_type()).0)
+                .collect::<Vec<_>>();
+            format!("[{}]", rendered.join(", "))
+        }
+        _ => "...".to_owned(),
+    };
+    let return_text = annotation_text(&callable.ret).0;
+    (format!("Callable[{params_text}, {return_text}]"), true)
+}
+
+fn insert_text_and_imports(prefix: &str, ty: &Type) -> (String, Vec<String>) {
+    let (text, needs_callable_import) = annotation_text(ty);
+    let insert_imports = if needs_callable_import {
+        vec![CALLABLE_IMPORT.to_owned()]
+    } else {
+        Vec::new()
+    };
+    (format!("{prefix}{text}"), insert_imports)
 }
 
 // Re-export normalize_singleton_function_type_into_params which is shared with signature help
@@ -149,10 +195,17 @@ impl<'a> Transaction<'a> {
                             .map(|(text, loc)| (text.clone(), loc.clone())),
                     )
                     .collect();
+                let (insert_text, insert_imports) = if insertable {
+                    let (insert_text, insert_imports) = insert_text_and_imports(prefix, ty);
+                    (Some(insert_text), insert_imports)
+                } else {
+                    (None, Vec::new())
+                };
                 InlayHintData {
                     position,
                     label_parts,
-                    insertable,
+                    insert_text,
+                    insert_imports,
                 }
             };
         let mut res = Vec::new();
@@ -291,8 +344,9 @@ impl<'a> Transaction<'a> {
                     .into_iter()
                     .map(|(pos, text)| InlayHintData {
                         position: pos,
-                        label_parts: vec![(text, None)],
-                        insertable: true,
+                        label_parts: vec![(text.clone(), None)],
+                        insert_text: Some(text),
+                        insert_imports: Vec::new(),
                     }),
             );
         }
