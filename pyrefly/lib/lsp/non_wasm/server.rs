@@ -224,6 +224,8 @@ use pyrefly_util::telemetry::TelemetryServerState;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::thread_pool::ThreadPool;
 use pyrefly_util::watch_pattern::WatchPattern;
+use ruff_python_ast::Stmt;
+use ruff_python_ast::helpers::is_docstring_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -1389,6 +1391,14 @@ impl From<HandleError> for EmptyResponseReason {
             HandleError::MethodDisabled => EmptyResponseReason::MethodDisabled,
         }
     }
+}
+
+fn is_future_import_stmt(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::ImportFrom(import_from)
+            if import_from.module.as_ref().is_some_and(|module| module.id == "__future__")
+    )
 }
 
 impl Server {
@@ -4735,6 +4745,8 @@ impl Server {
             .filter_map(|hint_data| {
                 let text_size = hint_data.position;
                 let label_parts = hint_data.label_parts;
+                let insert_text = hint_data.insert_text;
+                let insert_imports = hint_data.insert_imports;
                 // If the url is a notebook cell, filter out inlay hints for other cells
                 if info.to_cell_for_lsp(text_size) != maybe_cell_idx {
                     return None;
@@ -4760,14 +4772,36 @@ impl Server {
                             .collect(),
                     );
 
-                    let text_edits = if hint_data.insertable {
-                        Some(vec![TextEdit {
+                    let text_edits = insert_text.map(|insert_text| {
+                        let import_position = transaction
+                            .get_ast(&handle)
+                            .map(|ast| {
+                                ast.body
+                                    .iter()
+                                    .find(|stmt| {
+                                        !is_docstring_stmt(stmt) && !is_future_import_stmt(stmt)
+                                    })
+                                    .map_or(ast.range.end(), |stmt| stmt.range().start())
+                            })
+                            .unwrap_or_default();
+                        let mut edits = vec![TextEdit {
                             range: Range::new(position, position),
-                            new_text: label_parts.iter().map(|(text, _)| text.as_str()).collect(),
-                        }])
-                    } else {
-                        None
-                    };
+                            new_text: insert_text,
+                        }];
+                        for import_text in insert_imports {
+                            if info.contents().contains(&import_text)
+                                || info.contents().contains("from typing import Callable\n")
+                            {
+                                continue;
+                            }
+                            edits.push(TextEdit {
+                                range: info
+                                    .to_lsp_range(TextRange::at(import_position, TextSize::new(0))),
+                                new_text: import_text,
+                            });
+                        }
+                        edits
+                    });
 
                     Some(InlayHint {
                         position,

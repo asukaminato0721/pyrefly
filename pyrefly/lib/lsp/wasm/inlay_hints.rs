@@ -40,14 +40,20 @@ use crate::state::state::CancellableTransaction;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
 use crate::types::callable::Params;
+use crate::types::tuple::Tuple;
+use crate::types::typed_dict::TypedDict;
+use crate::types::types::Forallable;
 use crate::types::types::Type;
+use crate::types::types::Union;
 
 pub struct InlayHintData {
     pub position: TextSize,
     /// Label parts with optional location info for click-to-navigate
     pub label_parts: Vec<(String, Option<TextRangeWithModule>)>,
-    /// Whether double-clicking should insert the type annotation.
-    pub insertable: bool,
+    /// Text inserted when the hint is accepted.
+    pub insert_text: Option<String>,
+    /// Extra imports needed to make the inserted text valid Python.
+    pub insert_imports: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -70,6 +76,253 @@ impl<'param> ParamNameMatch<'param> {
             is_vararg_repeat,
         }
     }
+}
+
+const CALLABLE_IMPORT: &str = "from collections.abc import Callable\n";
+
+fn annotation_text(ty: &Type) -> (String, bool) {
+    match ty {
+        Type::Callable(callable) => callable_annotation_text(callable),
+        Type::Function(function) => callable_annotation_text(&function.signature),
+        Type::BoundMethod(bound_method) => match &bound_method.func {
+            crate::types::types::BoundMethodType::Function(function) => {
+                callable_annotation_text(&function.signature)
+            }
+            crate::types::types::BoundMethodType::Forall(forall) => {
+                callable_annotation_text(&forall.body.signature)
+            }
+            crate::types::types::BoundMethodType::Overload(_) => (ty.to_string(), false),
+        },
+        Type::Forall(forall) => match &forall.body {
+            Forallable::Callable(callable) => callable_annotation_text(callable),
+            Forallable::Function(function) => callable_annotation_text(&function.signature),
+            Forallable::TypeAlias(_) => (ty.to_string(), false),
+        },
+        Type::ClassType(class_type) => {
+            let (targs, needs_callable_import) = targs_annotation_text(class_type.targs());
+            let mut text = class_type.name().to_string();
+            if !targs.is_empty() {
+                text.push('[');
+                text.push_str(&targs.join(", "));
+                text.push(']');
+            }
+            (text, needs_callable_import)
+        }
+        Type::TypedDict(TypedDict::TypedDict(typed_dict))
+        | Type::PartialTypedDict(TypedDict::TypedDict(typed_dict)) => {
+            let (targs, needs_callable_import) = targs_annotation_text(typed_dict.targs());
+            let mut text = typed_dict.name().to_string();
+            if !targs.is_empty() {
+                text.push('[');
+                text.push_str(&targs.join(", "));
+                text.push(']');
+            }
+            (text, needs_callable_import)
+        }
+        Type::Union(box Union { members, .. }) => {
+            let mut needs_callable_import = false;
+            let members = members
+                .iter()
+                .map(|member| {
+                    let (text, member_needs_callable_import) = annotation_text(member);
+                    needs_callable_import |= member_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            (members.join(" | "), needs_callable_import)
+        }
+        Type::Tuple(tuple) => tuple_annotation_text(tuple),
+        Type::Type(inner) => {
+            let (text, needs_callable_import) = annotation_text(inner);
+            (format!("type[{text}]"), needs_callable_import)
+        }
+        Type::TypeForm(inner) => {
+            let (text, needs_callable_import) = annotation_text(inner);
+            (format!("TypeForm[{text}]"), needs_callable_import)
+        }
+        Type::TypeGuard(inner) => {
+            let (text, needs_callable_import) = annotation_text(inner);
+            (format!("TypeGuard[{text}]"), needs_callable_import)
+        }
+        Type::TypeIs(inner) => {
+            let (text, needs_callable_import) = annotation_text(inner);
+            (format!("TypeIs[{text}]"), needs_callable_import)
+        }
+        Type::Annotated(inner, metadata) => {
+            let (inner_text, mut needs_callable_import) = annotation_text(inner);
+            let mut parts = vec![inner_text];
+            for item in metadata.iter() {
+                let (text, item_needs_callable_import) = annotation_text(item);
+                needs_callable_import |= item_needs_callable_import;
+                parts.push(text);
+            }
+            (
+                format!("Annotated[{}]", parts.join(", ")),
+                needs_callable_import,
+            )
+        }
+        Type::Unpack(inner) => {
+            let (text, needs_callable_import) = annotation_text(inner);
+            (format!("Unpack[{text}]"), needs_callable_import)
+        }
+        Type::Concatenate(args, tail) => {
+            let mut needs_callable_import = false;
+            let mut parts = args
+                .iter()
+                .map(|(arg, _)| {
+                    let (text, arg_needs_callable_import) = annotation_text(arg);
+                    needs_callable_import |= arg_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            let (tail_text, tail_needs_callable_import) = annotation_text(tail);
+            needs_callable_import |= tail_needs_callable_import;
+            parts.push(tail_text);
+            (
+                format!("Concatenate[{}]", parts.join(", ")),
+                needs_callable_import,
+            )
+        }
+        Type::Intersect(box (_, fallback)) => annotation_text(fallback),
+        _ => (ty.to_string(), false),
+    }
+}
+
+fn callable_annotation_text(callable: &crate::types::callable::Callable) -> (String, bool) {
+    let (params_text, _) = callable_params_annotation_text(&callable.params);
+    let (return_text, _) = annotation_text(&callable.ret);
+    (format!("Callable[{params_text}, {return_text}]"), true)
+}
+
+fn callable_params_annotation_text(params: &Params) -> (String, bool) {
+    match params {
+        Params::List(param_list) => {
+            if param_list.items().iter().any(|param| {
+                matches!(
+                    param,
+                    Param::VarArg(..) | Param::KwOnly(..) | Param::Kwargs(..)
+                )
+            }) {
+                return ("...".to_owned(), false);
+            }
+            let mut needs_callable_import = false;
+            let params = param_list
+                .items()
+                .iter()
+                .map(|param| {
+                    let (text, param_needs_callable_import) = annotation_text(param.as_type());
+                    needs_callable_import |= param_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            (format!("[{}]", params.join(", ")), needs_callable_import)
+        }
+        Params::Ellipsis | Params::Materialization => ("...".to_owned(), false),
+        Params::ParamSpec(args, param_spec) => {
+            let mut needs_callable_import = false;
+            let mut prefix = args
+                .iter()
+                .map(|(arg, _)| {
+                    let (text, arg_needs_callable_import) = annotation_text(arg);
+                    needs_callable_import |= arg_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            let text = match param_spec {
+                Type::Ellipsis if prefix.is_empty() => "...".to_owned(),
+                Type::Ellipsis => {
+                    prefix.push("...".to_owned());
+                    format!("Concatenate[{}]", prefix.join(", "))
+                }
+                _ if prefix.is_empty() => {
+                    let (text, param_spec_needs_callable_import) = annotation_text(param_spec);
+                    needs_callable_import |= param_spec_needs_callable_import;
+                    text
+                }
+                _ => {
+                    let (text, param_spec_needs_callable_import) = annotation_text(param_spec);
+                    needs_callable_import |= param_spec_needs_callable_import;
+                    prefix.push(text);
+                    format!("Concatenate[{}]", prefix.join(", "))
+                }
+            };
+            (text, needs_callable_import)
+        }
+    }
+}
+
+fn tuple_annotation_text(tuple: &Tuple) -> (String, bool) {
+    match tuple {
+        Tuple::Concrete(elements) => {
+            let mut needs_callable_import = false;
+            let elements = elements
+                .iter()
+                .map(|element| {
+                    let (text, element_needs_callable_import) = annotation_text(element);
+                    needs_callable_import |= element_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            let body = if elements.is_empty() {
+                "()".to_owned()
+            } else {
+                elements.join(", ")
+            };
+            (format!("tuple[{body}]"), needs_callable_import)
+        }
+        Tuple::Unbounded(element) => {
+            let (text, needs_callable_import) = annotation_text(element);
+            (format!("tuple[{text}, ...]"), needs_callable_import)
+        }
+        Tuple::Unpacked(box (prefix, unpacked, suffix)) => {
+            let mut needs_callable_import = false;
+            let mut parts = prefix
+                .iter()
+                .map(|element| {
+                    let (text, element_needs_callable_import) = annotation_text(element);
+                    needs_callable_import |= element_needs_callable_import;
+                    text
+                })
+                .collect::<Vec<_>>();
+            let (unpacked_text, unpacked_needs_callable_import) = annotation_text(unpacked);
+            needs_callable_import |= unpacked_needs_callable_import;
+            parts.push(format!("*{unpacked_text}"));
+            for element in suffix {
+                let (text, element_needs_callable_import) = annotation_text(element);
+                needs_callable_import |= element_needs_callable_import;
+                parts.push(text);
+            }
+            (
+                format!("tuple[{}]", parts.join(", ")),
+                needs_callable_import,
+            )
+        }
+    }
+}
+
+fn targs_annotation_text(targs: &crate::types::types::TArgs) -> (Vec<String>, bool) {
+    let mut needs_callable_import = false;
+    let args = targs
+        .as_slice()
+        .iter()
+        .take(targs.display_count())
+        .map(|arg| {
+            let (text, arg_needs_callable_import) = annotation_text(arg);
+            needs_callable_import |= arg_needs_callable_import;
+            text
+        })
+        .collect();
+    (args, needs_callable_import)
+}
+
+fn insert_text_and_imports(prefix: &str, ty: &Type) -> (String, Vec<String>) {
+    let (text, needs_callable_import) = annotation_text(ty);
+    let insert_imports = if needs_callable_import {
+        vec![CALLABLE_IMPORT.to_owned()]
+    } else {
+        Vec::new()
+    };
+    (format!("{prefix}{text}"), insert_imports)
 }
 
 // Re-export normalize_singleton_function_type_into_params which is shared with signature help
@@ -169,10 +422,13 @@ impl<'a> Transaction<'a> {
                                                 .map(|(text, loc)| (text.clone(), loc.clone())),
                                         )
                                         .collect();
+                                    let (insert_text, insert_imports) =
+                                        insert_text_and_imports(" -> ", &ty);
                                     res.push(InlayHintData {
                                         position: fun.def.parameters.range.end(),
                                         label_parts,
-                                        insertable: true,
+                                        insert_text: Some(insert_text),
+                                        insert_imports,
                                     });
                                 }
                             }
@@ -226,10 +482,16 @@ impl<'a> Transaction<'a> {
                                     .map(|(text, loc)| (text.clone(), loc.clone())),
                             )
                             .collect();
+                        let (insert_text, insert_imports) = if is_unpacked {
+                            (String::new(), Vec::new())
+                        } else {
+                            insert_text_and_imports(": ", &ty)
+                        };
                         res.push(InlayHintData {
                             position: key.range().end(),
                             label_parts,
-                            insertable: !is_unpacked,
+                            insert_text: (!is_unpacked).then_some(insert_text),
+                            insert_imports,
                         });
                     }
                 }
@@ -243,8 +505,9 @@ impl<'a> Transaction<'a> {
                     .into_iter()
                     .map(|(pos, text)| InlayHintData {
                         position: pos,
-                        label_parts: vec![(text, None)],
-                        insertable: true,
+                        label_parts: vec![(text.clone(), None)],
+                        insert_text: Some(text),
+                        insert_imports: Vec::new(),
                     }),
             );
         }

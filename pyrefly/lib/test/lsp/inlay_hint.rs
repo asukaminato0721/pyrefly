@@ -486,7 +486,7 @@ result = my_function(MyType(), "hello")
 }
 
 #[test]
-fn test_unpacked_variables_are_not_insertable() {
+fn test_unpacked_variables_have_no_insert_text() {
     let code = r#"
 def get_tuple() -> tuple[int, str]:
     return (1, "hello")
@@ -513,19 +513,53 @@ x, y = get_tuple()
     // First hint is for 'result' - should be insertable
     let result_hint = &hints[0];
     assert!(
-        result_hint.insertable,
+        result_hint.insert_text.is_some(),
         "Regular variable 'result' should be insertable"
     );
 
     let x_hint = &hints[1];
     assert!(
-        !x_hint.insertable,
+        x_hint.insert_text.is_none(),
         "Unpacked variable 'x' should NOT be insertable"
     );
 
     let y_hint = &hints[2];
     assert!(
-        !y_hint.insertable,
+        y_hint.insert_text.is_none(),
         "Unpacked variable 'y' should NOT be insertable"
+    );
+}
+
+#[test]
+fn test_callable_hints_insert_valid_annotation_text() {
+    let code = r#"
+def f() -> int:
+    return 0
+
+a = f
+"#;
+
+    let files = [("main", code)];
+    let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Exports);
+    let handle = handles.get("main").unwrap();
+
+    let hints = state
+        .transaction()
+        .inlay_hints(handle, Default::default())
+        .unwrap();
+
+    assert_eq!(hints.len(), 1, "Expected 1 hint");
+
+    let hint = &hints[0];
+    let label: String = hint
+        .label_parts
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect();
+    assert_eq!(label, ": () -> int");
+    assert_eq!(hint.insert_text.as_deref(), Some(": Callable[[], int]"));
+    assert_eq!(
+        hint.insert_imports,
+        vec!["from collections.abc import Callable\n".to_owned()]
     );
 }

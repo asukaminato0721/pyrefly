@@ -109,6 +109,60 @@ fn test_inlay_hint_default_config() {
 }
 
 #[test]
+fn test_callable_inlay_hint_insert_text_adds_import() {
+    let root = get_test_files_root();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_path_buf());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    interaction.client.did_open("callable_inlay_hint_test.py");
+
+    interaction
+        .client
+        .inlay_hint("callable_inlay_hint_test.py", 0, 0, 100, 0)
+        .expect_response_with(|result| {
+            let hints = match result {
+                Some(hints) => hints,
+                None => return false,
+            };
+            if hints.len() != 1 {
+                return false;
+            }
+
+            let hint = &hints[0];
+            if hint.position.line != 10 || hint.position.character != 1 {
+                return false;
+            }
+            if !check_inlay_hint_label_values(
+                hint,
+                &[(": ", false), ("(", false), (") -> ", false), ("int", true)],
+            ) {
+                return false;
+            }
+
+            let text_edits = match &hint.text_edits {
+                Some(text_edits) if text_edits.len() == 2 => text_edits,
+                _ => return false,
+            };
+
+            text_edits
+                .iter()
+                .any(|edit| edit.new_text == ": Callable[[], int]")
+                && text_edits
+                    .iter()
+                    .any(|edit| edit.new_text == "from collections.abc import Callable\n")
+        })
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
 fn test_inlay_hint_default_and_pyrefly_analysis() {
     let root = get_test_files_root();
     let mut interaction = LspInteraction::new();
