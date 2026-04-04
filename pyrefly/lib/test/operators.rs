@@ -313,6 +313,22 @@ def h(x: int, y: str, z: bool, v: float):
 );
 
 testcase!(
+    test_nested_boolop_falsey_flow_for_custom_classes,
+    r#"
+from typing import assert_type, Literal
+
+class Fleen:
+    pass
+
+def foo(fleen: Fleen | None) -> None:
+    assert_type((fleen and "value") or "default", Literal["value", "default"])
+
+def bar() -> None:
+    assert_type((None and "b") or "c", Literal["c"])
+"#,
+);
+
+testcase!(
     test_boolean_union,
     r#"
 from typing import assert_type, Literal

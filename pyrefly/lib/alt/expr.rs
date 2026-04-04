@@ -112,6 +112,12 @@ pub enum TypeOrExpr<'a> {
     Expr(&'a Expr),
 }
 
+#[derive(Debug, Clone)]
+struct BoolOpBranch {
+    ty: Type,
+    known_bool: Option<bool>,
+}
+
 impl Ranged for TypeOrExpr<'_> {
     fn range(&self) -> TextRange {
         match self {
@@ -1226,6 +1232,28 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         })
     }
 
+    fn expr_boolop_branches(
+        &self,
+        expr: &Expr,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Vec<BoolOpBranch> {
+        match expr {
+            Expr::BoolOp(x) => self.boolop_branches(&x.values, x.op, hint, errors),
+            _ => {
+                let mut ty = self.expr_infer_with_hint(expr, hint, errors);
+                self.expand_vars_mut(&mut ty);
+                ty.into_unions()
+                    .into_iter()
+                    .map(|ty| BoolOpBranch {
+                        known_bool: None,
+                        ty,
+                    })
+                    .collect()
+            }
+        }
+    }
+
     // Helper method for inferring the type of a boolean operation over a sequence of values.
     fn boolop(
         &self,
@@ -1234,6 +1262,21 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
+        self.unions(
+            self.boolop_branches(values, op, hint, errors)
+                .into_iter()
+                .map(|branch| branch.ty)
+                .collect(),
+        )
+    }
+
+    fn boolop_branches(
+        &self,
+        values: &[Expr],
+        op: BoolOp,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Vec<BoolOpBranch> {
         // `target` is the truthiness that causes short-circuiting: `and` short-circuits on
         // falsy values, `or` on truthy values.
         //
@@ -1244,11 +1287,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             BoolOp::And => (false, AtomicNarrowOp::IsFalsy),
             BoolOp::Or => (true, AtomicNarrowOp::IsTruthy),
         };
-        let should_shortcircuit =
-            |t: &Type, r: TextRange| self.as_bool(t, r, errors) == Some(target);
-        let should_discard = |t: &Type, r: TextRange| self.as_bool(t, r, errors) == Some(!target);
 
-        let mut t_acc = self.heap.mk_never();
+        let mut branches = Vec::new();
         // Separate accumulator for soft hints - uses un-narrowed types.
         // The narrowing of bool/int/str to literals is for the result type of the boolop,
         // not for contextual typing of subsequent expressions.
@@ -1258,35 +1298,61 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // If there isn't a hint for the overall expression, use the preceding branches as a "soft" hint
             // for the next one. Most useful for expressions like `optional_list or []`.
             let hint = hint.or_else(|| hint_acc.as_ref().map(HintRef::soft));
-            let mut t = self.expr_infer_with_hint(value, hint, errors);
-            self.expand_vars_mut(&mut t);
-            // If this is not the last entry, we have to make a type-dependent decision and also narrow the
-            // result; both operations require us to force `Var` first or they become unpredictable.
+            let mut operand_branches = self.expr_boolop_branches(value, hint, errors);
             if i < last_index {
-                t = self.force_for_narrowing(&t, value.range(), errors);
-            }
-            if i < last_index && should_shortcircuit(&t, value.range()) {
-                t_acc = self.union(t_acc, t);
-                break;
-            }
-            for t in t.into_unions() {
-                // If we reach the last value, we should always keep it.
-                if i == last_index || !should_discard(&t, value.range()) {
-                    // Accumulate un-narrowed type for hints
-                    hint_acc = Some(match hint_acc {
-                        None => t.clone(),
-                        Some(acc) => self.union(acc, t.clone()),
-                    });
-                    let t = if i != last_index {
-                        self.atomic_narrow(&t, &result_narrow, value.range(), errors)
-                    } else {
-                        t
-                    };
-                    t_acc = self.union(t_acc, t)
+                // If this is not the last entry, we have to make a type-dependent decision and also
+                // narrow the result; both operations require us to force `Var` first or they become
+                // unpredictable.
+                for branch in &mut operand_branches {
+                    branch.ty = self.force_for_narrowing(&branch.ty, value.range(), errors);
+                    branch.known_bool = branch
+                        .known_bool
+                        .or_else(|| self.as_bool(&branch.ty, value.range(), errors));
                 }
             }
+            let mut all_shortcircuit = i < last_index;
+            for branch in operand_branches {
+                // If we reach the last value, we should always keep it.
+                if i == last_index {
+                    // Accumulate un-narrowed type for hints
+                    hint_acc = Some(match hint_acc {
+                        None => branch.ty.clone(),
+                        Some(acc) => self.union(acc, branch.ty.clone()),
+                    });
+                    branches.push(BoolOpBranch {
+                        ty: branch.ty,
+                        known_bool: branch.known_bool,
+                    });
+                    continue;
+                }
+                let branch_bool = branch
+                    .known_bool
+                    .or_else(|| self.as_bool(&branch.ty, value.range(), errors));
+                if branch_bool != Some(!target) {
+                    // Accumulate un-narrowed type for hints
+                    hint_acc = Some(match hint_acc {
+                        None => branch.ty.clone(),
+                        Some(acc) => self.union(acc, branch.ty.clone()),
+                    });
+                }
+                if branch_bool != Some(!target) {
+                    let ty = self.atomic_narrow(&branch.ty, &result_narrow, value.range(), errors);
+                    if !ty.is_never() {
+                        branches.push(BoolOpBranch {
+                            ty,
+                            known_bool: Some(target),
+                        });
+                    }
+                }
+                if branch_bool != Some(target) {
+                    all_shortcircuit = false;
+                }
+            }
+            if all_shortcircuit {
+                break;
+            }
         }
-        t_acc
+        branches
     }
 
     /// Infers types for `if` clauses in the given comprehensions.
