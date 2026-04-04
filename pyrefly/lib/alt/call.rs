@@ -1660,6 +1660,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         errors,
                     )
                 }
+                Some(CalleeKind::Function(FunctionKind::CopyReplace)) => self.call_copy_replace(
+                    ty,
+                    &args,
+                    &kws,
+                    x.func.range(),
+                    x.arguments.range,
+                    hint,
+                    errors,
+                ),
                 Some(CalleeKind::Function(FunctionKind::DataclassReplace)) => {
                     self.call_dataclasses_replace(
                         ty,
@@ -1763,6 +1772,64 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             hint,
             None,
         )
+    }
+
+    fn call_copy_replace(
+        &self,
+        replace_ty: &Type,
+        args: &[CallArg],
+        kws: &[CallKeyword],
+        callee_range: TextRange,
+        arg_range: TextRange,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let Some(CallArg::Arg(obj_arg)) = args.first() else {
+            return self.freeform_call_infer(
+                replace_ty.clone(),
+                args,
+                kws,
+                callee_range,
+                arg_range,
+                hint,
+                errors,
+            );
+        };
+        let obj_ty = obj_arg.infer(self, errors);
+        let remaining_args = args.iter().skip(1).cloned().collect::<Vec<_>>();
+        let mut rets = Vec::new();
+        let mut fallback_members = Vec::new();
+        self.map_over_union(&obj_ty, |ty| {
+            if let Some(ret) = self.call_magic_dunder_method(
+                ty,
+                &dunder::REPLACE,
+                arg_range,
+                &remaining_args,
+                kws,
+                errors,
+                None,
+            ) {
+                rets.push(ret);
+            } else {
+                fallback_members.push(ty.clone());
+            }
+        });
+        if !fallback_members.is_empty() {
+            let fallback_ty = self.unions(fallback_members);
+            let mut fallback_args = Vec::with_capacity(args.len());
+            fallback_args.push(CallArg::ty(&fallback_ty, obj_arg.range()));
+            fallback_args.extend(args.iter().skip(1).cloned());
+            rets.push(self.freeform_call_infer(
+                replace_ty.clone(),
+                &fallback_args,
+                kws,
+                callee_range,
+                arg_range,
+                hint,
+                errors,
+            ));
+        }
+        self.unions(rets)
     }
 
     fn has_exactly_two_posargs(&self, arguments: &Arguments) -> bool {
