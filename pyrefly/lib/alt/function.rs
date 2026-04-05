@@ -49,6 +49,7 @@ use crate::alt::call::CallTarget;
 use crate::alt::callable::CallArg;
 use crate::alt::types::decorated_function::DecoratedFunction;
 use crate::alt::types::decorated_function::Decorator;
+use crate::alt::types::decorated_function::FunctionDecorator;
 use crate::alt::types::decorated_function::SpecialDecorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::binding::binding::Binding;
@@ -259,14 +260,26 @@ impl DecoratorParamHints {
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     fn decorator_param_hints(
         &self,
-        decorators: &[(Type, TextRange)],
+        decorators: &[FunctionDecorator],
     ) -> Option<DecoratorParamHints> {
-        decorators.iter().rev().find_map(|(decorator_ty, _)| {
-            decorator_ty
-                .callable_first_param(self.heap)
-                .and_then(|param_ty| param_ty.callable_signatures().into_iter().next().cloned())
-                .and_then(DecoratorParamHints::from_callable)
-        })
+        decorators
+            .iter()
+            .rev()
+            .filter(|decorator| !decorator.chained_only)
+            .find_map(|decorator| {
+                decorator
+                    .ty
+                    .callable_first_param(self.heap)
+                    .and_then(|param_ty| param_ty.callable_signatures().into_iter().next().cloned())
+                    .and_then(DecoratorParamHints::from_callable)
+            })
+    }
+
+    fn preserve_special_decorator_for_chaining(decorator: &SpecialDecorator) -> bool {
+        matches!(
+            decorator,
+            SpecialDecorator::StaticMethod(_) | SpecialDecorator::ClassMethod(_)
+        )
     }
 
     pub fn solve_function_binding(
@@ -465,21 +478,29 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let decorators = Box::from_iter(decorators.iter().filter_map(|k| {
             let decorator = self.get_idx(*k);
             let range = self.bindings().idx_to_key(*k).range();
-            let keep = if let Some(special_decorator) = self.get_special_decorator(&decorator) {
+            if let Some(special_decorator) = self.get_special_decorator(&decorator) {
                 if is_top_level_function {
                     self.check_top_level_function_decorator(&special_decorator, range, errors);
                 }
-                !self.set_flag_from_special_decorator(&mut flags, &special_decorator)
+                let changed = self.set_flag_from_special_decorator(&mut flags, &special_decorator);
+                if changed && !Self::preserve_special_decorator_for_chaining(&special_decorator) {
+                    None
+                } else {
+                    Some(FunctionDecorator {
+                        ty: decorator.ty.clone(),
+                        range,
+                        chained_only: changed,
+                    })
+                }
             } else {
                 if is_class_property_decorator_type(&decorator.ty) {
                     found_class_property = true;
                 }
-                true
-            };
-            if keep {
-                Some((decorator.ty.clone(), range))
-            } else {
-                None
+                Some(FunctionDecorator {
+                    ty: decorator.ty.clone(),
+                    range,
+                    chained_only: false,
+                })
             }
         }));
 
@@ -715,8 +736,28 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         })
         .forall(tparams);
         ty = self.move_return_tparams_of_type(ty);
-        for (x, range) in def.decorators.iter().rev() {
-            ty = self.apply_function_decorator(x.clone(), ty, &def.metadata, *range, errors);
+        let mut chain_ty = ty.clone();
+        for decorator in def.decorators.iter().rev() {
+            if decorator.chained_only {
+                chain_ty = self.apply_function_decorator(
+                    decorator.ty.clone(),
+                    chain_ty,
+                    None,
+                    &def.metadata,
+                    decorator.range,
+                    errors,
+                );
+            } else {
+                ty = self.apply_function_decorator(
+                    decorator.ty.clone(),
+                    ty,
+                    Some(chain_ty),
+                    &def.metadata,
+                    decorator.range,
+                    errors,
+                );
+                chain_ty = ty.clone();
+            }
         }
         Arc::new(ty)
     }
@@ -1348,15 +1389,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         &self,
         decorator: Type,
         decoratee: Type,
+        decoratee_arg: Option<Type>,
         range: TextRange,
         errors: &ErrorCollector,
     ) -> PreparedDecoratorApplication {
         // If the decoratee is generic, unwrap the `Forall` so that `call_infer` can treat the
         // type parameters as concrete in the raw inferred result; this avoids us replacing the
         // type vars with partial types.
-        let (decoratee_tparams, decoratee_arg) = match &decoratee {
-            Type::Forall(forall) => (Some(forall.tparams.clone()), forall.body.clone().as_type()),
-            _ => (None, decoratee.clone()),
+        let decoratee_tparams = match &decoratee {
+            Type::Forall(forall) => Some(forall.tparams.clone()),
+            _ => None,
+        };
+        let decoratee_arg = match decoratee_arg.unwrap_or_else(|| decoratee.clone()) {
+            Type::Forall(forall) => forall.body.clone().as_type(),
+            decoratee_arg => decoratee_arg,
         };
         let call_target =
             self.as_call_target_or_error(decorator, CallStyle::FreeForm, range, errors, None);
@@ -1475,6 +1521,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         &self,
         decorator: Type,
         decoratee: Type,
+        decoratee_arg: Option<Type>,
         metadata: &FuncMetadata,
         range: TextRange,
         errors: &ErrorCollector,
@@ -1485,7 +1532,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         {
             return decoratee;
         }
-        let application = self.prepare_decorator_application(decorator, decoratee, range, errors);
+        let application =
+            self.prepare_decorator_application(decorator, decoratee, decoratee_arg, range, errors);
         let raw_return = self.call_infer(
             application.call_target.clone(),
             &[CallArg::ty(&application.decoratee_arg, range)],

@@ -259,6 +259,23 @@ class Model4(BaseModel):
     "#,
 );
 
+pydantic_testcase!(
+    test_field_validator_classmethod,
+    r#"
+from pydantic import BaseModel, field_validator
+
+class MyBaseModel(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Name cannot be empty")
+        return v
+"#,
+);
+
 fn pydantic_env_3_10() -> TestEnv {
     let env = pydantic_env();
     env.with_version(PythonVersion::new(3, 10, 0))

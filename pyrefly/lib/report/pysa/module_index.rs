@@ -231,8 +231,8 @@ impl PysaModuleIndex {
                         let matching_refs: Vec<&'static GraphQLDecoratorRef> = GRAPHQL_DECORATORS
                             .iter()
                             .filter_map(|(_, method_decorator)| {
-                                if decorated.undecorated.decorators.iter().any(|(ty, _)| {
-                                    decorator_matches_graphql_ref(ty, method_decorator)
+                                if decorated.undecorated.decorators.iter().any(|decorator| {
+                                    decorator_matches_graphql_ref(&decorator.ty, method_decorator)
                                 }) {
                                     Some(*method_decorator)
                                 } else {

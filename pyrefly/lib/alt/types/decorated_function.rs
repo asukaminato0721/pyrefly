@@ -47,11 +47,20 @@ use crate::types::types::Type;
 /// Information about the function def before decorators are applied. The metadata stored here
 /// includes information from decorators, like @classmethod.
 #[derive(Clone, Debug, Visit, VisitMut, TypeEq, PartialEq, Eq)]
+pub struct FunctionDecorator {
+    pub ty: Type,
+    pub range: TextRange,
+    /// Preserve this decorator's runtime wrapper when type checking outer decorators,
+    /// but keep function metadata as the source of truth for the final stored method type.
+    pub chained_only: bool,
+}
+
+#[derive(Clone, Debug, Visit, VisitMut, TypeEq, PartialEq, Eq)]
 pub struct UndecoratedFunction {
     pub def_index: FuncDefIndex,
     pub identifier: ShortIdentifier,
     pub metadata: FuncMetadata,
-    pub decorators: Box<[(Type, TextRange)]>,
+    pub decorators: Box<[FunctionDecorator]>,
     pub tparams: Arc<TParams>,
     pub params: Vec<Param>,
     pub paramspec: Option<Quantified>,
