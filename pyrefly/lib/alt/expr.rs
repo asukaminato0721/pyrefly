@@ -1857,12 +1857,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         elts.map(|x| match x {
             Expr::Starred(ExprStarred { value, .. }) => {
                 let mut unpacked_ty = self.expr_infer(value, errors);
-                let retry_with_hint = star_hint.as_ref().is_some()
-                    && unpacked_ty.any(|ty| self.solver().is_partial(ty));
+                let retry_with_hint =
+                    elt_hint.is_some() && unpacked_ty.any(|ty| self.solver().is_partial(ty));
                 if retry_with_hint {
+                    let star_hint_ref = LazyCell::force(&star_hint);
                     unpacked_ty = self.expr_infer_with_hint_promote(
                         value,
-                        star_hint.as_ref().map(|hint| hint.as_ref()),
+                        star_hint_ref.as_ref().map(Hint::as_ref),
                         errors,
                     );
                 }
