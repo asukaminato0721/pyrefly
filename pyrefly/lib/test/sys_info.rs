@@ -206,6 +206,19 @@ assert_type(Z(), str)
 );
 
 testcase!(
+    test_platform_ternary_expression,
+    TestEnv::new_with_platform(PythonPlatform::linux()),
+    r#"
+from typing import Literal, assert_type
+import subprocess
+import sys
+
+x = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+assert_type(x, Literal[0])
+"#,
+);
+
+testcase!(
     test_os_name,
     r#"
 from typing import assert_type

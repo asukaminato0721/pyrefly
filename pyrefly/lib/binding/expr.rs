@@ -649,19 +649,33 @@ impl<'a> BindingsBuilder<'a> {
                 // in the base flow and visible to both branches.
                 self.ensure_expr(&mut x.test, &mut Usage::narrowing_from(usage));
                 let narrow_ops = NarrowOps::from_expr(self, Some(&x.test));
+                let static_test = self.sys_info.evaluate_bool(&x.test);
                 self.start_fork_and_branch(x.range);
-                self.bind_narrow_ops(&narrow_ops, NarrowUseLocation::Span(x.body.range()), usage);
-                self.ensure_expr(&mut x.body, usage);
-                // Negate the narrow ops for the `orelse`, then merge the Flows.
-                // TODO(stroxler): We eventually want to drop all narrows but merge values.
-                self.next_branch();
-                self.bind_narrow_ops(
-                    &narrow_ops.negate(),
-                    NarrowUseLocation::Span(x.range),
-                    usage,
-                );
-                self.ensure_expr(&mut x.orelse, usage);
-                self.finish_branch();
+                if static_test == Some(false) {
+                    self.abandon_branch();
+                } else {
+                    self.bind_narrow_ops(
+                        &narrow_ops,
+                        NarrowUseLocation::Span(x.body.range()),
+                        usage,
+                    );
+                    self.ensure_expr(&mut x.body, usage);
+                    self.finish_branch();
+                }
+                self.start_branch();
+                if static_test == Some(true) {
+                    self.abandon_branch();
+                } else {
+                    // Negate the narrow ops for the `orelse`, then merge the Flows.
+                    // TODO(stroxler): We eventually want to drop all narrows but merge values.
+                    self.bind_narrow_ops(
+                        &narrow_ops.negate(),
+                        NarrowUseLocation::Span(x.range),
+                        usage,
+                    );
+                    self.ensure_expr(&mut x.orelse, usage);
+                    self.finish_branch();
+                }
                 self.finish_exhaustive_fork();
             }
             Expr::BoolOp(ExprBoolOp {

@@ -182,6 +182,7 @@ table! {
 #[derive(Clone, Debug)]
 struct BindingsInner {
     module_info: ModuleInfo,
+    sys_info: SysInfo,
     table: BindingTable,
     metadata: Arc<BindingsMetadata>,
     scope_trace: Option<ScopeTrace>,
@@ -319,6 +320,7 @@ impl Bindings {
         let module_info = Module::new(module_name, module_path, contents);
         Self(Arc::new(BindingsInner {
             module_info,
+            sys_info: SysInfo::default(),
             table: Default::default(),
             metadata: Arc::new(BindingsMetadata::new()),
             scope_trace: None,
@@ -340,6 +342,10 @@ impl Bindings {
 
     pub fn module(&self) -> &ModuleInfo {
         &self.0.module_info
+    }
+
+    pub fn sys_info(&self) -> &SysInfo {
+        &self.0.sys_info
     }
 
     pub fn metadata(&self) -> &Arc<BindingsMetadata> {
@@ -652,6 +658,7 @@ impl Bindings {
         }
         Self(Arc::new(BindingsInner {
             module_info,
+            sys_info,
             table: builder.table,
             metadata: Arc::new(builder.metadata),
             scope_trace: if enable_trace {
