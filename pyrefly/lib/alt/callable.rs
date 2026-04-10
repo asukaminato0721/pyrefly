@@ -54,6 +54,7 @@ use crate::types::callable::ParamList;
 use crate::types::callable::Params;
 use crate::types::callable::Required;
 use crate::types::quantified::Quantified;
+use crate::types::types::OverloadType;
 use crate::types::types::Type;
 use crate::types::types::Var;
 
@@ -553,6 +554,84 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    fn resolve_overloaded_paramspec_argument(
+        &self,
+        expected: &Type,
+        paramspec: Option<Var>,
+        arg: &CallArg,
+        remaining_args: &[CallArg],
+        keywords: &[CallKeyword],
+        arguments_range: TextRange,
+        arg_errors: &ErrorCollector,
+    ) {
+        let Some(paramspec) = paramspec else {
+            return;
+        };
+        if remaining_args.is_empty() && keywords.is_empty() {
+            return;
+        }
+        if !expected
+            .collect_maybe_placeholder_vars()
+            .contains(&paramspec)
+        {
+            return;
+        }
+        let arg_ty = match arg {
+            CallArg::Arg(value) => value.infer(self, arg_errors),
+            CallArg::Star(..) => return,
+        };
+        let Type::Overload(overload) = arg_ty else {
+            return;
+        };
+        let mut matched_params = Vec::new();
+        for signature in overload.signatures.iter() {
+            let (callable, tparams) = match signature {
+                OverloadType::Function(function) => (function.signature.clone(), None),
+                OverloadType::Forall(forall) => {
+                    (forall.body.signature.clone(), Some(&forall.tparams))
+                }
+            };
+            let probe_errors = self.error_collector();
+            let _ = self.callable_infer(
+                callable.clone(),
+                None,
+                tparams.map(|tparams| &**tparams),
+                None,
+                remaining_args,
+                keywords,
+                arguments_range,
+                arg_errors,
+                &probe_errors,
+                None,
+                None,
+                None,
+            );
+            if probe_errors.is_empty() {
+                let solved = match callable.params {
+                    Params::List(params) => Type::ParamSpecValue(params),
+                    Params::Ellipsis | Params::Materialization => Type::Ellipsis,
+                    Params::ParamSpec(prefix, paramspec) => match paramspec {
+                        Type::ParamSpecValue(params) => {
+                            Type::Concatenate(prefix, Box::new(Type::ParamSpecValue(params)))
+                        }
+                        Type::Ellipsis => Type::Concatenate(prefix, Box::new(Type::Ellipsis)),
+                        _ => continue,
+                    },
+                };
+                if !matched_params.contains(&solved) {
+                    matched_params.push(solved);
+                }
+            }
+        }
+        if let [solved] = matched_params.as_slice() {
+            self.solver()
+                .add_lower_bound(paramspec, solved.clone(), &mut |got, want| {
+                    self.is_subset_eq(got, want)
+                });
+            let _ = self.solver().force_var(paramspec);
+        }
+    }
+
     // See comment on `callable_infer` about `arg_errors` and `call_errors`.
     /// Match arguments against parameters, type-check each argument, and return
     /// a map from each argument's source range to the parameter type it was
@@ -647,7 +726,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             };
             Ok(param_list_owner.push(ps).items().iter().rev().collect())
         };
-        for arg in self_arg.iter().chain(args.iter()) {
+        let mut consumed_args = 0;
+        for (is_self_arg, arg) in self_arg
+            .iter()
+            .map(|arg| (true, arg))
+            .chain(args.iter().map(|arg| (false, arg)))
+        {
             let mut arg_pre = arg.pre_eval(self, arg_errors);
             while arg_pre.step() {
                 let param = if let Some(p) = rparams.last() {
@@ -686,6 +770,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         name,
                         kind: kind @ (PosParamKind::PositionalOnly | PosParamKind::Positional),
                     }) => {
+                        self.resolve_overloaded_paramspec_argument(
+                            ty,
+                            paramspec,
+                            arg,
+                            if is_self_arg {
+                                args
+                            } else {
+                                &args[consumed_args + 1..]
+                            },
+                            keywords,
+                            arguments_range,
+                            arg_errors,
+                        );
                         // For unknown-length star args, stop consuming positional parameters
                         // when we reach a one that has a corresponding keyword argument.
                         // This is unsound, but prevents false positive "multiple values" errors.
@@ -772,6 +869,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         break;
                     }
                 }
+            }
+            if !is_self_arg {
+                consumed_args += 1;
             }
             // `self_qs` contains type parameters referenced in the `self` type. Pyrefly follows
             // mypy and pyright's lead in solving type parameters in `self` as soon as `self` is
