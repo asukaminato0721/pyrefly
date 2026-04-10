@@ -1108,6 +1108,41 @@ x: TypedDict  # E: `TypedDict` is not allowed in this context
 );
 
 testcase!(
+    test_constrained_typevar_typed_dict_subscript,
+    r#"
+from typing import Generic, TypeVar, TypedDict, assert_type
+
+class DeviceInfo(TypedDict):
+    name: str
+    address: str
+    rssi: int
+
+class ExtendedDeviceInfo(TypedDict):
+    name: str
+    address: str
+    rssi: int
+    manufacturer: str
+
+NAME = "name"
+ADDRESS = "address"
+
+T = TypeVar("T", DeviceInfo, ExtendedDeviceInfo)
+
+class DeviceIndex(Generic[T]):
+    def __init__(self) -> None:
+        self.by_name: dict[str, list[T]] = {}
+
+    def add(self, device: T) -> None:
+        name = device[NAME]
+        assert_type(name, str)
+        self.by_name.setdefault(name, []).append(device)
+
+    def lookup(self, device: T) -> str:
+        return device[ADDRESS]
+    "#,
+);
+
+testcase!(
     test_invalid_typed_dict_keywords,
     r#"
 from typing import TypedDict

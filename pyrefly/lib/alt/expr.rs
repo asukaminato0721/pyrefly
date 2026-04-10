@@ -2253,14 +2253,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
                 ),
                 Type::Quantified(ref q) if q.is_type_var() && q.restriction().is_restricted() => {
-                    self.call_method_or_error(
-                        &base,
-                        &dunder::GETITEM,
+                    // Restricted TypeVars should inherit the subscription behavior of their
+                    // bound or constraints. In particular, constrained TypedDicts need to reuse
+                    // the TypedDict indexing path instead of falling back to `object.__getitem__`.
+                    self.subscript_infer_for_type(
+                        &q.bound_type(self.stdlib, self.heap),
+                        slice,
                         range,
-                        &[CallArg::expr(slice)],
-                        &[],
                         errors,
-                        Some(&|| ErrorContext::Index(self.for_display(base.clone()))),
                     )
                 }
                 Type::TypedDict(typed_dict) => {
