@@ -39,6 +39,13 @@ enum DictKeyLiteralContext {
         base_expr: Expr,
         literal: ExprStringLiteral,
     },
+    /// A string literal in a call argument whose completions should come from
+    /// surrounding container expressions.
+    /// Examples: `lookup(data, "na|")`, `df.select(col("na|"))`.
+    CallArgument {
+        source_exprs: Vec<Expr>,
+        literal: ExprStringLiteral,
+    },
     /// A key literal inside a dict literal being constructed.
     /// Example: `{"na|": 1}`.
     DictLiteral {
@@ -50,24 +57,9 @@ enum DictKeyLiteralContext {
 impl DictKeyLiteralContext {
     fn literal_range(&self) -> TextRange {
         match self {
-            Self::KeyAccess { literal, .. } | Self::DictLiteral { literal, .. } => literal.range(),
-        }
-    }
-
-    fn base_range(&self) -> TextRange {
-        // For key access, we want the container expression's type.
-        // For dict literals, we want the literal's contextual type (e.g. a TypedDict in
-        // `cfg: Config = {"na|": 1}`), which is attached to the literal's range.
-        match self {
-            Self::KeyAccess { base_expr, .. } => base_expr.range(),
-            Self::DictLiteral { dict, .. } => dict.range(),
-        }
-    }
-
-    fn base_expr(&self) -> Option<&Expr> {
-        match self {
-            Self::KeyAccess { base_expr, .. } => Some(base_expr),
-            Self::DictLiteral { .. } => None,
+            Self::KeyAccess { literal, .. }
+            | Self::CallArgument { literal, .. }
+            | Self::DictLiteral { literal, .. } => literal.range(),
         }
     }
 }
@@ -187,10 +179,81 @@ impl<'a> Transaction<'a> {
             self.dict_key_string_literal_at(handle, module, position)
         {
             Some(DictKeyLiteralContext::KeyAccess { base_expr, literal })
+        } else if let Some((source_exprs, literal)) =
+            self.call_argument_string_literal_at(module, position)
+        {
+            Some(DictKeyLiteralContext::CallArgument {
+                source_exprs,
+                literal,
+            })
         } else {
             Self::dict_literal_string_literal_at(module, position)
                 .map(|(dict, literal)| DictKeyLiteralContext::DictLiteral { dict, literal })
         }
+    }
+
+    fn call_argument_string_literal_at(
+        &self,
+        module: &ModModule,
+        position: TextSize,
+    ) -> Option<(Vec<Expr>, ExprStringLiteral)> {
+        let nodes = Ast::locate_node(module, position);
+        let literal = nodes.iter().find_map(|node| match node {
+            AnyNodeRef::ExprStringLiteral(literal) => Some((*literal).clone()),
+            _ => None,
+        })?;
+        let literal_range = literal.range();
+        let mut source_exprs = Vec::new();
+
+        for node in nodes {
+            let AnyNodeRef::ExprCall(call) = node else {
+                continue;
+            };
+            let Some((arg_index, is_keyword)) =
+                Self::call_argument_containing_range(call, literal_range)
+            else {
+                continue;
+            };
+            if let Expr::Attribute(attr) = call.func.as_ref() {
+                Self::push_unique_expr(&mut source_exprs, attr.value.as_ref());
+            }
+            let positional_count = if is_keyword {
+                call.arguments.args.len()
+            } else {
+                arg_index
+            };
+            for expr in call.arguments.args.iter().take(positional_count) {
+                Self::push_unique_expr(&mut source_exprs, expr);
+            }
+        }
+
+        (!source_exprs.is_empty()).then_some((source_exprs, literal.clone()))
+    }
+
+    fn call_argument_containing_range(call: &ExprCall, target: TextRange) -> Option<(usize, bool)> {
+        for (idx, arg) in call.arguments.args.iter().enumerate() {
+            if Self::range_contains_range(arg.range(), target) {
+                return Some((idx, false));
+            }
+        }
+        for kw in &call.arguments.keywords {
+            if Self::range_contains_range(kw.value.range(), target) {
+                return Some((call.arguments.args.len(), true));
+            }
+        }
+        None
+    }
+
+    fn range_contains_range(outer: TextRange, inner: TextRange) -> bool {
+        outer.start() <= inner.start() && inner.end() <= outer.end()
+    }
+
+    fn push_unique_expr(target: &mut Vec<Expr>, expr: &Expr) {
+        let range = expr.range();
+        if target.iter().any(|existing| existing.range() == range) {
+            return;
+        }
+        target.push(expr.clone());
     }
 
     fn dict_literal_string_literal_at(
@@ -298,39 +361,16 @@ impl<'a> Transaction<'a> {
         })
     }
 
-    /// Adds dict key completions for the given position. Returns `true` if this function
-    /// claimed the position (i.e., we are inside a dict/TypedDict key string literal), in
-    /// which case the caller should skip overload-based literal completions to avoid showing
-    /// redundant entries.
-    pub(crate) fn add_dict_key_completions(
+    fn extend_key_suggestions_for_expr(
         &self,
         handle: &Handle,
-        module: &ModModule,
-        position: TextSize,
-        completions: &mut Vec<RankedCompletion>,
-    ) -> bool {
-        let Some(context) = self.dict_key_literal_context(handle, module, position) else {
-            return false;
-        };
-        let literal_range = context.literal_range();
-        // Allow the cursor to sit a few characters before the literal (e.g. between nested
-        // subscripts) so completion requests fired just before the quotes still succeed.
-        let allowance = TextSize::from(4);
-        let lower_bound = literal_range
-            .start()
-            .checked_sub(allowance)
-            .unwrap_or_else(|| TextSize::new(0));
-        if position < lower_bound || position > literal_range.end() {
-            return false;
-        }
-        let mut suggestions: BTreeMap<String, Option<Type>> = BTreeMap::new();
-
-        if let Some(base_expr) = context.base_expr()
-            && let Some(bindings) = self.get_bindings(handle)
-        {
-            let base_info = if let Some((identifier, facets)) = Self::expression_facets(base_expr) {
+        expr: &Expr,
+        suggestions: &mut BTreeMap<String, Option<Type>>,
+    ) {
+        if let Some(bindings) = self.get_bindings(handle) {
+            let base_info = if let Some((identifier, facets)) = Self::expression_facets(expr) {
                 Some((identifier, facets))
-            } else if let Expr::Name(name) = &base_expr {
+            } else if let Expr::Name(name) = expr {
                 Some((Ast::expr_name_identifier(name.clone()), Vec::new()))
             } else {
                 None
@@ -366,15 +406,66 @@ impl<'a> Transaction<'a> {
             }
         }
 
-        // For key access we query the container expression; for literals we query the
-        // literal itself to pick up contextual TypedDict typing from assignments.
-        if let Some(base_type) = self.get_type_trace(handle, context.base_range())
+        if let Some(base_type) = self.get_type_trace(handle, expr.range())
             && let Some(typed_keys) = self.collect_typed_dict_keys(handle, base_type)
         {
             for (key, ty) in typed_keys {
                 let entry = suggestions.entry(key).or_insert(None);
                 if entry.is_none() {
                     *entry = Some(ty);
+                }
+            }
+        }
+    }
+
+    /// Adds dict key completions for the given position. Returns `true` if this function
+    /// claimed the position (i.e., we are inside a dict/TypedDict key string literal), in
+    /// which case the caller should skip overload-based literal completions to avoid showing
+    /// redundant entries.
+    pub(crate) fn add_dict_key_completions(
+        &self,
+        handle: &Handle,
+        module: &ModModule,
+        position: TextSize,
+        completions: &mut Vec<RankedCompletion>,
+    ) -> bool {
+        let Some(context) = self.dict_key_literal_context(handle, module, position) else {
+            return false;
+        };
+        let literal_range = context.literal_range();
+        // Allow the cursor to sit a few characters before the literal (e.g. between nested
+        // subscripts) so completion requests fired just before the quotes still succeed.
+        let allowance = TextSize::from(4);
+        let lower_bound = literal_range
+            .start()
+            .checked_sub(allowance)
+            .unwrap_or_else(|| TextSize::new(0));
+        if position < lower_bound || position > literal_range.end() {
+            return false;
+        }
+        let mut suggestions: BTreeMap<String, Option<Type>> = BTreeMap::new();
+
+        match &context {
+            DictKeyLiteralContext::KeyAccess { base_expr, .. } => {
+                self.extend_key_suggestions_for_expr(handle, base_expr, &mut suggestions);
+            }
+            DictKeyLiteralContext::CallArgument { source_exprs, .. } => {
+                for expr in source_exprs {
+                    self.extend_key_suggestions_for_expr(handle, expr, &mut suggestions);
+                }
+            }
+            DictKeyLiteralContext::DictLiteral { dict, .. } => {
+                // Dict literals need contextual typing from the whole expression instead of a
+                // source expression so we can pick up `cfg: Config = {"na|": 1}`.
+                if let Some(base_type) = self.get_type_trace(handle, dict.range())
+                    && let Some(typed_keys) = self.collect_typed_dict_keys(handle, base_type)
+                {
+                    for (key, ty) in typed_keys {
+                        let entry = suggestions.entry(key).or_insert(None);
+                        if entry.is_none() {
+                            *entry = Some(ty);
+                        }
+                    }
                 }
             }
         }
