@@ -391,24 +391,29 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let condition_type = self.expr_infer(&x.test, errors);
                 self.check_dunder_bool_is_callable(&condition_type, x.range(), errors);
                 self.check_redundant_condition(&condition_type, x.range(), errors);
-                let static_test = self.bindings().sys_info().evaluate_bool(&x.test);
-                match static_test.or_else(|| self.as_bool(&condition_type, x.test.range(), errors))
+                if let Some(static_test) =
+                    self.bindings().sys_info().evaluate_bool_sys_info(&x.test)
                 {
-                    Some(true) => self
-                        .expr_infer_type_info_with_hint(&x.body, hint, errors)
-                        .into_ty(),
-                    Some(false) => self
-                        .expr_infer_type_info_with_hint(&x.orelse, hint, errors)
-                        .into_ty(),
-                    None => {
-                        let body_type = self
+                    return match static_test {
+                        true => self
                             .expr_infer_type_info_with_hint(&x.body, hint, errors)
-                            .into_ty();
-                        let orelse_type = self
+                            .into_ty(),
+                        false => self
                             .expr_infer_type_info_with_hint(&x.orelse, hint, errors)
-                            .into_ty();
-                        self.union(body_type, orelse_type)
-                    }
+                            .into_ty(),
+                    };
+                }
+
+                let body_type = self
+                    .expr_infer_type_info_with_hint(&x.body, hint, errors)
+                    .into_ty();
+                let orelse_type = self
+                    .expr_infer_type_info_with_hint(&x.orelse, hint, errors)
+                    .into_ty();
+                match self.as_bool(&condition_type, x.test.range(), errors) {
+                    Some(true) => body_type,
+                    Some(false) => orelse_type,
+                    None => self.union(body_type, orelse_type),
                 }
             }
             Expr::BoolOp(x) => self.boolop(&x.values, x.op, hint, errors),

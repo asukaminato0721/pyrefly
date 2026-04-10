@@ -649,7 +649,7 @@ impl<'a> BindingsBuilder<'a> {
                 // in the base flow and visible to both branches.
                 self.ensure_expr(&mut x.test, &mut Usage::narrowing_from(usage));
                 let narrow_ops = NarrowOps::from_expr(self, Some(&x.test));
-                let static_test = self.sys_info.evaluate_bool(&x.test);
+                let static_test = self.sys_info.evaluate_bool_sys_info(&x.test);
                 self.start_fork_and_branch(x.range);
                 if static_test == Some(false) {
                     self.abandon_branch();

@@ -517,8 +517,56 @@ impl SysInfo {
         Some(self.evaluate(x)?.to_bool())
     }
 
+    /// Like `evaluate_bool`, but only for expressions that depend on runtime
+    /// environment values such as `sys.platform`, `sys.version_info`,
+    /// `os.name`, or `TYPE_CHECKING`.
+    pub fn evaluate_bool_sys_info(self, x: &Expr) -> Option<bool> {
+        self.depends_on_sys_info(x)
+            .then(|| self.evaluate_bool(x))
+            .flatten()
+    }
+
     fn is_type_checking_constant_name(x: &str) -> bool {
         x == "TYPE_CHECKING" || x == "TYPE_CHECKING_WITH_PYREFLY"
+    }
+
+    fn depends_on_sys_info(self, x: &Expr) -> bool {
+        match x {
+            Expr::Compare(x) => {
+                self.depends_on_sys_info(&x.left)
+                    || x.comparators
+                        .iter()
+                        .any(|expr| self.depends_on_sys_info(expr))
+            }
+            Expr::Attribute(ExprAttribute { value, attr, .. })
+                if let Expr::Name(name) = &**value =>
+            {
+                (&name.id == "sys" && matches!(attr.as_str(), "platform" | "version_info"))
+                    || (&name.id == "os" && attr.as_str() == "name")
+                    || Self::is_type_checking_constant_name(attr.as_str())
+            }
+            Expr::Name(name) => Self::is_type_checking_constant_name(name.id()),
+            Expr::Call(ExprCall {
+                func, arguments, ..
+            }) if let Expr::Attribute(ExprAttribute { value, attr, .. }) = &**func => {
+                attr.as_str() == "startswith"
+                    && self.depends_on_sys_info(value)
+                    && !arguments.args.is_empty()
+            }
+            Expr::Subscript(ExprSubscript { value, slice, .. }) => {
+                self.depends_on_sys_info(value) || self.depends_on_sys_info(slice)
+            }
+            Expr::Tuple(x) => x.elts.iter().any(|expr| self.depends_on_sys_info(expr)),
+            Expr::List(ExprList { elts, .. }) => {
+                elts.iter().any(|expr| self.depends_on_sys_info(expr))
+            }
+            Expr::Set(ExprSet { elts, .. }) => {
+                elts.iter().any(|expr| self.depends_on_sys_info(expr))
+            }
+            Expr::BoolOp(x) => x.values.iter().any(|expr| self.depends_on_sys_info(expr)),
+            Expr::UnaryOp(x) => self.depends_on_sys_info(&x.operand),
+            _ => false,
+        }
     }
 
     fn evaluate(self, x: &Expr) -> Option<Value> {
