@@ -17,7 +17,6 @@ use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
 use pyrefly_util::display::Fmt;
 use pyrefly_util::uniques::Unique;
-use pyrefly_util::uniques::UniqueFactory;
 use ruff_python_ast::name::Name;
 
 use crate::class::ClassType;
@@ -42,6 +41,9 @@ pub struct Quantified {
     /// We store it here for convenience of our variance inference and checking
     /// infrastructure so it can directly read it from the type
     variance: PreInferenceVariance,
+    /// Qualified owner, e.g. `"mod.func"`, set for function type params to enable
+    /// disambiguation in display (e.g. `T@mod.func`).
+    pub owner: Option<Name>,
 }
 
 impl Quantified {
@@ -53,6 +55,7 @@ impl Quantified {
             kind: self.kind,
             default: self.default,
             variance: self.variance,
+            owner: self.owner,
         }
     }
 }
@@ -146,18 +149,24 @@ impl Quantified {
             default,
             restriction,
             variance,
+            owner: None,
         }
+    }
+
+    pub fn with_owner(mut self, owner: Name) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     pub fn type_var(
         name: Name,
-        uniques: &UniqueFactory,
+        unique: Unique,
         default: Option<Type>,
         restriction: Restriction,
         variance: PreInferenceVariance,
     ) -> Self {
         Self::new(
-            uniques.fresh(),
+            unique,
             name,
             QuantifiedKind::TypeVar,
             default,
@@ -167,19 +176,19 @@ impl Quantified {
     }
 
     /// Creates a Quantified from a TypeVar, extracting all relevant fields.
-    pub fn from_type_var(tv: &TypeVar, uniques: &UniqueFactory) -> Self {
+    pub fn from_type_var(tv: &TypeVar, unique: Unique) -> Self {
         Self::type_var(
             tv.qname().id().clone(),
-            uniques,
+            unique,
             tv.default().cloned(),
             tv.restriction().clone(),
             tv.variance(),
         )
     }
 
-    pub fn param_spec(name: Name, uniques: &UniqueFactory, default: Option<Type>) -> Self {
+    pub fn param_spec(name: Name, unique: Unique, default: Option<Type>) -> Self {
         Self::new(
-            uniques.fresh(),
+            unique,
             name,
             QuantifiedKind::ParamSpec,
             default,
@@ -188,9 +197,9 @@ impl Quantified {
         )
     }
 
-    pub fn type_var_tuple(name: Name, uniques: &UniqueFactory, default: Option<Type>) -> Self {
+    pub fn type_var_tuple(name: Name, unique: Unique, default: Option<Type>) -> Self {
         Self::new(
-            uniques.fresh(),
+            unique,
             name,
             QuantifiedKind::TypeVarTuple,
             default,
@@ -225,6 +234,20 @@ impl Quantified {
 
     pub fn restriction(&self) -> &Restriction {
         &self.restriction
+    }
+
+    /// The upper bound of this type parameter as a type, accounting for the parameter's kind.
+    /// For TypeVar the bound is `object`, for ParamSpec it's `...` (any params), and for
+    /// TypeVarTuple it's an unbounded tuple. Explicit bounds and constraints are used as-is.
+    pub fn bound_type(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
+        match &self.restriction {
+            Restriction::Unrestricted => match self.kind {
+                QuantifiedKind::TypeVar => stdlib.object().clone().to_type(),
+                QuantifiedKind::ParamSpec => Type::Ellipsis,
+                QuantifiedKind::TypeVarTuple => Type::any_tuple(),
+            },
+            r => r.as_type(stdlib, heap),
+        }
     }
 
     /// Display this type parameter with its bounds/constraints and default,
@@ -269,7 +292,11 @@ impl Quantified {
         matches!(self.kind, QuantifiedKind::TypeVarTuple)
     }
 
-    fn as_gradual_type_helper(kind: QuantifiedKind, default: Option<&Type>) -> Type {
+    pub fn unique(&self) -> Unique {
+        self.unique
+    }
+
+    pub fn as_gradual_type_helper(kind: QuantifiedKind, default: Option<&Type>) -> Type {
         default.map_or_else(
             || kind.empty_value(),
             |default| {

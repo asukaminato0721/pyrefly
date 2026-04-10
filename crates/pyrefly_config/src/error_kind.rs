@@ -31,7 +31,8 @@ use yansi::Painted;
     Eq,
     Hash,
     Deserialize,
-    Serialize
+    Serialize,
+    ValueEnum
 )]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -140,6 +141,8 @@ pub enum ErrorKind {
     BadUnpacking,
     /// Calling a function marked with `@deprecated`
     Deprecated,
+    /// Division, floor division, or modulo by a literal zero value.
+    DivisionByZero,
     /// Raised when a class implicitly becomes abstract by defining abstract members without
     /// inheriting from `abc.ABC` or using `abc.ABCMeta`.
     ImplicitAbstractClass,
@@ -155,6 +158,9 @@ pub enum ErrorKind {
     InconsistentInheritance,
     /// An inconsistency between the signature of a function overload and the implementation.
     InconsistentOverload,
+    /// An inconsistency between a function parameter's type in an overload signature and its
+    /// default value in the implementation.
+    InconsistentOverloadDefault,
     /// Internal Pyrefly error.
     InternalError,
     /// Attempting to write an annotation that is invalid for some reason.
@@ -211,10 +217,15 @@ pub enum ErrorKind {
     MissingSource,
     /// We are using bundled stubs for a package but the source code is missing.
     MissingSourceForStubs,
+    /// The first string argument to a functional type definition does not match the bound name.
+    NameMismatch,
     /// The attribute exists but does not support this access pattern.
     NoAccess,
     /// Attempting to call an overloaded function, but none of the signatures match.
     NoMatchingOverload,
+    /// The SCC fixpoint iteration did not converge within the maximum number of
+    /// iterations. The inferred type may be incorrect; adding annotations can help.
+    NonConvergentRecursion,
     /// Matching on an enum without covering all possible cases.
     NonExhaustiveMatch,
     /// Attempting to use something that isn't a type where a type is expected.
@@ -248,6 +259,8 @@ pub enum ErrorKind {
     UnannotatedAttribute,
     /// A function parameter is missing a type annotation.
     UnannotatedParameter,
+    /// A protocol member is assigned a value in the class body without an explicit type annotation.
+    UnannotatedProtocolMember,
     /// A function is missing a return type annotation.
     UnannotatedReturn,
     /// Attempting to use a name that may be unbound or uninitialized
@@ -256,6 +269,8 @@ pub enum ErrorKind {
     UnexpectedKeyword,
     /// An error caused by passing a positional argument for a keyword-only parameter.
     UnexpectedPositionalArgument,
+    /// Attempting to use a type checker directive without importing it from `typing`.
+    UnimportedDirective,
     /// Attempting to use a name that is not defined.
     UnknownName,
     /// Identity comparison (`is` or `is not`) between types that are provably disjoint
@@ -265,6 +280,8 @@ pub enum ErrorKind {
     /// This occurs when a return/yield follows a statement that always exits,
     /// such as return, raise, break, or continue.
     Unreachable,
+    /// `__all__` is defined but cannot be statically analyzed.
+    UnresolvableDunderAll,
     /// Protocols decorated with `@runtime_checkable` can be used in `isinstance` checks
     /// The runtime only checks that an attribute with that name is present, so the
     /// type checker must warn if the types are not compatible.
@@ -321,27 +338,42 @@ impl ErrorKind {
     pub fn default_severity(self) -> Severity {
         // IMPORTANT: When updating these, also update error-kinds.mdx in the docs
         match self {
-            ErrorKind::RevealType => Severity::Info,
             ErrorKind::Deprecated => Severity::Warn,
-            ErrorKind::RedundantCast => Severity::Warn,
-            ErrorKind::UnnecessaryComparison => Severity::Warn,
-            // TODO: up severity to Warn when https://github.com/facebook/pyrefly/issues/1950 is fixed
-            ErrorKind::UntypedImport => Severity::Ignore,
-            ErrorKind::NotRequiredKeyAccess => Severity::Ignore,
-            ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::DivisionByZero => Severity::Warn,
             ErrorKind::ImplicitAbstractClass => Severity::Ignore,
             ErrorKind::ImplicitAny => Severity::Ignore,
+            ErrorKind::ImplicitImport => Severity::Warn,
+            ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
+            ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::MissingOverrideDecorator => Severity::Ignore,
+            ErrorKind::MissingSource => Severity::Ignore,
+            ErrorKind::NameMismatch => Severity::Warn,
+            ErrorKind::NonExhaustiveMatch => Severity::Warn,
+            ErrorKind::NonConvergentRecursion => Severity::Warn,
+            ErrorKind::NotRequiredKeyAccess => Severity::Ignore,
+            ErrorKind::OpenUnpacking => Severity::Ignore,
+            ErrorKind::RedundantCast => Severity::Warn,
+            ErrorKind::RedundantCondition => Severity::Warn,
+            ErrorKind::RevealType => Severity::Info,
+            ErrorKind::UnannotatedAttribute => Severity::Ignore,
             ErrorKind::UnannotatedParameter => Severity::Ignore,
             ErrorKind::UnannotatedReturn => Severity::Ignore,
-            ErrorKind::UnannotatedAttribute => Severity::Ignore,
-            ErrorKind::MissingSource => Severity::Ignore,
-            ErrorKind::MissingOverrideDecorator => Severity::Ignore,
-            ErrorKind::OpenUnpacking => Severity::Ignore,
-            ErrorKind::NonExhaustiveMatch => Severity::Warn,
+            ErrorKind::UnnecessaryComparison => Severity::Warn,
+            ErrorKind::Unreachable => Severity::Warn,
+            ErrorKind::UnresolvableDunderAll => Severity::Warn,
+            ErrorKind::UntypedImport => Severity::Warn,
             ErrorKind::UnusedIgnore => Severity::Ignore,
             ErrorKind::VarianceMismatch => Severity::Warn,
             _ => Severity::Error,
         }
+    }
+
+    /// Returns true if this error kind is a type checker directive rather than
+    /// a real diagnostic. Directives bypass suppression, baseline exclusion,
+    /// and min-severity filtering, but can still be disabled via explicit
+    /// per-kind severity overrides (e.g. `--ignore reveal-type`).
+    pub fn is_directive(self) -> bool {
+        matches!(self, ErrorKind::RevealType)
     }
 
     /// Returns the public documentation URL for this error kind.
