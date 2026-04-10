@@ -1749,8 +1749,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Some(Arc::new(all_tparams))
             }
         };
+        let strip_receiver_for_input_check = def.defining_cls().is_some()
+            && !def.metadata().flags.is_staticmethod
+            && def.metadata().kind.function_name().as_ref() != &dunder::INIT;
         let sig_for_input_check = |sig: &Callable| {
-            let mut sig = sig.clone();
+            let mut sig = if strip_receiver_for_input_check {
+                sig.strip_self_param()
+            } else {
+                sig.clone()
+            };
             // Set the return type to `Any` so that we check just the input signature.
             sig.ret = self.heap.mk_any_implicit();
             sig

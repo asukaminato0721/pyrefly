@@ -849,6 +849,36 @@ def f(x: int) -> int:
 );
 
 testcase!(
+    test_method_receiver_overload_consistency,
+    r#"
+from typing import Awaitable, Literal, Protocol, overload
+
+class _AsyncMarker(Protocol):
+    _is_async: Literal[True]
+
+class _SyncMarker(Protocol):
+    _is_async: Literal[False]
+
+class KeyCommands:
+    @overload
+    def get(self: _SyncMarker, name: str) -> str | None: ...
+    @overload
+    def get(self: _AsyncMarker, name: str) -> Awaitable[str | None]: ...
+    def get(self, name: str) -> str | None | Awaitable[str | None]:
+        return None
+
+    @overload
+    def set(self: _SyncMarker, name: str, value: str, ex: int | None = None) -> bool: ...
+    @overload
+    def set(
+        self: _AsyncMarker, name: str, value: str, ex: int | None = None
+    ) -> Awaitable[bool]: ...
+    def set(self, name: str, value: str, ex: int | None = None) -> bool | Awaitable[bool]:
+        return True
+    "#,
+);
+
+testcase!(
     test_typevar_bound_consistency,
     r#"
 from typing import overload
