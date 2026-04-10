@@ -4450,7 +4450,21 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         want: &ClassAttribute,
         is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
     ) -> Result<(), Box<AttrSubsetError>> {
-        match (got, want) {
+        let normalize_cached_property = |attr: &ClassAttribute| match attr {
+            // `cached_property` behaves like a writable instance attribute for override checks:
+            // reads use the getter return type, and writes are already validated against it.
+            ClassAttribute::Property(getter, None, _) if getter.is_cached_property() => {
+                ClassAttribute::ReadWrite(
+                    getter
+                        .callable_return_type(self.heap)
+                        .expect("cached_property getter should be callable"),
+                )
+            }
+            _ => attr.clone(),
+        };
+        let got = normalize_cached_property(got);
+        let want = normalize_cached_property(want);
+        match (&got, &want) {
             (_, ClassAttribute::NoAccess(_)) => return Ok(()),
             (ClassAttribute::NoAccess(_), _) => return Err(Box::new(AttrSubsetError::NoAccess)),
             _ => {}
@@ -4466,14 +4480,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 )
             )
         };
-        let got_is_classvar = is_classvar_compatible(got);
-        let want_is_classvar = is_classvar_compatible(want);
+        let got_is_classvar = is_classvar_compatible(&got);
+        let want_is_classvar = is_classvar_compatible(&want);
         if got_is_classvar != want_is_classvar {
             return Err(Box::new(AttrSubsetError::ClassVarMismatch {
                 got_is_classvar,
             }));
         }
-        match (got, want) {
+        match (&got, &want) {
             (_, ClassAttribute::NoAccess(_)) | (ClassAttribute::NoAccess(_), _) => {
                 unreachable!("handled above")
             }

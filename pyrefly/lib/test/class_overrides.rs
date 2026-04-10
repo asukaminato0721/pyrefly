@@ -73,6 +73,36 @@ class E(B):
 );
 
 testcase!(
+    test_cached_property_overrides_unannotated_class_variable,
+    r#"
+from functools import cached_property
+from typing import assert_type
+
+class Base:
+    can_introspect_fk = True
+    update_can_self_select = True
+
+class Child(Base):
+    @cached_property
+    def can_introspect_fk(self) -> bool:
+        return self._check()
+
+    @cached_property
+    def update_can_self_select(self) -> bool:
+        return True
+
+    def _check(self) -> bool:
+        return False
+
+def f(child: Child) -> None:
+    assert_type(child.can_introspect_fk, bool)
+    assert_type(child.update_can_self_select, bool)
+    child.can_introspect_fk = False
+    child.update_can_self_select = False
+ "#,
+);
+
+testcase!(
     test_override_classvar_with_nested_class,
     r#"
 from typing import ClassVar
