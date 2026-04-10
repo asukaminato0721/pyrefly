@@ -749,12 +749,25 @@ class Derived(Base):
 
 testcase!(
     test_param_name_change,
+    TestEnv::new().enable_bad_param_name_override_error(),
     r#"
 class A:
     def f(self, x: int):
         pass
 class B(A):
     def f(self, x1: int):  # E: Got parameter name `x1`, expected `x`
+        pass
+    "#,
+);
+
+testcase!(
+    test_param_name_change_disabled_by_default,
+    r#"
+class A:
+    def f(self, x: int):
+        pass
+class B(A):
+    def f(self, x1: int):
         pass
     "#,
 );

@@ -340,6 +340,7 @@ impl ErrorKind {
         match self {
             ErrorKind::Deprecated => Severity::Warn,
             ErrorKind::DivisionByZero => Severity::Warn,
+            ErrorKind::BadParamNameOverride => Severity::Ignore,
             ErrorKind::ImplicitAbstractClass => Severity::Ignore,
             ErrorKind::ImplicitAny => Severity::Ignore,
             ErrorKind::ImplicitImport => Severity::Warn,

@@ -112,6 +112,7 @@ pub struct TestEnv {
     unannotated_attribute_error: bool,
     implicit_abstract_class_error: bool,
     open_unpacking_error: bool,
+    bad_param_name_override_error: bool,
     missing_override_decorator_error: bool,
     not_required_key_access_error: bool,
     strict_callable_subtyping: bool,
@@ -142,6 +143,7 @@ impl TestEnv {
             unannotated_attribute_error: false,
             implicit_abstract_class_error: false,
             open_unpacking_error: false,
+            bad_param_name_override_error: false,
             missing_override_decorator_error: false,
             not_required_key_access_error: false,
             strict_callable_subtyping: false,
@@ -265,6 +267,11 @@ impl TestEnv {
 
     pub fn enable_open_unpacking_error(mut self) -> Self {
         self.open_unpacking_error = true;
+        self
+    }
+
+    pub fn enable_bad_param_name_override_error(mut self) -> Self {
+        self.bad_param_name_override_error = true;
         self
     }
 
@@ -403,6 +410,9 @@ impl TestEnv {
         }
         if self.open_unpacking_error {
             errors.set_error_severity(ErrorKind::OpenUnpacking, Severity::Error);
+        }
+        if self.bad_param_name_override_error {
+            errors.set_error_severity(ErrorKind::BadParamNameOverride, Severity::Error);
         }
         if self.missing_override_decorator_error {
             errors.set_error_severity(ErrorKind::MissingOverrideDecorator, Severity::Error);

@@ -309,7 +309,7 @@ Note that bad overrides caused by inconsistent parameter names are separately re
 ## bad-param-name-override
 
 Arises when a subclass overrides a method of its base class while changing the name of a positional parameter.
-This is a type of [bad override](#bad-override) but has a separate error kind so that it can be selectively disabled if desired.
+This is a type of [bad override](#bad-override) but has a separate error kind so that it can be selectively enabled when you want to enforce stable parameter names across overrides.
 Changing the name of a parameter breaks callers that pass in an argument by name:
 
 ```python
@@ -325,6 +325,13 @@ def f(base: Base):
   base.f(a=0)
 
 f(Sub())  # oops!
+```
+
+This diagnostic is also used for multiple inheritance when two inherited methods differ only by positional parameter name. The default severity is `ignore`; set it to `error` if you want Pyrefly to flag these mismatches:
+
+```toml
+[tool.pyrefly]
+errors = { bad-param-name-override = "error" }
 ```
 
 ## bad-raise

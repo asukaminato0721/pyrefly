@@ -3530,10 +3530,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // intersection is produced (or `Never` if the types are disjoint), then there was
                 // no common base type, so the inheritance is inconsistent.
                 if matches!(intersect, Type::Intersect(_) | Type::Never(_)) {
+                    let is_name_only_mismatch =
+                        self.has_only_inherited_param_name_mismatches(&types);
                     let mut error_msg = vec1![
-                        format!(
-                            "Field `{field_name}` has inconsistent types inherited from multiple base classes"
-                        ),
+                        if is_name_only_mismatch {
+                            format!(
+                                "Field `{field_name}` has positional parameter name mismatches inherited from multiple base classes"
+                            )
+                        } else {
+                            format!(
+                                "Field `{field_name}` has inconsistent types inherited from multiple base classes"
+                            )
+                        },
                         "Inherited types include:".to_owned()
                     ];
                     for info in inherited_field_infos_by_ancestor.iter() {
@@ -3545,7 +3553,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     }
                     errors.add(
                         cls.range(),
-                        ErrorInfo::Kind(ErrorKind::InconsistentInheritance),
+                        ErrorInfo::Kind(if is_name_only_mismatch {
+                            ErrorKind::BadParamNameOverride
+                        } else {
+                            ErrorKind::InconsistentInheritance
+                        }),
                         error_msg,
                     );
                 } else {
@@ -4442,6 +4454,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             other => Some(other),
         }
+    }
+
+    /// Detect the narrow case where inherited methods only disagree on positional parameter names.
+    fn has_only_inherited_param_name_mismatches(&self, inherited_types: &[Type]) -> bool {
+        let mut saw_name_mismatch = false;
+        for (i, left) in inherited_types.iter().enumerate() {
+            if !left.is_toplevel_callable() || left.callable_signatures().len() != 1 {
+                return false;
+            }
+            for right in inherited_types.iter().skip(i + 1) {
+                if !right.is_toplevel_callable() || right.callable_signatures().len() != 1 {
+                    return false;
+                }
+                match (
+                    self.is_subset_eq_with_reason(left, right),
+                    self.is_subset_eq_with_reason(right, left),
+                ) {
+                    (Err(SubsetError::PosParamName(..)), Err(SubsetError::PosParamName(..))) => {
+                        saw_name_mismatch = true;
+                    }
+                    (Ok(()), Ok(())) => {}
+                    _ => return false,
+                }
+            }
+        }
+        saw_name_mismatch
     }
 
     pub fn is_class_attribute_subset(
