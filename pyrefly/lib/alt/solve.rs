@@ -232,6 +232,18 @@ impl TypeFormContext {
             _ => false,
         }
     }
+
+    fn reports_implicit_alias_syntax_at_use_site(self) -> bool {
+        matches!(
+            self,
+            TypeFormContext::ClassVarAnnotation
+                | TypeFormContext::ParameterAnnotation
+                | TypeFormContext::ParameterArgsAnnotation
+                | TypeFormContext::ParameterKwargsAnnotation
+                | TypeFormContext::ReturnAnnotation
+                | TypeFormContext::VarAnnotation(_)
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -5638,7 +5650,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         type_form_context: TypeFormContext,
         errors: &ErrorCollector,
     ) -> Type {
-        if let Some(problem) = self.implicit_type_alias_syntax_problem(x) {
+        if type_form_context.reports_implicit_alias_syntax_at_use_site()
+            && let Some(problem) = self.implicit_type_alias_syntax_problem(x)
+        {
             return self.error(
                 errors,
                 x.range(),
