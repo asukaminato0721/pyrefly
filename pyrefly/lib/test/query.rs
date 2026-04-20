@@ -17,6 +17,7 @@ use tempfile::TempDir;
 
 use crate::config::config::ConfigFile;
 use crate::config::finder::ConfigFinder;
+use crate::query::Callee;
 use crate::query::PythonASTRange;
 use crate::query::Query;
 use crate::test::util::TEST_THREAD_COUNT;
@@ -539,14 +540,14 @@ fn test_callees_annotated_type() {
     let tdir = TempDir::new().unwrap();
     let file_path = tdir.path().join("main.py");
     // A type alias whose body is Annotated[Foo, ...] stores Type::Annotated
-    // internally. Calling the alias as a value makes callee_from_type recurse
-    // into the TypeAlias body, reaching Type::Annotated.
+    // internally. Calling the alias as a value must resolve callees through
+    // the wrapped type rather than stopping at the Annotated wrapper.
     let code = r#"
 from typing import Annotated, TypeAlias
 
 class Foo:
-    def bar(self) -> int:
-        return 42
+    def __init__(self) -> None:
+        pass
 
 MyType: TypeAlias = Annotated[Foo, "metadata"]
 
@@ -560,23 +561,23 @@ def f() -> None:
     let path = ModulePath::filesystem(file_path.clone());
 
     let errors = query.add_files(vec![(module_name, path.clone())]);
-    assert!(
-        !errors.is_empty(),
-        "Annotated[Foo, ...] is not callable, expected errors"
-    );
-    assert!(
-        errors.iter().any(|e| e.contains("not-callable")),
-        "Expected a not-callable error, got: {errors:?}",
-    );
+    assert!(errors.is_empty(), "Unexpected errors: {errors:?}");
 
-    // get_callees_with_location triggers callee_from_type which must handle
-    // Type::Annotated rather than panicking. Annotated is not callable, so
-    // MyType() should produce no callees.
+    // get_callees_with_location triggers callee_from_type which must treat
+    // Annotated as call-transparent and report Foo.__init__.
     let callees = query
         .get_callees_with_location(module_name, path, None)
         .unwrap();
-    assert!(
-        callees.is_empty(),
-        "Annotated is not callable, expected no callees"
+    let callees = callees
+        .into_iter()
+        .map(|(_, callee)| callee)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        callees,
+        vec![Callee {
+            kind: String::from("method"),
+            target: String::from("main.Foo.__init__"),
+            class_name: Some(String::from("main.Foo")),
+        }]
     );
 }

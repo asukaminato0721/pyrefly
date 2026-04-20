@@ -853,8 +853,16 @@ impl<'a> CalleesWithLocation<'a> {
             }
             Type::Callable(..) => self.for_callable(callee_range),
             Type::Type(box ty) => self.init_or_new_from_type(ty, callee_range),
-            // Annotated[T, ...] is not callable (matching as_call_target_impl).
-            Type::Annotated(_, _) => vec![],
+            Type::Annotated(inner, _) => match inner.as_ref() {
+                Type::SelfType(_)
+                | Type::ClassType(_)
+                | Type::Quantified(_)
+                | Type::Union(_)
+                | Type::Any(_) => self.init_or_new_from_type(inner, callee_range),
+                // Annotated wraps a type expression, so non-constructor forms do not
+                // currently contribute a concrete callee target here.
+                _ => vec![],
+            },
 
             Type::ClassDef(cls) => self.find_init_or_new(cls),
             Type::Forall(v) => match &v.body {

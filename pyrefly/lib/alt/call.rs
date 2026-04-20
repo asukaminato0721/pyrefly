@@ -341,6 +341,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.as_call_target_impl(fallback, quantified)
             }
             Type::Any(style) => CallTargetLookup::Ok(Box::new(CallTarget::Any(style))),
+            // Annotated[T, ...] forwards runtime calls to the value form of T.
+            Type::Annotated(inner, _) => {
+                self.as_call_target_impl(self.heap.mk_type_of(*inner), quantified)
+            }
             Type::TypeAlias(ta) => {
                 let body = self.get_type_alias(&ta).as_value(self.stdlib);
                 match body {

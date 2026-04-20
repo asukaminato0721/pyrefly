@@ -998,6 +998,18 @@ Y = Annotated[int] # E: `Annotated` needs at least one piece of metadata in addi
 );
 
 testcase!(
+    test_annotated_is_callable,
+    r#"
+from typing import Annotated, assert_type
+x1 = Annotated[str, "meta"]("hello")
+assert_type(x1, str)
+X = Annotated[str, "meta"]
+x2 = X("hello")
+assert_type(x2, str)
+    "#,
+);
+
+testcase!(
     test_annotated_dunder_doc,
     r#"
 from typing import Annotated, assert_type
