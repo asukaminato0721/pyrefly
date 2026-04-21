@@ -650,7 +650,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
         let key = Key::BoundName(ShortIdentifier::expr_name(name));
         let mut idx = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key))?;
-        for _ in 0..100 {
+        let mut visited = SmallSet::new();
+        loop {
+            if !visited.insert(idx) {
+                return None;
+            }
             match self.bindings().get(idx) {
                 Binding::Forward(next)
                 | Binding::PromoteForward(next)
@@ -671,7 +675,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 _ => return None,
             }
         }
-        None
     }
 
     fn expr_annotation(
