@@ -689,6 +689,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 SpecialExport::TypeVar
                     | SpecialExport::ParamSpec
                     | SpecialExport::TypeVarTuple
+                    | SpecialExport::TypedDict
+                    | SpecialExport::TypingNamedTuple
+                    | SpecialExport::CollectionsNamedTuple
                     | SpecialExport::BuiltinsType
             )
         ) {
@@ -787,6 +790,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Binding::Import(import) => {
                     return SpecialExport::new(&import.1)
                         .filter(|export| export.defined_in(import.0));
+                }
+                Binding::ClassDef(class_idx, _) => {
+                    let Some(cls) = &self.get_idx(*class_idx).0 else {
+                        return None;
+                    };
+                    return SpecialExport::new(cls.name());
                 }
                 _ => return None,
             }
