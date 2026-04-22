@@ -4424,12 +4424,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         &self,
         binding: &Binding,
         expr: &Expr,
+        flow_narrow_exhaustive: Option<Idx<Key>>,
         errors: &ErrorCollector,
     ) -> TypeInfo {
-        let ty = self.binding_to_type(binding, errors);
+        let ty = if let Some(key) = flow_narrow_exhaustive
+            && self.get_idx(key).ty().is_never()
+        {
+            // Keep checking the RHS so unreachable branches still report real errors,
+            // but the assigned name itself should collapse to Never.
+            let _ = self.binding_to_type(binding, errors);
+            self.heap.mk_never()
+        } else {
+            self.binding_to_type(binding, errors)
+        };
         let mut type_info = TypeInfo::of_ty(ty);
-        let mut prefix = Vec::new();
-        self.populate_dict_literal_facets(&mut type_info, &mut prefix, expr);
+        if !type_info.ty().is_never() {
+            let mut prefix = Vec::new();
+            self.populate_dict_literal_facets(&mut type_info, &mut prefix, expr);
+        }
         type_info
     }
 
@@ -4468,7 +4480,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if x.receiver_idx.is_some() {
                     TypeInfo::of_ty(self.binding_to_type(binding, errors))
                 } else {
-                    self.binding_to_type_info_name_assign(binding, x.expr.as_ref(), errors)
+                    self.binding_to_type_info_name_assign(
+                        binding,
+                        x.expr.as_ref(),
+                        x.flow_narrow_exhaustive,
+                        errors,
+                    )
                 }
             }
             Binding::AssignToAttribute(x) => self.binding_to_type_info_assign_to_attribute(
