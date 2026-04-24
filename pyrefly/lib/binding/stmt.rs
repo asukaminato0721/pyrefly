@@ -20,12 +20,14 @@ use ruff_python_ast::ExprName;
 use ruff_python_ast::ExprNumberLiteral;
 use ruff_python_ast::ExprSet;
 use ruff_python_ast::ExprTuple;
+use ruff_python_ast::ExprUnaryOp;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtAssign;
 use ruff_python_ast::StmtExpr;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::StmtReturn;
+use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
@@ -992,6 +994,21 @@ impl<'a> BindingsBuilder<'a> {
                 // fix for ternary expressions in expr.rs (Expr::If handling).
                 self.ensure_expr(&mut x.test, &mut Usage::Narrowing(None));
                 self.start_fork(if_range);
+                let conditional_init_condition = |test: Option<&Expr>| -> Option<(Name, bool)> {
+                    match test {
+                        Some(Expr::Name(ExprName { id, .. })) => Some((id.clone(), true)),
+                        Some(Expr::UnaryOp(ExprUnaryOp {
+                            op: UnaryOp::Not,
+                            operand,
+                            ..
+                        })) => match &**operand {
+                            Expr::Name(ExprName { id, .. }) => Some((id.clone(), false)),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                let mut conditional_init_records: Vec<(Name, bool, SmallSet<Name>)> = Vec::new();
                 // Type narrowing operations that are carried over from one branch to the next. For example, in:
                 //   if x is None:
                 //     pass
@@ -1050,6 +1067,7 @@ impl<'a> BindingsBuilder<'a> {
                     } else {
                         NarrowOps::from_expr(self, test.as_ref())
                     };
+                    let condition = conditional_init_condition(test.as_ref());
                     if let Some(test_expr) = test {
                         // Typecheck the test condition during solving.
                         self.insert_binding(
@@ -1062,8 +1080,18 @@ impl<'a> BindingsBuilder<'a> {
                         NarrowUseLocation::Span(range),
                         &Usage::Narrowing(None),
                     );
+                    if let Some((condition_name, truthy)) = &condition {
+                        self.scopes
+                            .apply_conditional_initializations(condition_name, *truthy);
+                    }
                     negated_prev_ops.and_all(new_narrow_ops.negate());
                     self.stmts(body, parent);
+                    if let Some((condition_name, truthy)) = condition {
+                        let names = self.scopes.newly_initialized_names_in_current_branch();
+                        if !names.is_empty() {
+                            conditional_init_records.push((condition_name, truthy, names));
+                        }
+                    }
                     self.finish_branch();
                     if this_branch_chosen == Some(true) {
                         exhaustive = true;
@@ -1090,6 +1118,8 @@ impl<'a> BindingsBuilder<'a> {
                 } else {
                     self.finish_non_exhaustive_fork(&negated_prev_ops, exhaustive_key);
                 }
+                self.scopes
+                    .record_conditional_initializations(conditional_init_records);
                 // If we have a statically evaluated test like `sys.version_info`, we should set `is_definitely_unreachable` to false
                 // to reduce false positive unreachable errors, since some code paths can still be hit at runtime
                 if contains_static_test_with_no_else && !is_definitely_unreachable {

@@ -501,6 +501,17 @@ pub struct Flow {
     /// The key for the last `Binding::StmtExpr` in this flow, if any.
     /// Used to check for type-based termination (NoReturn/Never) at solve time.
     last_stmt_expr: Option<Idx<Key>>,
+    /// Names that are conditionally initialized based on the truthiness of
+    /// another name, recorded as:
+    /// - truthy: when the condition name is truthy
+    /// - falsy: when the condition name is falsy
+    ///
+    /// This is used to reduce false positives for repeated tests like:
+    ///   if foo:
+    ///     bar = 1
+    ///   if foo:
+    ///     bar += 1
+    conditional_inits: ConditionalInits,
 }
 
 impl Flow {
@@ -522,6 +533,92 @@ impl Flow {
 
     fn get_value_mut(&mut self, name: &Name) -> Option<&mut FlowValue> {
         self.info.get_mut(name)?.value_mut()
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+struct ConditionalInits {
+    truthy: SmallMap<Name, SmallSet<Name>>,
+    falsy: SmallMap<Name, SmallSet<Name>>,
+}
+
+impl ConditionalInits {
+    fn record(&mut self, condition: Name, truthy: bool, names: impl IntoIterator<Item = Name>) {
+        let map = if truthy {
+            &mut self.truthy
+        } else {
+            &mut self.falsy
+        };
+        let entry = map.entry(condition).or_insert_with(SmallSet::new);
+        for name in names {
+            entry.insert(name);
+        }
+    }
+
+    fn targets(&self, condition: &Name, truthy: bool) -> Option<&SmallSet<Name>> {
+        if truthy {
+            self.truthy.get(condition)
+        } else {
+            self.falsy.get(condition)
+        }
+    }
+
+    fn remove_condition(&mut self, condition: &Name) {
+        self.truthy.shift_remove(condition);
+        self.falsy.shift_remove(condition);
+    }
+
+    fn remove_target(&mut self, target: &Name) {
+        fn remove_from_map(map: &mut SmallMap<Name, SmallSet<Name>>, target: &Name) {
+            let mut empty_conditions = Vec::new();
+            for (condition, names) in map.iter_mut() {
+                names.shift_remove(target);
+                if names.is_empty() {
+                    empty_conditions.push(condition.clone());
+                }
+            }
+            for condition in empty_conditions {
+                map.shift_remove(&condition);
+            }
+        }
+        remove_from_map(&mut self.truthy, target);
+        remove_from_map(&mut self.falsy, target);
+    }
+
+    fn intersect<'a>(mut inits: impl Iterator<Item = &'a ConditionalInits>) -> ConditionalInits {
+        let Some(first) = inits.next() else {
+            return ConditionalInits::default();
+        };
+
+        fn intersect_map(
+            left: SmallMap<Name, SmallSet<Name>>,
+            right: &SmallMap<Name, SmallSet<Name>>,
+        ) -> SmallMap<Name, SmallSet<Name>> {
+            let mut out = SmallMap::new();
+            for (condition, left_names) in left.into_iter() {
+                let Some(right_names) = right.get(&condition) else {
+                    continue;
+                };
+                let mut intersection = SmallSet::new();
+                for name in left_names.iter() {
+                    if right_names.contains(name) {
+                        intersection.insert(name.clone());
+                    }
+                }
+                if !intersection.is_empty() {
+                    out.insert(condition, intersection);
+                }
+            }
+            out
+        }
+
+        let mut truthy = first.truthy.clone();
+        let mut falsy = first.falsy.clone();
+        for other in inits {
+            truthy = intersect_map(truthy, &other.truthy);
+            falsy = intersect_map(falsy, &other.falsy);
+        }
+        ConditionalInits { truthy, falsy }
     }
 }
 
@@ -1964,6 +2061,7 @@ impl Scopes {
         idx: Idx<Key>,
         style: FlowStyle,
     ) -> Option<NameWriteInfo> {
+        let name_key = (*name.key()).clone();
         let in_loop = self.loop_depth() != 0;
         match self.current_mut().flow.info.entry_hashed(name.cloned()) {
             Entry::Vacant(e) => {
@@ -1973,6 +2071,10 @@ impl Scopes {
                 *e.get_mut() = e.get().updated_value(idx, style, in_loop);
             }
         }
+        self.current_mut()
+            .flow
+            .conditional_inits
+            .remove_condition(&name_key);
         let static_info = self.current().stat.0.get_hashed(name)?;
         Some(static_info.as_name_write_info())
     }
@@ -2015,6 +2117,73 @@ impl Scopes {
         if let Some(value) = self.current_mut().flow.get_value_mut(name) {
             value.style = FlowStyle::Uninitialized;
         }
+        let flow = &mut self.current_mut().flow;
+        flow.conditional_inits.remove_condition(name);
+        flow.conditional_inits.remove_target(name);
+    }
+
+    /// Record conditional initialization facts in the current flow.
+    pub fn record_conditional_initializations(
+        &mut self,
+        records: impl IntoIterator<Item = (Name, bool, SmallSet<Name>)>,
+    ) {
+        let flow = &mut self.current_mut().flow;
+        for (condition, truthy, names) in records {
+            flow.conditional_inits
+                .record(condition, truthy, names.into_iter());
+        }
+    }
+
+    /// Apply conditional initialization facts for a condition name that is
+    /// known to be truthy/falsy in the current branch.
+    pub fn apply_conditional_initializations(&mut self, condition: &Name, truthy: bool) {
+        let targets: Vec<Name> = self
+            .current()
+            .flow
+            .conditional_inits
+            .targets(condition, truthy)
+            .into_iter()
+            .flat_map(|names| names.iter().cloned())
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        for target in targets {
+            if let Some(value) = self.current_mut().flow.get_value_mut(&target)
+                && matches!(
+                    &value.style,
+                    FlowStyle::Uninitialized
+                        | FlowStyle::PossiblyUninitialized
+                        | FlowStyle::MaybeInitialized(_)
+                )
+            {
+                value.style = FlowStyle::Other;
+            }
+        }
+    }
+
+    /// Names that are initialized in the current branch flow but not in the
+    /// current fork's base flow.
+    pub fn newly_initialized_names_in_current_branch(&self) -> SmallSet<Name> {
+        let scope = self.current();
+        let Some(fork) = scope.forks.last() else {
+            return SmallSet::new();
+        };
+        let mut names = SmallSet::new();
+        for (name, info) in scope.flow.info.iter() {
+            if !matches!(info.initialized(), InitializedInFlow::Yes) {
+                continue;
+            }
+            let base_initialized = fork
+                .base
+                .get_info(name)
+                .map(|info| info.initialized())
+                .unwrap_or(InitializedInFlow::No);
+            if matches!(base_initialized, InitializedInFlow::No) {
+                names.insert(name.clone());
+            }
+        }
+        names
     }
 
     fn get_flow_info(&self, name: &Name) -> Option<&FlowInfo> {
@@ -3404,6 +3573,17 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             live_branches
         };
+
+        let merged_conditional_inits = if flows.is_empty() {
+            base.conditional_inits.clone()
+        } else {
+            let iter = flows.iter().map(|flow| &flow.conditional_inits);
+            if matches!(merge_style, MergeStyle::Loop) {
+                ConditionalInits::intersect(std::iter::once(&base.conditional_inits).chain(iter))
+            } else {
+                ConditionalInits::intersect(iter)
+            }
+        };
         // Determine reachability of the merged flow.
         // For Loop style with empty flows (all branches terminated), the loop body might
         // never execute (empty iterable), so we use the base flow's reachability.
@@ -3492,6 +3672,7 @@ impl<'a> BindingsBuilder<'a> {
             has_terminated,
             is_definitely_unreachable: all_are_unreachable,
             last_stmt_expr: None,
+            conditional_inits: merged_conditional_inits,
         };
         self.scopes.current_mut().flow = flow
     }

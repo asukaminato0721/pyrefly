@@ -1524,6 +1524,41 @@ def f(x: A):
 );
 
 testcase!(
+    test_repeated_if_same_test_initializes,
+    r#"
+def f(foo: bool) -> None:
+    if foo:
+        bar = 1
+    if foo:
+        bar += 1
+    "#,
+);
+
+testcase!(
+    test_repeated_if_same_test_initializes_requires_statement_execution,
+    r#"
+def f(foo: bool, other: bool) -> None:
+    if other:
+        if foo:
+            bar = 1
+    if foo:
+        bar += 1  # E: `bar` may be uninitialized
+    "#,
+);
+
+testcase!(
+    test_repeated_if_same_test_initializes_invalidated_by_reassignment,
+    r#"
+def f(foo: bool) -> None:
+    if foo:
+        bar = 1
+    foo = not foo
+    if foo:
+        bar += 1  # E: `bar` may be uninitialized
+    "#,
+);
+
+testcase!(
     test_join_with_unrelated_narrow,
     r#"
 from typing import assert_type, reveal_type
