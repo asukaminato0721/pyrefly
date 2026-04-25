@@ -41,6 +41,43 @@ force_error(f(1, None))  # E: Argument `tuple[int, @_]` is not assignable to par
 );
 
 testcase!(
+    test_generic_call_alias_closure_class_attribute,
+    r#"
+from typing import Callable, TypeVar, reveal_type
+
+T = TypeVar("T")
+A = T | Callable[[], T]
+B = A | list[T]
+
+def bar(x: int) -> None:
+    pass
+
+def f(x: B[T], g: Callable[[T], None]) -> A[T]:
+    def if_callable() -> T:
+        r = x()  # pyrefly: ignore[not-callable]
+        g(r)
+        return r
+    if callable(x):
+        return if_callable
+    elif isinstance(x, list):
+        g(x[0])
+        return x[0]
+    else:
+        g(x)
+        return x
+
+class Test:
+    def __init__(self, arg: B[int]):
+        self.foo = f(arg, bar)
+        reveal_type(self.foo)  # E: revealed type: (() -> int) | int
+
+def standalone(arg: B[int]):
+    foo = f(arg, bar)
+    reveal_type(foo)  # E: revealed type: (() -> int) | int
+"#,
+);
+
+testcase!(
     test_self_type_subst,
     r#"
 from typing import assert_type, Self

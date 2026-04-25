@@ -1492,32 +1492,33 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             ctor_targs_no_hint.as_mut(),
         );
         // If the call succeeds, attempt contextual typing with the hint.
-        let (chosen_ctor_targs, chosen_call_errors, chosen_res) =
-            if call_errors_no_hint.is_empty() && hint.is_some() {
-                let mut ctor_targs_with_hint = ctor_targs.as_ref().map(|x| (**x).clone());
-                let call_errors_with_hint = self.error_collector();
-                let res_with_hint = self.callable_infer(
-                    callable,
-                    callable_name,
-                    tparams,
-                    self_obj,
-                    args,
-                    keywords,
-                    arguments_range,
-                    arg_errors,
-                    &call_errors_with_hint,
-                    context,
-                    hint,
-                    ctor_targs_with_hint.as_mut(),
-                );
-                if call_errors_with_hint.is_empty() {
-                    (ctor_targs_with_hint, call_errors_with_hint, res_with_hint)
-                } else {
-                    (ctor_targs_no_hint, call_errors_no_hint, res_no_hint)
-                }
+        let (chosen_ctor_targs, chosen_call_errors, chosen_res) = if call_errors_no_hint.is_empty()
+            && let Some(hint) = hint
+        {
+            let mut ctor_targs_with_hint = ctor_targs.as_ref().map(|x| (**x).clone());
+            let call_errors_with_hint = self.error_collector();
+            let res_with_hint = self.callable_infer(
+                callable,
+                callable_name,
+                tparams,
+                self_obj,
+                args,
+                keywords,
+                arguments_range,
+                arg_errors,
+                &call_errors_with_hint,
+                context,
+                Some(hint),
+                ctor_targs_with_hint.as_mut(),
+            );
+            if call_errors_with_hint.is_empty() && self.is_subset_eq(&res_with_hint.0, hint.ty()) {
+                (ctor_targs_with_hint, call_errors_with_hint, res_with_hint)
             } else {
                 (ctor_targs_no_hint, call_errors_no_hint, res_no_hint)
-            };
+            }
+        } else {
+            (ctor_targs_no_hint, call_errors_no_hint, res_no_hint)
+        };
         call_errors.extend(chosen_call_errors);
         if let Some(targs) = ctor_targs
             && let Some(chosen_targs) = chosen_ctor_targs
