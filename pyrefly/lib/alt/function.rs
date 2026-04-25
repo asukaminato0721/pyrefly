@@ -32,9 +32,7 @@ use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
-use ruff_python_ast::ExprNumberLiteral;
 use ruff_python_ast::Identifier;
-use ruff_python_ast::Number;
 use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -90,23 +88,15 @@ use crate::types::types::Overload;
 use crate::types::types::OverloadType;
 use crate::types::types::Type;
 
-/// Extract a display string for default values whose types don't preserve the literal value.
-/// Float literals like `3.14` become `ClassType(float)` which loses the actual value.
-fn default_display_for_expr(expr: &Expr) -> Option<String> {
-    let (is_negative, inner_expr) = match expr {
-        Expr::UnaryOp(x) if x.op == UnaryOp::USub => (true, x.operand.as_ref()),
-        _ => (false, expr),
+/// Extract a display string for numeric default values whose types don't preserve
+/// the source spelling. This preserves both values that lose precision in the
+/// type, like floats, and integer literal spelling, like `0o777`.
+fn default_display_for_expr(expr: &Expr, source: &str) -> Option<String> {
+    let inner_expr = match expr {
+        Expr::UnaryOp(x) if x.op == UnaryOp::USub => x.operand.as_ref(),
+        _ => expr,
     };
-
-    if let Expr::NumberLiteral(ExprNumberLiteral {
-        value: Number::Float(f),
-        ..
-    }) = inner_expr
-    {
-        Some(format!("{}{f}", if is_negative { "-" } else { "" }))
-    } else {
-        None
-    }
+    matches!(inner_expr, Expr::NumberLiteral(_)).then(|| source.to_owned())
 }
 
 fn is_class_property_decorator_class_object(cls: &Class) -> bool {
@@ -903,7 +893,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 Required::Optional(None)
             }
             Some(default) => {
-                let display = default_display_for_expr(default);
+                let display =
+                    default_display_for_expr(default, self.module().code_at(default.range()));
                 let ty = self.expr(default, check, errors);
                 Required::Optional(Some(match display {
                     Some(d) => DefaultValue::with_display(ty, d),
