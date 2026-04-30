@@ -904,25 +904,6 @@ impl Solver {
         }
     }
 
-    fn contains_overload_residual_identity(
-        &self,
-        ty: &Type,
-        identity: &OverloadResidualIdentity,
-    ) -> bool {
-        ty.any(|inner| {
-            if let Type::CallableResidual(residual) = inner
-                && let CallableResidualKind::Overload {
-                    identity: marker_identity,
-                    ..
-                } = &residual.kind
-            {
-                marker_identity == identity
-            } else {
-                false
-            }
-        })
-    }
-
     fn strip_overload_residual_identity(&self, ty: &mut Type, identity: &OverloadResidualIdentity) {
         ty.transform_mut(&mut |inner| {
             if let Type::CallableResidual(residual) = inner
@@ -957,8 +938,21 @@ impl Solver {
                     .iter()
                     .find(|branch| branch.branch_index == branch_index)
                     .expect("selected overload branch index must exist on every matching marker");
-                marker_remaining |= self.contains_overload_residual_identity(&branch.ty, identity);
-                *inner = branch.ty.clone();
+                let branch_ty = &branch.ty;
+                let branch_contains_identity = branch_ty.any(|candidate| {
+                    if let Type::CallableResidual(candidate_residual) = candidate
+                        && let CallableResidualKind::Overload {
+                            identity: candidate_identity,
+                            ..
+                        } = &candidate_residual.kind
+                    {
+                        candidate_identity == identity
+                    } else {
+                        false
+                    }
+                });
+                marker_remaining |= branch_contains_identity;
+                *inner = branch_ty.clone();
                 substituted = true;
             }
         });
