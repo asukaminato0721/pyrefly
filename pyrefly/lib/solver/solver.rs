@@ -159,6 +159,20 @@ struct OverloadResidualForVar {
     branches: Vec<OverloadVarBranchCapture>,
 }
 
+/// Witness-keyed pruning decisions threaded through finishing.
+/// This is not-yet-used plumbing for overload residual pruning.
+#[derive(Clone, Debug, Default)]
+struct OverloadWitnessPruningDecision {
+    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
+    surviving_branch_indices: SmallSet<usize>,
+    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
+    pruned_branch_indices: SmallSet<usize>,
+    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
+    all_pruned: bool,
+}
+
+type OverloadPruningByWitness = HashMap<OverloadResidualIdentity, OverloadWitnessPruningDecision>;
+
 #[derive(Clone, Debug)]
 enum Variable {
     /// A "partial type" (terminology borrowed from mypy) for an empty container.
@@ -2103,7 +2117,11 @@ impl Solver {
         }))
     }
 
-    fn materialize_overload_residual_type(&self, residual: &OverloadResidualForVar) -> Type {
+    fn materialize_overload_residual_type(
+        &self,
+        residual: &OverloadResidualForVar,
+        overload_pruning_by_witness: &OverloadPruningByWitness,
+    ) -> Type {
         let identity = OverloadResidualIdentity {
             witness_hash: residual.witness.identity.witness_hash,
         };
@@ -2112,7 +2130,10 @@ impl Solver {
             .iter()
             .map(|branch| OverloadBranchProjection {
                 branch_index: branch.branch_index,
-                ty: self.materialize_overload_residual_branch_value(&branch.value),
+                ty: self.materialize_overload_residual_branch_value(
+                    &branch.value,
+                    overload_pruning_by_witness,
+                ),
             })
             .collect();
         Type::CallableResidual(Box::new(CallableResidual {
@@ -2120,7 +2141,11 @@ impl Solver {
         }))
     }
 
-    fn materialize_overload_residual_branch_value(&self, value: &Variable) -> Type {
+    fn materialize_overload_residual_branch_value(
+        &self,
+        value: &Variable,
+        overload_pruning_by_witness: &OverloadPruningByWitness,
+    ) -> Type {
         match value {
             Variable::Answer(ty) | Variable::ResidualAnswer { ty, .. } => ty.clone(),
             Variable::Quantified {
@@ -2137,6 +2162,7 @@ impl Solver {
                         overload_residuals.first().expect(
                             "overload_residuals.len() == 1 must provide one overload residual",
                         ),
+                        overload_pruning_by_witness,
                     );
                 }
                 if residuals.len() == 1 {
@@ -2168,6 +2194,7 @@ impl Solver {
         infer_with_first_use: bool,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let lock = self.variables.lock();
+        let overload_pruning_by_witness: OverloadPruningByWitness = HashMap::new();
         let mut err = Vec::new();
         for v in vs.0 {
             let mut e = lock.get_mut(v);
@@ -2205,7 +2232,10 @@ impl Solver {
                     } else if let Some(overload_residual) = overload_residual_candidate {
                         Variable::ResidualAnswer {
                             target_vars: overload_residual.witness.identity.target_vars.clone(),
-                            ty: self.materialize_overload_residual_type(&overload_residual),
+                            ty: self.materialize_overload_residual_type(
+                                &overload_residual,
+                                &overload_pruning_by_witness,
+                            ),
                         }
                     } else if let Some(ResidualIdentity { target_vars, .. }) = residual_candidate {
                         Variable::ResidualAnswer {
