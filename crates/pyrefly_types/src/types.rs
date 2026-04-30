@@ -1164,10 +1164,16 @@ impl Type {
     }
 
     pub fn is_literal_string(&self) -> bool {
+        self.lit_string_style().is_some()
+    }
+
+    /// If this type is a literal string (either `LiteralString` or a `Literal` string value),
+    /// return its `LitStyle`.
+    pub fn lit_string_style(&self) -> Option<&LitStyle> {
         match self {
-            Type::LiteralString(_) => true,
-            Type::Literal(l) if l.value.is_string() => true,
-            _ => false,
+            Type::LiteralString(style) => Some(style),
+            Type::Literal(l) if l.value.is_string() => Some(&l.style),
+            _ => None,
         }
     }
 

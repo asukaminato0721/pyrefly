@@ -462,21 +462,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         return style.propagate();
                     }
                 }
-                fn lit_string_style<'b>(ty: &'b Type) -> Option<&'b LitStyle> {
-                    match ty {
-                        Type::LiteralString(style) => Some(style),
-                        Type::Literal(lit) if lit.value.is_string() => Some(&lit.style),
-                        _ => None,
-                    }
-                }
                 if x.op == Operator::BitOr
                     && let Some(l) = self.untype_opt(lhs.clone(), x.left.range(), errors)
                     && let Some(r) = self.untype_opt(rhs.clone(), x.right.range(), errors)
                 {
                     self.heap.mk_type_of(self.union(l, r))
                 } else if x.op == Operator::Add
-                    && let Some(lhs_style) = lit_string_style(lhs)
-                    && let Some(rhs_style) = lit_string_style(rhs)
+                    && let Some(lhs_style) = lhs.lit_string_style()
+                    && let Some(rhs_style) = rhs.lit_string_style()
                 {
                     self.heap.mk_literal_string(match (lhs_style, rhs_style) {
                         (LitStyle::Explicit, LitStyle::Explicit) => LitStyle::Explicit,
