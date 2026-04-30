@@ -189,6 +189,10 @@ struct OverloadAllPrunedCause {
 ///
 /// Used by witness-level overload pruning: eliminate branches whose
 /// branch-implied bounds are incompatible with the solved type.
+struct OverloadBranchSubstitutionResult {
+    substituted: bool,
+    marker_remaining: bool,
+}
 #[derive(Clone, Debug)]
 struct SolvedVarWithResiduals {
     quantified_name: Name,
@@ -938,8 +942,9 @@ impl Solver {
         ty: &mut Type,
         identity: &OverloadResidualIdentity,
         branch_index: usize,
-    ) -> bool {
+    ) -> OverloadBranchSubstitutionResult {
         let mut substituted = false;
+        let mut marker_remaining = false;
         ty.transform_mut(&mut |inner| {
             if let Type::CallableResidual(residual) = inner
                 && let CallableResidualKind::Overload {
@@ -952,11 +957,15 @@ impl Solver {
                     .iter()
                     .find(|branch| branch.branch_index == branch_index)
                     .expect("selected overload branch index must exist on every matching marker");
+                marker_remaining |= self.contains_overload_residual_identity(&branch.ty, identity);
                 *inner = branch.ty.clone();
                 substituted = true;
             }
         });
-        substituted
+        OverloadBranchSubstitutionResult {
+            substituted,
+            marker_remaining,
+        }
     }
 
     fn overload_metadata_for_reconstruction(&self, ty: &Type) -> FuncMetadata {
@@ -1248,16 +1257,17 @@ impl Solver {
                 let mut reconstructed = Vec::with_capacity(branch_indices.len());
                 for branch_index in branch_indices {
                     let mut branch_ty = ty.clone();
-                    if !self.substitute_overload_residual_identity_branch(
+                    let substitution_result = self.substitute_overload_residual_identity_branch(
                         &mut branch_ty,
                         &identity,
                         branch_index,
-                    ) {
+                    );
+                    if !substitution_result.substituted {
                         unreachable!(
                             "selected overload residual identity must be present during reconstruction",
                         );
                     }
-                    if self.contains_overload_residual_identity(&branch_ty, &identity) {
+                    if substitution_result.marker_remaining {
                         unreachable!(
                             "overload residual substitution did not eliminate active identity"
                         );
