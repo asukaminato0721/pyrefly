@@ -20,7 +20,7 @@ class User(models.Model):
     username = models.CharField(max_length=150)
 
 class UserFactory(DjangoModelFactory):
-    class Meta:  # E: Class member `UserFactory.Meta` overrides parent class `DjangoModelFactory` in an inconsistent manner
+    class Meta:
         model = User
 
     username = "testuser"
@@ -43,7 +43,7 @@ class User(models.Model):
     username = models.CharField(max_length=150)
 
 class UserFactory(DjangoModelFactory):
-    class Meta:  # E: Class member `UserFactory.Meta` overrides parent class `DjangoModelFactory` in an inconsistent manner
+    class Meta:
         model = User
 
 user = UserFactory.build()
@@ -64,7 +64,7 @@ class User(models.Model):
     username = models.CharField(max_length=150)
 
 class UserFactory(DjangoModelFactory):
-    class Meta:  # E: Class member `UserFactory.Meta` overrides parent class `DjangoModelFactory` in an inconsistent manner
+    class Meta:
         model = User
 
 users = UserFactory.create_batch(3)
@@ -83,7 +83,7 @@ class Document(models.Model):
     title = models.CharField(max_length=200)
 
 class DocumentFactory(DjangoModelFactory):
-    class Meta:  # E: Class member `DocumentFactory.Meta` overrides parent class `DjangoModelFactory` in an inconsistent manner
+    class Meta:
         model = Document
 
 doc = DocumentFactory.create()

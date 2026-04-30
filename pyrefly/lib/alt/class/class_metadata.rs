@@ -272,6 +272,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         || metadata.is_marshmallow_schema()
                 });
 
+        let is_factory_boy_factory =
+            bases_with_metadata
+                .iter()
+                .any(|(base_class_object, metadata)| {
+                    base_class_object
+                        .has_toplevel_qname(ModuleName::factory_base().as_str(), "Factory")
+                        || metadata.is_factory_boy_factory()
+                });
+
         let is_metaclass = bases_with_metadata
             .iter()
             .any(|(base_class_object, metadata)| {
@@ -489,6 +498,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             is_attrs_class,
             django_model_metadata,
             is_marshmallow_schema,
+            is_factory_boy_factory,
             is_metaclass,
             slots_info,
         )

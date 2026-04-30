@@ -72,6 +72,7 @@ pub struct ClassMetadata {
     is_attrs_class: bool,
     django_model_metadata: Option<DjangoModelMetadata>,
     is_marshmallow_schema: bool,
+    is_factory_boy_factory: bool,
     /// Whether this class is a metaclass (i.e., a subclass of `type`).
     is_metaclass: bool,
     slots_info: Option<SlotsInfo>,
@@ -113,6 +114,7 @@ impl ClassMetadata {
         is_attrs_class: bool,
         django_model_metadata: Option<DjangoModelMetadata>,
         is_marshmallow_schema: bool,
+        is_factory_boy_factory: bool,
         is_metaclass: bool,
         slots_info: Option<SlotsInfo>,
     ) -> ClassMetadata {
@@ -138,6 +140,7 @@ impl ClassMetadata {
             is_attrs_class,
             django_model_metadata,
             is_marshmallow_schema,
+            is_factory_boy_factory,
             is_metaclass,
             slots_info,
         }
@@ -166,6 +169,7 @@ impl ClassMetadata {
             is_attrs_class: false,
             django_model_metadata: None,
             is_marshmallow_schema: false,
+            is_factory_boy_factory: false,
             is_metaclass: false,
             slots_info: None,
         }
@@ -206,6 +210,10 @@ impl ClassMetadata {
 
     pub fn is_marshmallow_schema(&self) -> bool {
         self.is_marshmallow_schema
+    }
+
+    pub fn is_factory_boy_factory(&self) -> bool {
+        self.is_factory_boy_factory
     }
 
     /// Whether this class is a metaclass (i.e., a subclass of `type`).
