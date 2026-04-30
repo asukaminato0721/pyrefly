@@ -101,6 +101,8 @@ const MAX_RESIDUAL_FINALIZE_ITERS: usize = 8;
 /// Accumulated bounds for a solver variable.
 #[derive(Clone, Debug, Default)]
 struct Bounds {
+    // TODO(https://github.com/facebook/pyrefly/issues/105): use `SmallSet<Type>`; bounds should
+    // not be order-dependent.
     lower: Vec<Type>,
     upper: Vec<Type>,
 }
@@ -2011,6 +2013,9 @@ impl Solver {
     }
 
     /// Get current bound from a set of bounds of an unfinished variable.
+    /// TODO(https://github.com/facebook/pyrefly/issues/105): the current solver design requires us
+    /// to repeatedly clone and union together intermediate bounds to validate every new bound we
+    /// add. Consider a less wasteful strategy, such as validating when we finish the variable.
     fn get_current_bound(&self, bounds: Vec<Type>) -> Option<Type> {
         if bounds.is_empty() {
             return None;
@@ -2041,6 +2046,8 @@ impl Solver {
 
     fn solve_bounds(&self, bounds: Bounds) -> Option<Type> {
         // Prefer non-Any bound > Any bound > no bound
+        // TODO(https://github.com/facebook/pyrefly/issues/105): consider using polarity to
+        // determine whether we use the lower or upper bound.
         let lower_bound = self.solve_one_bounds(bounds.lower);
         if lower_bound.as_ref().is_none_or(|b| b.is_any()) {
             self.solve_one_bounds(bounds.upper).or(lower_bound)
@@ -3638,6 +3645,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                 if root1 == root2 {
                     // same variable after unification, nothing to do
                 } else {
+                    // TODO(https://github.com/facebook/pyrefly/issues/105): unifying vars in this
+                    // scenario is probably wrong. v1 <: v2 should mean that v2 gains v1 as a lower
+                    // bound and v1 gains v2 as an upper bound, not that the two are now equal.
                     let mut v1_mut = variables.get_mut(*v1);
                     let mut v2_mut = variables.get_mut(*v2);
                     match (&mut *v1_mut, &mut *v2_mut) {
