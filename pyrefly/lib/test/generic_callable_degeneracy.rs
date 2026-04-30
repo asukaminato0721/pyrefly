@@ -158,7 +158,6 @@ reveal_type(called)  # E: revealed type: str
 );
 
 testcase!(
-    bug = "ParamSpec pins to first overload (issue #2105)",
     test_overload_paramspec_pins_first,
     r#"
 from typing import Callable, Protocol, overload
@@ -174,6 +173,6 @@ def callback[**P, T](
 ) -> Callable[P, T]: ...
 
 def test(rmtree: Foo) -> None:
-    callback(rmtree, ignore_errors=True)  # E: Missing argument `onerror` in function `callback`
+    callback(rmtree, ignore_errors=True)
 "#,
 );

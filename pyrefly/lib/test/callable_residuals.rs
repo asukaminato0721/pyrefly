@@ -414,7 +414,6 @@ reveal_type(identity2.__call__)  # E: revealed type: (Wrapper[Ellipsis, Unknown]
 );
 
 testcase!(
-    bug = "Overloads not preserved through ParamSpec transform",
     test_paramspec_transform_overloaded,
     r#"
 from typing import Callable, overload, reveal_type
@@ -427,15 +426,14 @@ def multi(x: str) -> int: ...  # E: Overload return type `int` is not assignable
 def multi(*args, **kwargs): ...
 
 result = transform(multi)
-reveal_type(result)  # E: revealed type: (x: int, y: str) -> bool
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result(1, "ok")
 reveal_type(out_a)  # E: revealed type: bool
-out_b = result("ok")  # E: Missing argument `y`  # E: Argument `Literal['ok']` is not assignable to parameter `x` with type `int`
+out_b = result("ok")
 "#,
 );
 
 testcase!(
-    bug = "Overloaded functions lose overloads through ParamSpec identity",
     test_paramspec_identity_overloaded,
     r#"
 from typing import Callable, overload, reveal_type
@@ -449,15 +447,14 @@ def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to 
 def f(x): ...
 
 result = identity(f)
-reveal_type(result)  # E: revealed type: (x: int) -> str
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result(1)
 reveal_type(out_a)  # E: revealed type: str
-out_b = result("ok")  # E: Argument `Literal['ok']` is not assignable to parameter `x` with type `int`
+out_b = result("ok")
 "#,
 );
 
 testcase!(
-    bug = "Overloaded functions lose overloads through simple Callable identity",
     test_typevar_identity_overloaded,
     r#"
 from typing import Callable, overload, reveal_type
@@ -471,15 +468,14 @@ def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to 
 def f(x): ...
 
 result = identity(f)
-reveal_type(result)  # E: revealed type: (int) -> str
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result(1)
 reveal_type(out_a)  # E: revealed type: str
-out_b = result("ok")  # E: Argument `Literal['ok']` is not assignable to parameter with type `int`
+out_b = result("ok")
 "#,
 );
 
 testcase!(
-    bug = "Overloaded signatures collapse to one branch through multi-arg Callable identity",
     test_typevar_identity_overloaded_two_arg,
     r#"
 from typing import Callable, overload, reveal_type
@@ -493,16 +489,15 @@ def f(x: str, y: int) -> bytes: ...  # E: Overload return type `bytes` is not as
 def f(x, y): ...
 
 result = identity(f)
-reveal_type(result)  # E: revealed type: (int, str) -> bool
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result(1, "ok")
 reveal_type(out_a)  # E: revealed type: bool
-result("x", "ok")  # E: Argument `Literal['x']` is not assignable to parameter with type `int`
-result(1, 1)  # E: Argument `Literal[1]` is not assignable to parameter with type `str`
+result("x", "ok")  # E: No matching overload found for function `typing.overload` called with arguments: (Literal['x'], Literal['ok'])
+result(1, 1)  # E: No matching overload found for function `typing.overload` called with arguments: (Literal[1], Literal[1])
 "#,
 );
 
 testcase!(
-    bug = "Overload branch selection commits to first branch in wrapped Callable returns",
     test_typevar_overloaded_return_wraps_argument,
     r#"
 from typing import Callable, overload, reveal_type
@@ -515,16 +510,15 @@ def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to 
 def f(x): ...
 
 result = higher_order(f)
-reveal_type(result)  # E: revealed type: (list[int]) -> str
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result([1])
 reveal_type(out_a)  # E: revealed type: str
-out_b = result(["ok"])  # E: Argument `list[str]` is not assignable to parameter with type `list[int]`
-reveal_type(out_b)  # E: revealed type: str
+out_b = result(["ok"])
+reveal_type(out_b)  # E: revealed type: int
 "#,
 );
 
 testcase!(
-    bug = "Overload branch selection commits to first branch in wrapped Callable returns",
     test_typevar_overloaded_return_wraps_return,
     r#"
 from typing import Callable, overload, reveal_type
@@ -537,11 +531,11 @@ def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to 
 def f(x): ...
 
 result = higher_order(f)
-reveal_type(result)  # E: revealed type: (int) -> list[str]
+reveal_type(result)  # E: revealed type: Overload[
 out_a = result(1)
 reveal_type(out_a)  # E: revealed type: list[str]
-out_b = result("ok")  # E: Argument `Literal['ok']` is not assignable to parameter with type `int`
-reveal_type(out_b)  # E: revealed type: list[str]
+out_b = result("ok")
+reveal_type(out_b)  # E: revealed type: list[int]
 "#,
 );
 
@@ -550,7 +544,6 @@ reveal_type(out_b)  # E: revealed type: list[str]
 // The solver commits to one overload branch too early and rejects valid calls.
 
 testcase!(
-    bug = "Overloaded protocol callable commits to one branch too early (#2105)",
     test_issue_2105_minimal,
     r#"
 from typing import Protocol, overload, Callable
@@ -571,12 +564,11 @@ class Foo(Protocol):
 def higher_order[**P, T](callback: Callable[P, T], /, *args: P.args, **kwds: P.kwargs) -> Callable[P, T]: ...
 
 def test(rmtree: Foo) -> None:
-    higher_order(rmtree, y=True)  # E: Missing argument `x` in function `higher_order`
+    higher_order(rmtree, y=True)
 "#,
 );
 
 testcase!(
-    bug = "shutil.rmtree overloads not preserved through ExitStack.callback (#2105)",
     test_issue_2105_original,
     r#"
 import shutil
@@ -584,7 +576,7 @@ from contextlib import ExitStack
 
 def foo(tmpdir):
     with ExitStack() as resources:
-        resources.callback(shutil.rmtree, tmpdir, ignore_errors=True)  # E: Missing argument `onerror` in function `contextlib._BaseExitStack.callback`
+        resources.callback(shutil.rmtree, tmpdir, ignore_errors=True)
 
 def bar(tmpdir):
     shutil.rmtree(tmpdir, ignore_errors=True)

@@ -57,7 +57,10 @@ use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::solver::type_order::TypeOrder;
 use crate::types::callable::Callable;
+use crate::types::callable::FuncFlags;
+use crate::types::callable::FuncMetadata;
 use crate::types::callable::Function;
+use crate::types::callable::FunctionKind;
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
@@ -71,9 +74,12 @@ use crate::types::simplify::unions_with_literals;
 use crate::types::typed_dict::TypedDict;
 use crate::types::types::CallableResidual;
 use crate::types::types::CallableResidualKind;
+use crate::types::types::Forall;
 use crate::types::types::Forallable;
+use crate::types::types::Overload;
 use crate::types::types::OverloadBranchProjection;
 use crate::types::types::OverloadResidualIdentity;
+use crate::types::types::OverloadType;
 use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
@@ -803,6 +809,186 @@ impl Solver {
         }
     }
 
+    fn first_overload_residual_identity(&self, ty: &Type) -> Option<OverloadResidualIdentity> {
+        let mut found = None;
+        let mut scan = ty.clone();
+        scan.transform_mut(&mut |inner| {
+            if found.is_some() {
+                return;
+            }
+            if let Type::CallableResidual(residual) = inner
+                && let CallableResidualKind::Overload { identity, .. } = &residual.kind
+            {
+                found = Some(identity.clone());
+            }
+        });
+        found
+    }
+
+    fn contains_overload_residual_identity(
+        &self,
+        ty: &Type,
+        identity: &OverloadResidualIdentity,
+    ) -> bool {
+        let mut found = false;
+        let mut scan = ty.clone();
+        scan.transform_mut(&mut |inner| {
+            if found {
+                return;
+            }
+            if let Type::CallableResidual(residual) = inner
+                && let CallableResidualKind::Overload {
+                    identity: marker_identity,
+                    ..
+                } = &residual.kind
+                && marker_identity == identity
+            {
+                found = true;
+            }
+        });
+        found
+    }
+
+    fn overload_branch_index_intersection(
+        &self,
+        ty: &Type,
+        identity: &OverloadResidualIdentity,
+    ) -> Vec<usize> {
+        let mut intersection: Option<SmallSet<usize>> = None;
+        let mut saw_matching_identity = false;
+        let mut scan = ty.clone();
+        scan.transform_mut(&mut |inner| {
+            if let Type::CallableResidual(residual) = inner
+                && let CallableResidualKind::Overload {
+                    identity: marker_identity,
+                    branches,
+                } = &residual.kind
+                && marker_identity == identity
+            {
+                saw_matching_identity = true;
+                let branch_indices: SmallSet<usize> =
+                    branches.iter().map(|branch| branch.branch_index).collect();
+                intersection = Some(match intersection.take() {
+                    Some(current) => current
+                        .into_iter()
+                        .filter(|idx| branch_indices.contains(idx))
+                        .collect(),
+                    None => branch_indices,
+                });
+            }
+        });
+
+        if !saw_matching_identity {
+            unreachable!("branch intersection requested for missing overload residual identity");
+        }
+
+        let mut branch_indices = intersection
+            .expect("matching overload residual identity must produce an intersection set")
+            .into_iter()
+            .collect::<Vec<_>>();
+        branch_indices.sort_unstable();
+        branch_indices
+    }
+
+    fn strip_overload_residual_identity(&self, ty: &mut Type, identity: &OverloadResidualIdentity) {
+        ty.transform_mut(&mut |inner| {
+            if let Type::CallableResidual(residual) = inner
+                && let CallableResidualKind::Overload {
+                    identity: marker_identity,
+                    branches,
+                } = &residual.kind
+                && marker_identity == identity
+            {
+                let first_branch = branches
+                    .iter()
+                    .min_by_key(|branch| branch.branch_index)
+                    .expect("overload residual should include at least one branch");
+                *inner = first_branch.ty.clone();
+            }
+        });
+    }
+
+    fn substitute_overload_residual_identity_branch(
+        &self,
+        ty: &mut Type,
+        identity: &OverloadResidualIdentity,
+        branch_index: usize,
+    ) -> bool {
+        let mut substituted = false;
+        ty.transform_mut(&mut |inner| {
+            if let Type::CallableResidual(residual) = inner
+                && let CallableResidualKind::Overload {
+                    identity: marker_identity,
+                    branches,
+                } = &residual.kind
+                && marker_identity == identity
+            {
+                let branch = branches
+                    .iter()
+                    .find(|branch| branch.branch_index == branch_index)
+                    .expect("selected overload branch index must exist on every matching marker");
+                *inner = branch.ty.clone();
+                substituted = true;
+            }
+        });
+        substituted
+    }
+
+    fn overload_metadata_for_reconstruction(&self, ty: &Type) -> FuncMetadata {
+        ty.visit_toplevel_func_metadata(&|metadata| Some(metadata.clone()))
+            .unwrap_or(FuncMetadata {
+                kind: FunctionKind::Overload,
+                flags: FuncFlags::default(),
+            })
+    }
+
+    fn overload_signature_from_branch_type(
+        &self,
+        branch_ty: Type,
+        metadata: &FuncMetadata,
+    ) -> Option<OverloadType> {
+        match branch_ty {
+            Type::Function(function) => Some(OverloadType::Function(*function)),
+            Type::Forall(forall) => match forall.body {
+                Forallable::Function(function) => Some(OverloadType::Forall(Forall {
+                    tparams: forall.tparams,
+                    body: function,
+                })),
+                Forallable::Callable(callable) => Some(OverloadType::Forall(Forall {
+                    tparams: forall.tparams,
+                    body: Function {
+                        signature: callable,
+                        metadata: metadata.clone(),
+                    },
+                })),
+                Forallable::TypeAlias(_) => None,
+            },
+            Type::Callable(callable) => Some(OverloadType::Function(Function {
+                signature: *callable,
+                metadata: metadata.clone(),
+            })),
+            _ => None,
+        }
+    }
+
+    fn try_combine_reconstructed_overload(
+        &self,
+        original_ty: &Type,
+        reconstructed: &[Type],
+    ) -> Option<Type> {
+        let metadata = self.overload_metadata_for_reconstruction(original_ty);
+        let signatures = reconstructed
+            .iter()
+            .cloned()
+            .map(|branch_ty| self.overload_signature_from_branch_type(branch_ty, &metadata))
+            .collect::<Option<Vec<_>>>()?;
+        let signatures = Vec1::try_from_vec(signatures).ok()?;
+        Some(Type::Overload(Overload {
+            signatures,
+            metadata: Box::new(metadata),
+        }))
+    }
+
     /// Finalize callable residuals after a substitution (either a return type or a class field)
     /// once (as in, perform one round of finalization - if a residual resolves to another
     /// residual, the second one will still be present).
@@ -818,7 +1004,7 @@ impl Solver {
     ///   transforms, which we need because residuals can nest (in particular,
     ///   an overload residual can contain a generic residual)
     /// - did_we_encounter_any_residuals_inside_a_callable: used to
-    ///   
+    ///
     ///
     /// TODO(stroxler): See if this can be simplified or otherwise made clearer at the top of the
     /// stack, including after overload support gets added and after optimizations.
@@ -998,9 +1184,83 @@ impl Solver {
     /// to be certain about this.
     fn finalize_callable_residuals_at_boundary_impl(
         &self,
-        mut ty: Type,
+        ty: Type,
         preserve_class_targs: bool,
     ) -> Type {
+        let mut active_overload_identities = Vec::new();
+        self.finalize_callable_residuals_at_boundary_impl_with_active(
+            ty,
+            preserve_class_targs,
+            &mut active_overload_identities,
+        )
+    }
+
+    fn finalize_callable_residuals_at_boundary_impl_with_active(
+        &self,
+        mut ty: Type,
+        preserve_class_targs: bool,
+        active_overload_identities: &mut Vec<OverloadResidualIdentity>,
+    ) -> Type {
+        while let Some(identity) = self.first_overload_residual_identity(&ty) {
+            if active_overload_identities.contains(&identity) {
+                unreachable!(
+                    "detected recursive overload residual identity cycle during finalization",
+                );
+            }
+            let branch_indices = self.overload_branch_index_intersection(&ty, &identity);
+            if branch_indices.is_empty() {
+                // TODO(T235420905): This path is intended to be unreachable for coherent
+                // witnesses, but we have seen CI panic signatures around this stack. Audit
+                // the top-of-stack identity/branch-coherence invariant and decide whether
+                // to harden this boundary or tighten upstream residual capture.
+                self.strip_overload_residual_identity(&mut ty, &identity);
+                continue;
+            }
+            active_overload_identities.push(identity.clone());
+            let mut reconstructed = Vec::with_capacity(branch_indices.len());
+            for branch_index in branch_indices {
+                let mut branch_ty = ty.clone();
+                if !self.substitute_overload_residual_identity_branch(
+                    &mut branch_ty,
+                    &identity,
+                    branch_index,
+                ) {
+                    unreachable!(
+                        "selected overload residual identity must be present during reconstruction",
+                    );
+                }
+                if self.contains_overload_residual_identity(&branch_ty, &identity) {
+                    unreachable!(
+                        "overload residual substitution did not eliminate active identity"
+                    );
+                }
+                reconstructed.push(
+                    self.finalize_callable_residuals_at_boundary_impl_with_active(
+                        branch_ty,
+                        preserve_class_targs,
+                        active_overload_identities,
+                    ),
+                );
+            }
+            let popped = active_overload_identities
+                .pop()
+                .expect("active_overload_identities push/pop must stay balanced");
+            debug_assert_eq!(popped, identity);
+            if let Some(overload_ty) = self.try_combine_reconstructed_overload(&ty, &reconstructed)
+            {
+                ty = overload_ty;
+            } else {
+                // TODO(stroxler): this is not quite right - when we hit a residual that could be int or str
+                // and it appears in a return type, we are evaluating the return type on both branches
+                // and *unioning* whenever the type isn't a Callable (so we cannot construct an overload)
+                //
+                // That behavior is not exactly bad, but not ideal - it would be better to flatten the type
+                // into a union inline. Fix this later.
+                ty = unions(reconstructed, &self.heap);
+                self.simplify_mut(&mut ty);
+            }
+        }
+
         for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
             if !self
                 .finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs)
@@ -2010,19 +2270,23 @@ impl Solver {
                 if let Variable::Quantified {
                     quantified: q,
                     bounds,
+                    residuals,
+                    overload_residuals,
                     ..
                 } = &mut *e
                     && *q == *param
                 {
-                    if bounds.is_empty() {
+                    if bounds.is_empty() && residuals.is_empty() && overload_residuals.is_empty() {
                         *t = param.clone().to_type(&self.heap);
-                    } else {
-                        // If the variable has already been solved, finalize its type now.
+                    } else if !bounds.is_empty() {
+                        // If the variable has bounds, finalize its type now.
                         *e = Variable::Answer(
                             self.solve_bounds(mem::take(bounds))
                                 .unwrap_or_else(|| q.as_gradual_type()),
                         );
                     }
+                    // Otherwise (residuals but no bounds): leave the var as
+                    // Quantified so finish_quantified can materialize residuals.
                 }
             }
         })

@@ -229,7 +229,7 @@ testcase!(
     test_reduce_call,
     r#"
 from functools import reduce
-reduce(max, [1,2])  # E: Argument `list[int]` is not assignable to parameter `iterable` with type `Iterable[Unknown]` in function `functools.reduce`
+reduce(max, [1,2])
     "#,
 );
 

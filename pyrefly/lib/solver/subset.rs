@@ -1200,14 +1200,13 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         overload: &Overload,
         want: &Type,
     ) -> bool {
-        let mut first_success_snapshot = None;
+        let pre_probe_snapshot = self.solver.snapshot_vars(captured_vars);
+        let mut matched_any_branch = false;
         let mut successful_branch_captures = Vec::new();
         for (branch_index, l) in overload.signatures.iter().enumerate() {
             let probe_snapshot = self.solver.snapshot_vars(captured_vars);
             if self.is_subset_eq(&l.as_type(), want).is_ok() {
-                if first_success_snapshot.is_none() {
-                    first_success_snapshot = Some(self.solver.snapshot_vars(captured_vars));
-                }
+                matched_any_branch = true;
                 successful_branch_captures.push(
                     self.solver
                         .extract_overload_branch_capture(branch_index, captured_vars),
@@ -1215,11 +1214,11 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             }
             self.solver.restore_vars(probe_snapshot);
         }
-        if let Some(snapshot) = first_success_snapshot {
+        self.solver.restore_vars(pre_probe_snapshot);
+        if matched_any_branch {
             if successful_branch_captures.is_empty() {
                 unreachable!("successful overload probe must produce a branch capture");
             }
-            self.solver.restore_vars(snapshot);
             self.solver
                 .record_overload_residuals_for_witness(witness, successful_branch_captures);
             true
