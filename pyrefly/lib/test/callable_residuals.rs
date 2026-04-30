@@ -623,6 +623,53 @@ reveal_type(out_b)  # E: revealed type: int
 "#,
 );
 
+testcase!(
+    test_overload_pruning_no_pruning_baseline,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: bytes) -> str: ...
+def f(x) -> str: ...
+
+# Both branches return str, so S=str is compatible with all branches.
+# No pruning occurs; the result should be a full overload.
+result = project(f, "ok")
+reveal_type(result)  # E: revealed type: Overload[
+out_a = result(1)
+reveal_type(out_a)  # E: revealed type: str
+out_b = result(b"ok")
+reveal_type(out_b)  # E: revealed type: str
+"#,
+);
+
+testcase!(
+    test_nested_higher_order_overload,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def identity[A, R](x: Callable[[A], R]) -> Callable[[A], R]:
+    return x
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: str) -> int: ...
+def f(x) -> str | int: ...
+
+result = identity(identity)(f)
+reveal_type(result)  # E: revealed type: Overload[
+out_a = result(1)
+reveal_type(out_a)  # E: revealed type: str
+out_b = result("ok")
+reveal_type(out_b)  # E: revealed type: int
+"#,
+);
+
 // Regression tests for https://github.com/facebook/pyrefly/issues/2105
 // Overloaded callable protocol passed to higher-order function with ParamSpec.
 // The solver commits to one overload branch too early and rejects valid calls.
