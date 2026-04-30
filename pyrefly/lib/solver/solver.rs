@@ -2139,16 +2139,13 @@ impl Solver {
         let identity = OverloadResidualIdentity {
             witness_hash: residual.witness.identity.witness_hash,
         };
-        if overload_pruning_by_witness
-            .get(&identity)
-            .is_some_and(|decision| decision.all_pruned)
-        {
+        let pruning_decision = overload_pruning_by_witness.get(&identity);
+        if pruning_decision.is_some_and(|decision| decision.all_pruned) {
             // All candidate branches were pruned for this witness.
             // Return Never immediately and avoid any branch materialization work.
             return Type::never();
         }
-        let surviving_branch_indices = overload_pruning_by_witness
-            .get(&identity)
+        let surviving_branch_indices = pruning_decision
             .map(|decision| decision.surviving_branch_indices.clone())
             .unwrap_or_else(|| {
                 residual
