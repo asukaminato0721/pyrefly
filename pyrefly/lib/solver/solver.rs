@@ -72,6 +72,8 @@ use crate::types::typed_dict::TypedDict;
 use crate::types::types::CallableResidual;
 use crate::types::types::CallableResidualKind;
 use crate::types::types::Forallable;
+use crate::types::types::OverloadBranchProjection;
+use crate::types::types::OverloadResidualIdentity;
 use crate::types::types::TParams;
 use crate::types::types::Type;
 use crate::types::types::Var;
@@ -134,25 +136,20 @@ pub(crate) struct OverloadBranchCapture {
 /// Shared context for an overload capture event. Arc'd to avoid duplication across vars.
 #[derive(Clone, Debug)]
 struct OverloadResidualWitness {
-    #[expect(dead_code, reason = "Read during overload finishing (not yet wired)")]
     identity: ResidualIdentity,
 }
 
 /// Per-var, per-branch capture at solver level.
 #[derive(Clone, Debug)]
 struct OverloadVarBranchCapture {
-    #[expect(dead_code, reason = "Read during overload finishing (not yet wired)")]
     branch_index: usize,
-    #[expect(dead_code, reason = "Read during overload finishing (not yet wired)")]
     value: Variable,
 }
 
 /// Per-var overload residual, stored on `Variable::Quantified`.
 #[derive(Clone, Debug)]
 struct OverloadResidualForVar {
-    #[expect(dead_code, reason = "Read during overload finishing (not yet wired)")]
     witness: Arc<OverloadResidualWitness>,
-    #[expect(dead_code, reason = "Read during overload finishing (not yet wired)")]
     branches: Vec<OverloadVarBranchCapture>,
 }
 
@@ -833,14 +830,28 @@ impl Solver {
     ) -> (bool, bool) {
         match ty {
             Type::CallableResidual(residual) => {
-                if !callable_slot {
-                    *ty = self.generic_residual_quantified(residual).as_gradual_type();
-                    return (true, false);
+                match &residual.kind {
+                    CallableResidualKind::Generic { .. } => {
+                        if !callable_slot {
+                            *ty = self.generic_residual_quantified(residual).as_gradual_type();
+                            return (true, false);
+                        }
+                        *ty = self
+                            .heap
+                            .mk_quantified(self.generic_residual_quantified(residual));
+                        (true, true)
+                    }
+                    CallableResidualKind::Overload { branches, .. } => {
+                        // Compatibility path until overload reconstruction is implemented:
+                        // flatten to one deterministic branch.
+                        let first_branch = branches
+                            .iter()
+                            .min_by_key(|branch| branch.branch_index)
+                            .expect("overload residual should include at least one branch");
+                        *ty = first_branch.ty.clone();
+                        (true, false)
+                    }
                 }
-                *ty = self
-                    .heap
-                    .mk_quantified(self.generic_residual_quantified(residual));
-                (true, true)
             }
             Type::Callable(callable) => {
                 let mut changed = false;
@@ -1823,6 +1834,60 @@ impl Solver {
         }))
     }
 
+    fn materialize_overload_residual_type(&self, residual: &OverloadResidualForVar) -> Type {
+        let identity = OverloadResidualIdentity {
+            witness_hash: residual.witness.identity.witness_hash,
+        };
+        let branches = residual
+            .branches
+            .iter()
+            .map(|branch| OverloadBranchProjection {
+                branch_index: branch.branch_index,
+                ty: self.materialize_overload_residual_branch_value(&branch.value),
+            })
+            .collect();
+        Type::CallableResidual(Box::new(CallableResidual {
+            kind: CallableResidualKind::Overload { identity, branches },
+        }))
+    }
+
+    fn materialize_overload_residual_branch_value(&self, value: &Variable) -> Type {
+        match value {
+            Variable::Answer(ty) | Variable::ResidualAnswer { ty, .. } => ty.clone(),
+            Variable::Quantified {
+                quantified,
+                bounds,
+                residuals,
+                overload_residuals,
+            } => {
+                if let Some(bound) = self.solve_bounds(bounds.clone()) {
+                    return bound;
+                }
+                if overload_residuals.len() == 1 {
+                    return self.materialize_overload_residual_type(
+                        overload_residuals.first().expect(
+                            "overload_residuals.len() == 1 must provide one overload residual",
+                        ),
+                    );
+                }
+                if residuals.len() == 1 {
+                    return self.materialize_generic_residual_type(quantified);
+                }
+                quantified.as_gradual_type()
+            }
+            Variable::PartialQuantified(q) => q.as_gradual_type(),
+            Variable::PartialContained(_) => {
+                unreachable!("overload residual capture should not include PartialContained vars")
+            }
+            Variable::Recursive => {
+                unreachable!("overload residual capture should not include Recursive vars")
+            }
+            Variable::Unwrap(_) => {
+                unreachable!("overload residual capture should not include Unwrap vars")
+            }
+        }
+    }
+
     /// Called after a quantified function has been called. Given `def f[T](x: int): list[T]`,
     /// after the generic has completed.
     /// If `infer_with_first_use` is true, the variable `T` will be have like an
@@ -1849,12 +1914,18 @@ impl Solver {
                     quantified: q,
                     bounds,
                     residuals,
-                    overload_residuals: _,
+                    overload_residuals,
                 } => {
                     if let Some(e) = self.instantiation_errors.read().get(&v) {
                         err.push(e.clone());
                     }
                     let solved_bound = self.solve_bounds(mem::take(bounds));
+                    let overload_residual_candidate =
+                        if solved_bound.is_none() && overload_residuals.len() == 1 {
+                            overload_residuals.first().cloned()
+                        } else {
+                            None
+                        };
                     let residual_candidate = if solved_bound.is_none() && residuals.len() == 1 {
                         residuals.first().cloned()
                     } else {
@@ -1862,6 +1933,11 @@ impl Solver {
                     };
                     *e = if let Some(bound) = solved_bound {
                         Variable::Answer(bound)
+                    } else if let Some(overload_residual) = overload_residual_candidate {
+                        Variable::ResidualAnswer {
+                            target_vars: overload_residual.witness.identity.target_vars.clone(),
+                            ty: self.materialize_overload_residual_type(&overload_residual),
+                        }
                     } else if let Some(ResidualIdentity { target_vars, .. }) = residual_candidate {
                         Variable::ResidualAnswer {
                             target_vars,
