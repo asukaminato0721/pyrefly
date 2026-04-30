@@ -160,16 +160,20 @@ struct OverloadResidualForVar {
 }
 
 /// Witness-keyed pruning decisions threaded through finishing.
-/// This is not-yet-used plumbing for overload residual pruning.
 #[derive(Clone, Debug, Default)]
 struct OverloadWitnessPruningDecision {
     surviving_branch_indices: SmallSet<usize>,
-    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
-    pruned_branch_indices: SmallSet<usize>,
     all_pruned: bool,
+    all_pruned_cause: Option<OverloadAllPrunedCause>,
 }
 
 type OverloadPruningByWitness = HashMap<OverloadResidualIdentity, OverloadWitnessPruningDecision>;
+
+#[derive(Clone, Debug)]
+struct OverloadAllPrunedCause {
+    quantified_name: Name,
+    solved_ty: Type,
+}
 
 /// Snapshot of a solved quantified var after the bounds-first pass in
 /// `finish_quantified`.
@@ -178,6 +182,7 @@ type OverloadPruningByWitness = HashMap<OverloadResidualIdentity, OverloadWitnes
 /// branch-implied bounds are incompatible with the solved type.
 #[derive(Clone, Debug)]
 struct SolvedVarWithResiduals {
+    quantified_name: Name,
     solved_ty: Type,
     overload_residuals: Vec<OverloadResidualForVar>,
 }
@@ -2271,6 +2276,10 @@ impl Solver {
             OverloadResidualIdentity,
             SmallSet<usize>,
         > = HashMap::new();
+        let mut all_pruned_cause_by_witness: HashMap<
+            OverloadResidualIdentity,
+            OverloadAllPrunedCause,
+        > = HashMap::new();
 
         for solved_var in solved_vars_with_residuals {
             let mut surviving_per_witness_for_solved_var: HashMap<
@@ -2285,7 +2294,7 @@ impl Solver {
                     .entry(identity.clone())
                     .or_default();
                 let surviving_for_solved_var = surviving_per_witness_for_solved_var
-                    .entry(identity)
+                    .entry(identity.clone())
                     .or_default();
                 for branch in &residual.branches {
                     all_branch_indices.insert(branch.branch_index);
@@ -2296,6 +2305,14 @@ impl Solver {
                     ) {
                         surviving_for_solved_var.insert(branch.branch_index);
                     }
+                }
+                if surviving_for_solved_var.is_empty() {
+                    all_pruned_cause_by_witness
+                        .entry(identity)
+                        .or_insert_with(|| OverloadAllPrunedCause {
+                            quantified_name: solved_var.quantified_name.clone(),
+                            solved_ty: solved_var.solved_ty.clone(),
+                        });
                 }
             }
             for (identity, surviving_for_solved_var) in surviving_per_witness_for_solved_var {
@@ -2310,8 +2327,8 @@ impl Solver {
         }
 
         all_branch_indices_by_witness
-            .into_iter()
-            .map(|(identity, all_branch_indices)| {
+            .into_keys()
+            .map(|identity| {
                 let surviving_branch_indices = surviving_branch_indices_by_witness
                     .get(&identity)
                     .cloned()
@@ -2320,17 +2337,27 @@ impl Solver {
                             "all observed overload residual witnesses must have surviving candidates"
                         )
                     });
-                let pruned_branch_indices = all_branch_indices
-                    .iter()
-                    .filter(|idx| !surviving_branch_indices.contains(*idx))
-                    .copied()
-                    .collect();
+                let all_pruned = surviving_branch_indices.is_empty();
+                let all_pruned_cause = if all_pruned {
+                    Some(
+                        all_pruned_cause_by_witness
+                            .get(&identity)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                unreachable!(
+                                    "all-pruned witness decisions must include a solved-type cause"
+                                )
+                            }),
+                    )
+                } else {
+                    None
+                };
                 (
                     identity,
                     OverloadWitnessPruningDecision {
                         surviving_branch_indices: surviving_branch_indices.clone(),
-                        pruned_branch_indices,
-                        all_pruned: surviving_branch_indices.is_empty(),
+                        all_pruned,
+                        all_pruned_cause,
                     },
                 )
             })
@@ -2361,6 +2388,7 @@ impl Solver {
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let mut err = Vec::new();
         let mut solved_vars_with_residuals = Vec::new();
+        let mut reported_all_pruned_witnesses = SmallSet::new();
         let lock = self.variables.lock();
         for &v in &vs.0 {
             let mut variable = lock.get_mut(v);
@@ -2373,6 +2401,7 @@ impl Solver {
                     }
                 }
                 Variable::Quantified {
+                    quantified: q,
                     bounds,
                     overload_residuals,
                     ..
@@ -2382,10 +2411,12 @@ impl Solver {
                     }
                     let original_bounds = mem::take(bounds);
                     if let Some(bound) = self.solve_bounds(original_bounds.clone()) {
+                        let quantified_name = q.name().clone();
                         let overload_residuals = overload_residuals.clone();
                         let solved_ty = bound.clone();
                         *variable = Variable::Answer(bound);
                         solved_vars_with_residuals.push(SolvedVarWithResiduals {
+                            quantified_name,
                             solved_ty,
                             overload_residuals,
                         });
@@ -2418,6 +2449,42 @@ impl Solver {
                     } else {
                         None
                     };
+                let overload_all_pruned =
+                    overload_residual_candidate
+                        .as_ref()
+                        .is_some_and(|candidate| {
+                            let identity = OverloadResidualIdentity {
+                                witness_hash: candidate.witness.identity.witness_hash,
+                            };
+                            overload_pruning_by_witness
+                                .get(&identity)
+                                .is_some_and(|decision| decision.all_pruned)
+                        });
+                if overload_all_pruned && let Some(candidate) = overload_residual_candidate.as_ref()
+                {
+                    let witness_hash = candidate.witness.identity.witness_hash;
+                    if reported_all_pruned_witnesses.insert(witness_hash) {
+                        let all_pruned_cause = overload_pruning_by_witness
+                            .get(&OverloadResidualIdentity { witness_hash })
+                            .and_then(|decision| decision.all_pruned_cause.as_ref())
+                            .unwrap_or_else(|| {
+                                unreachable!(
+                                    "all-pruned witness diagnostics require solved-type cause"
+                                )
+                            });
+                        err.push(TypeVarSpecializationError {
+                            name: q.name().clone(),
+                            got: Type::never(),
+                            want: q.as_gradual_type(),
+                            message_override: Some(format!(
+                                "Overload type was not compatible with the solved type `{}` of type variable `{}`",
+                                all_pruned_cause.solved_ty.clone().deterministic_printing(),
+                                all_pruned_cause.quantified_name,
+                            )),
+                            error: SubsetError::Other,
+                        });
+                    }
+                }
                 let residual_candidate = if solved_bound.is_none() && residuals.len() == 1 {
                     residuals.first().cloned()
                 } else {
@@ -2425,6 +2492,8 @@ impl Solver {
                 };
                 *e = if let Some(bound) = solved_bound {
                     Variable::Answer(bound)
+                } else if overload_all_pruned {
+                    Variable::Answer(Type::never())
                 } else if let Some(overload_residual) = overload_residual_candidate {
                     Variable::ResidualAnswer {
                         target_vars: overload_residual.witness.identity.target_vars.clone(),
@@ -2831,6 +2900,16 @@ impl Solver {
         subset.is_equivalent(got, want)
     }
 
+    pub fn finish_quantified_with_type_order<Ans: LookupAnswer>(
+        &self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+        type_order: TypeOrder<Ans>,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        let mut subset = self.subset(type_order);
+        subset.finish_quantified_with_infer(vs, infer_with_first_use)
+    }
+
     fn subset<'a, Ans: LookupAnswer>(&'a self, type_order: TypeOrder<'a, Ans>) -> Subset<'a, Ans> {
         Subset {
             solver: self,
@@ -2850,12 +2929,16 @@ pub struct TypeVarSpecializationError {
     pub name: Name,
     pub got: Type,
     pub want: Type,
+    pub message_override: Option<String>,
     #[allow(dead_code)]
     pub error: SubsetError,
 }
 
 impl TypeVarSpecializationError {
     pub fn to_error_msg<Ans: LookupAnswer>(self, ans: &AnswersSolver<Ans>) -> String {
+        if let Some(message_override) = self.message_override {
+            return message_override;
+        }
         TypeCheckKind::TypeVarSpecialization(self.name).format_error(
             &ans.for_display(self.got),
             &ans.for_display(self.want),
@@ -3479,6 +3562,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                         name: q.name().clone(),
                         got: t1_p.clone(),
                         want: bound,
+                        message_override: None,
                         error: err_p,
                     };
                     (t1_p.clone(), Some(specialization_error))
@@ -3497,6 +3581,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     name: q.name().clone(),
                     got: t1_p.clone(),
                     want: bound,
+                    message_override: None,
                     error: err_p,
                 };
                 (t1_p.clone(), Some(specialization_error))
@@ -3783,6 +3868,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                         name,
                                         got: t2.clone(),
                                         want: bound,
+                                        message_override: None,
                                         error: e,
                                     },
                                 );
@@ -3797,6 +3883,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                         name,
                                         got: t2.clone(),
                                         want: bound,
+                                        message_override: None,
                                         error: e,
                                     },
                                 );
@@ -3964,10 +4051,17 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         &mut self,
         vs: QuantifiedHandle,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        self.solver.finish_quantified_with_subset(
-            vs,
-            self.solver.infer_with_first_use,
-            &mut |got, want| self.is_subset_eq_probe_for_pruning(got, want),
-        )
+        self.finish_quantified_with_infer(vs, self.solver.infer_with_first_use)
+    }
+
+    pub fn finish_quantified_with_infer(
+        &mut self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        self.solver
+            .finish_quantified_with_subset(vs, infer_with_first_use, &mut |got, want| {
+                self.is_subset_eq_probe_for_pruning(got, want)
+            })
     }
 }

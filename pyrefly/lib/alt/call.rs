@@ -831,7 +831,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             if class_metadata.is_enum() {
                 let specialization_errors = self
                     .solver()
-                    .finish_quantified(vs, self.solver().infer_with_first_use)
+                    .finish_quantified_with_type_order(
+                        vs,
+                        self.solver().infer_with_first_use,
+                        self.type_order(),
+                    )
                     .err();
                 return ConstructedInstance {
                     ty: ret,
@@ -844,7 +848,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Got something other than an instance of the class under construction.
                 let specialization_errors = self
                     .solver()
-                    .finish_quantified(vs, self.solver().infer_with_first_use)
+                    .finish_quantified_with_type_order(
+                        vs,
+                        self.solver().infer_with_first_use,
+                        self.type_order(),
+                    )
                     .err();
                 return ConstructedInstance {
                     ty: ret,
@@ -907,7 +915,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         .finish_class_targs(cls.targs_mut(), self.uniques);
                     let specialization_errors = self
                         .solver()
-                        .finish_quantified(vs, self.solver().infer_with_first_use)
+                        .finish_quantified_with_type_order(
+                            vs,
+                            self.solver().infer_with_first_use,
+                            self.type_order(),
+                        )
                         .err();
                     return ConstructedInstance {
                         ty: ret.subst(&cls.targs().substitution_map()),
@@ -972,7 +984,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .finish_class_targs(cls.targs_mut(), self.uniques);
         let specialization_errors = self
             .solver()
-            .finish_quantified(vs, self.solver().infer_with_first_use)
+            .finish_quantified_with_type_order(
+                vs,
+                self.solver().infer_with_first_use,
+                self.type_order(),
+            )
             .err();
         let result = if let Some(mut ret) = dunder_new_ret {
             ret.subst_mut(&cls.targs().substitution_map());
@@ -1139,7 +1155,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .finish_class_targs(typed_dict.targs_mut(), self.uniques);
         let specialization_errors = self
             .solver()
-            .finish_quantified(vs, self.solver().infer_with_first_use)
+            .finish_quantified_with_type_order(
+                vs,
+                self.solver().infer_with_first_use,
+                self.type_order(),
+            )
             .err();
         ConstructedInstance {
             ty: Type::TypedDict(TypedDict::TypedDict(typed_dict)),

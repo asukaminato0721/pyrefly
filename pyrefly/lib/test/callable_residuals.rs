@@ -554,13 +554,12 @@ def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to 
 def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignable to implementation return type `None`
 def f(x): ...
 
-result = project(f, True)
+result = project(f, object())
 reveal_type(result)  # E: revealed type: Overload[
 "#,
 );
 
 testcase!(
-    bug = "Pruning missing: no-viable overload branches do not raise an incompatibility",
     test_overload_pruning_eliminates_all_branches_float_str_vs_int,
     r#"
 from typing import Callable, overload, reveal_type
@@ -573,13 +572,12 @@ def f(x: int) -> float: ...  # E: Overload return type `float` is not assignable
 def f(x: str) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
 def f(x): ...
 
-result = project(f, 1)
-reveal_type(result)  # E: revealed type: Overload[
+result = project(f, 1)  # E: Overload type was not compatible with the solved type `int` of type variable `S`
+reveal_type(result)  # E: revealed type: (Never) -> int
 "#,
 );
 
 testcase!(
-    bug = "Pruning missing: survivor branch is not collapsed to a non-overload callable",
     test_overload_pruning_collapses_to_single_branch,
     r#"
 from typing import Callable, overload, reveal_type
@@ -595,14 +593,13 @@ def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignab
 def f(x): ...
 
 result = project(f, "ok")
-reveal_type(result)  # E: revealed type: Overload[
+reveal_type(result)  # E: revealed type: (int) -> str
 out = result(1)
 reveal_type(out)  # E: revealed type: str
 "#,
 );
 
 testcase!(
-    bug = "Pruning missing: three-way overload does not collapse to two viable branches",
     test_overload_pruning_three_way_to_two_way,
     r#"
 from typing import Callable, overload, reveal_type

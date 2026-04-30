@@ -784,9 +784,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             //     def f[T](x: T, other: T): ...
             //     f(A(), 0)  # T = A | int
             if let Some(self_qs) = mem::take(&mut self_qs) {
-                let specialization_errors = self
-                    .solver()
-                    .finish_quantified(self_qs, self.solver().infer_with_first_use);
+                let specialization_errors = self.solver().finish_quantified_with_type_order(
+                    self_qs,
+                    self.solver().infer_with_first_use,
+                    self.type_order(),
+                );
                 if let Err(errors) = specialization_errors {
                     self.add_specialization_errors(errors, arg.range(), call_errors, context);
                 }
@@ -1352,7 +1354,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 } else {
                     // Even though these quantifieds aren't used, let's make sure to not leave
                     // unfinished quantifieds around.
-                    let _ = self.solver().finish_quantified(qs, false);
+                    let _ = self.solver().finish_quantified_with_type_order(
+                        qs,
+                        false,
+                        self.type_order(),
+                    );
                     self.instantiate_fresh_callable(tparams, callable)
                 }
             } else {
@@ -1499,12 +1505,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
         let mut errors = self
             .solver()
-            .finish_quantified(remaining_callable_qs, self.solver().infer_with_first_use)
+            .finish_quantified_with_type_order(
+                remaining_callable_qs,
+                self.solver().infer_with_first_use,
+                self.type_order(),
+            )
             .map_or_else(|e| e.to_vec(), |_| Vec::new());
-        if let Err(e) = self
-            .solver()
-            .finish_quantified(ctor_qs, self.solver().infer_with_first_use)
-        {
+        if let Err(e) = self.solver().finish_quantified_with_type_order(
+            ctor_qs,
+            self.solver().infer_with_first_use,
+            self.type_order(),
+        ) {
             errors.extend(e);
         }
 
