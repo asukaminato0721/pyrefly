@@ -569,6 +569,33 @@ def test(rmtree: Foo) -> None:
 );
 
 testcase!(
+    test_two_overloaded_callables_cross_product,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def compose[A, B, C](f: Callable[[A], B], g: Callable[[B], C]) -> Callable[[A], C]: ...
+
+@overload
+def parse(x: str) -> int: ...
+@overload
+def parse(x: bytes) -> float: ...
+def parse(x) -> int | float: ...
+
+@overload
+def fmt(x: int) -> str: ...
+@overload
+def fmt(x: float) -> bytes: ...
+def fmt(x) -> str | bytes: ...
+
+# Two independent overloaded callables produce distinct overload residual
+# witnesses - in this case we flatten the types (which currently means
+# we produce the first-branch match, for backward compatibility).
+result = compose(parse, fmt)
+reveal_type(result)  # E: revealed type: (str) -> str
+"#,
+);
+
+testcase!(
     test_issue_2105_original,
     r#"
 import shutil

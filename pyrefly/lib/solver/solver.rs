@@ -809,20 +809,27 @@ impl Solver {
         }
     }
 
-    fn first_overload_residual_identity(&self, ty: &Type) -> Option<OverloadResidualIdentity> {
-        let mut found = None;
+    /// Returns the single overload residual identity if all markers in the type
+    /// share the same witness, or None if there are zero or multiple distinct witnesses.
+    fn single_overload_residual_identity(&self, ty: &Type) -> Option<OverloadResidualIdentity> {
+        let mut first: Option<OverloadResidualIdentity> = None;
+        let mut conflict = false;
         let mut scan = ty.clone();
         scan.transform_mut(&mut |inner| {
-            if found.is_some() {
+            if conflict {
                 return;
             }
             if let Type::CallableResidual(residual) = inner
                 && let CallableResidualKind::Overload { identity, .. } = &residual.kind
             {
-                found = Some(identity.clone());
+                match &first {
+                    None => first = Some(identity.clone()),
+                    Some(existing) if existing == identity => {}
+                    Some(_) => conflict = true,
+                }
             }
         });
-        found
+        if conflict { None } else { first }
     }
 
     fn contains_overload_residual_identity(
@@ -1201,7 +1208,11 @@ impl Solver {
         preserve_class_targs: bool,
         active_overload_identities: &mut Vec<OverloadResidualIdentity>,
     ) -> Type {
-        while let Some(identity) = self.first_overload_residual_identity(&ty) {
+        // Reconstruction is only safe when all overload residual markers in
+        // the type share a single witness identity. Multiple witnesses would
+        // produce a cross-product explosion; strip all markers and fall
+        // through to generic residual finalization instead.
+        if let Some(identity) = self.single_overload_residual_identity(&ty) {
             if active_overload_identities.contains(&identity) {
                 unreachable!(
                     "detected recursive overload residual identity cycle during finalization",
@@ -1214,50 +1225,48 @@ impl Solver {
                 // the top-of-stack identity/branch-coherence invariant and decide whether
                 // to harden this boundary or tighten upstream residual capture.
                 self.strip_overload_residual_identity(&mut ty, &identity);
-                continue;
-            }
-            active_overload_identities.push(identity.clone());
-            let mut reconstructed = Vec::with_capacity(branch_indices.len());
-            for branch_index in branch_indices {
-                let mut branch_ty = ty.clone();
-                if !self.substitute_overload_residual_identity_branch(
-                    &mut branch_ty,
-                    &identity,
-                    branch_index,
-                ) {
-                    unreachable!(
-                        "selected overload residual identity must be present during reconstruction",
-                    );
-                }
-                if self.contains_overload_residual_identity(&branch_ty, &identity) {
-                    unreachable!(
-                        "overload residual substitution did not eliminate active identity"
-                    );
-                }
-                reconstructed.push(
-                    self.finalize_callable_residuals_at_boundary_impl_with_active(
-                        branch_ty,
-                        preserve_class_targs,
-                        active_overload_identities,
-                    ),
-                );
-            }
-            let popped = active_overload_identities
-                .pop()
-                .expect("active_overload_identities push/pop must stay balanced");
-            debug_assert_eq!(popped, identity);
-            if let Some(overload_ty) = self.try_combine_reconstructed_overload(&ty, &reconstructed)
-            {
-                ty = overload_ty;
             } else {
-                // TODO(stroxler): this is not quite right - when we hit a residual that could be int or str
-                // and it appears in a return type, we are evaluating the return type on both branches
-                // and *unioning* whenever the type isn't a Callable (so we cannot construct an overload)
-                //
-                // That behavior is not exactly bad, but not ideal - it would be better to flatten the type
-                // into a union inline. Fix this later.
-                ty = unions(reconstructed, &self.heap);
-                self.simplify_mut(&mut ty);
+                active_overload_identities.push(identity.clone());
+                let mut reconstructed = Vec::with_capacity(branch_indices.len());
+                for branch_index in branch_indices {
+                    let mut branch_ty = ty.clone();
+                    if !self.substitute_overload_residual_identity_branch(
+                        &mut branch_ty,
+                        &identity,
+                        branch_index,
+                    ) {
+                        unreachable!(
+                            "selected overload residual identity must be present during reconstruction",
+                        );
+                    }
+                    if self.contains_overload_residual_identity(&branch_ty, &identity) {
+                        unreachable!(
+                            "overload residual substitution did not eliminate active identity"
+                        );
+                    }
+                    reconstructed.push(
+                        self.finalize_callable_residuals_at_boundary_impl_with_active(
+                            branch_ty,
+                            preserve_class_targs,
+                            active_overload_identities,
+                        ),
+                    );
+                }
+                let popped = active_overload_identities
+                    .pop()
+                    .expect("active_overload_identities push/pop must stay balanced");
+                debug_assert_eq!(popped, identity);
+                if let Some(overload_ty) =
+                    self.try_combine_reconstructed_overload(&ty, &reconstructed)
+                {
+                    ty = overload_ty;
+                } else {
+                    // TODO(stroxler): This behavior causes us to explode residuals into unions
+                    // whenever they appear in a non-Callable type. The behavior isn't exactly
+                    // bad, but it would be cleaner to flatten them inline. Fix this later.
+                    ty = unions(reconstructed, &self.heap);
+                    self.simplify_mut(&mut ty);
+                }
             }
         }
 
