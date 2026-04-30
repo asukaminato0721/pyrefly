@@ -1236,11 +1236,17 @@ impl Solver {
         preserve_class_targs: bool,
         active_overload_identities: &mut Vec<OverloadResidualIdentity>,
     ) -> Type {
+        // Preserve class targs at this boundary so residualized class arguments
+        // can be finalized later at the access/call site with proper context.
+        let skip_overload_reconstruction = preserve_class_targs && matches!(ty, Type::ClassType(_));
+
         // Reconstruction is only safe when all overload residual markers in
         // the type share a single witness identity. Multiple witnesses would
         // produce a cross-product explosion; strip all markers and fall
         // through to generic residual finalization instead.
-        if let Some(identity) = self.single_overload_residual_identity(&ty) {
+        if !skip_overload_reconstruction
+            && let Some(identity) = self.single_overload_residual_identity(&ty)
+        {
             if active_overload_identities.contains(&identity) {
                 unreachable!(
                     "detected recursive overload residual identity cycle during finalization",

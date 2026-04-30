@@ -698,11 +698,10 @@ reveal_type(out_b)  # E: revealed type: int
 );
 
 testcase!(
-    bug =
-        "Overload residual through callback protocol produces union instead of overloaded callable",
+    bug = "The semantics here work, but the flattening in reveal_type display output is confusing",
     test_overload_residual_into_callback_protocol,
     r#"
-from typing import Callable, Protocol, overload, reveal_type
+from typing import Callable, Protocol, overload, assert_type, reveal_type
 
 class Callback[A, R](Protocol):
     def __call__(self, x: A) -> R: ...
@@ -719,8 +718,8 @@ result = lift(f)
 # Should be Overload[(int) -> str, (str) -> int], but overload residual
 # is flattened into a union of protocol instances instead.
 reveal_type(result)  # E: revealed type: Callback[int, str] | Callback[str, int]
-result(1)  # E: Argument `Literal[1]` is not assignable to parameter `x` with type `str` in function `Callback.__call__`
-result("ok")  # E: Argument `Literal['ok']` is not assignable to parameter `x` with type `int` in function `Callback.__call__`
+assert_type(result(1), str)
+assert_type(result("ok"), int)
 "#,
 );
 
