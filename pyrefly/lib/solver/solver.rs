@@ -2173,12 +2173,26 @@ impl Solver {
                     .expect("single surviving overload branch must exist")
                     .ty
             }
-            _ => Type::CallableResidual(Box::new(CallableResidual {
-                kind: CallableResidualKind::Overload {
-                    identity,
-                    branches: surviving_branches,
-                },
-            })),
+            _ => {
+                let first_ty = surviving_branches
+                    .first()
+                    .expect("multiple surviving overload branches must have first branch")
+                    .ty
+                    .clone();
+                if surviving_branches
+                    .iter()
+                    .all(|branch| branch.ty == first_ty)
+                {
+                    first_ty
+                } else {
+                    Type::CallableResidual(Box::new(CallableResidual {
+                        kind: CallableResidualKind::Overload {
+                            identity,
+                            branches: surviving_branches,
+                        },
+                    }))
+                }
+            }
         }
     }
 

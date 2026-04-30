@@ -648,6 +648,26 @@ reveal_type(out_b)  # E: revealed type: str
 );
 
 testcase!(
+    test_overload_residual_equivalent_branch_collapse,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[int], S]: ...
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: bytes) -> str: ...
+def f(x) -> str: ...
+
+result = project(f, "ok")
+reveal_type(result)  # E: revealed type: (int) -> str
+out = result(1)
+reveal_type(out)  # E: revealed type: str
+"#,
+);
+
+testcase!(
     test_nested_higher_order_overload,
     r#"
 from typing import Callable, overload, reveal_type
