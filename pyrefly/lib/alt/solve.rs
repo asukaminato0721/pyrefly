@@ -329,6 +329,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             decorators,
             is_new_type,
             pydantic_config_dict,
+            pydantic_before_validator_fields,
             django_field_info,
         } = binding;
         let metadata = match &self.get_idx(*k).0 {
@@ -340,6 +341,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 decorators,
                 *is_new_type,
                 pydantic_config_dict,
+                pydantic_before_validator_fields,
                 django_field_info,
                 errors,
             ),

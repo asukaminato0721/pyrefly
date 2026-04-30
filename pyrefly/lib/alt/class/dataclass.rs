@@ -881,14 +881,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     }
                 }
 
-                // Get converter param: explicit field converter takes priority, then Pydantic lax table
-                let converter_param = field_flags.converter_param.clone().or_else(|| {
-                    if !strict {
-                        converter_table.get(&field.ty()).cloned()
-                    } else {
-                        None
-                    }
-                });
+                // If this field has a `@field_validator(..., mode='before'|'plain')`, the init
+                // parameter accepts `Any` because the validator transforms arbitrary input.
+                let converter_param = if dataclass.pydantic_before_validator_fields.contains(&name)
+                {
+                    Some(self.heap.mk_any_explicit())
+                } else {
+                    field_flags.converter_param.clone().or_else(|| {
+                        if !strict {
+                            converter_table.get(&field.ty()).cloned()
+                        } else {
+                            None
+                        }
+                    })
+                };
 
                 if field_flags.init_by_name {
                     params.push(self.as_param(

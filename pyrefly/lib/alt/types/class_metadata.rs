@@ -513,6 +513,8 @@ pub struct DataclassMetadata {
     pub init_defaults: InitDefaults,
     /// Whether a default can be passed positionally to field specifier calls
     pub default_can_be_positional: bool,
+    /// Fields targeted by `@field_validator(mode='before'|'plain')`, including inherited.
+    pub pydantic_before_validator_fields: SmallSet<Name>,
 }
 
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]

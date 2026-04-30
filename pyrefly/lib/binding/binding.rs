@@ -116,7 +116,7 @@ assert_words!(BindingAnnotation, 15);
 assert_words!(BindingClass, 11);
 assert_words!(BindingTParams, 10);
 assert_words!(BindingClassBaseType, 3);
-assert_words!(BindingClassMetadata, 9);
+assert_words!(BindingClassMetadata, 11);
 assert_bytes!(BindingClassMro, 4);
 assert_bytes!(BindingAbstractClassCheck, 4);
 assert_words!(BindingClassField, 11);
@@ -3003,6 +3003,9 @@ pub struct BindingClassMetadata {
     /// Is this a new type? True only for synthesized classes created from a `NewType` call.
     pub is_new_type: bool,
     pub pydantic_config_dict: PydanticConfigDict,
+    /// Field names targeted by `@field_validator(..., mode='before'|'plain')` decorators.
+    /// These fields accept `Any` in `__init__` because the validator can transform arbitrary input.
+    pub pydantic_before_validator_fields: Box<[Name]>,
     /// Django-specific field information.
     pub django_field_info: Box<DjangoFieldInfo>,
 }

@@ -239,6 +239,7 @@ impl<'a> BindingsBuilder<'a> {
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let body = mem::take(&mut x.body);
         let field_docstrings = self.extract_field_docstrings(&body);
+        let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
         let decorators =
             self.ensure_and_bind_decorators(mem::take(&mut x.decorator_list), class_object.usage());
 
@@ -515,6 +516,8 @@ impl<'a> BindingsBuilder<'a> {
                 decorators: decorators.into_boxed_slice(),
                 is_new_type: false,
                 pydantic_config_dict,
+                pydantic_before_validator_fields: pydantic_before_validator_fields
+                    .into_boxed_slice(),
                 django_field_info: Box::new(django_field_info),
             },
         );
@@ -962,6 +965,7 @@ impl<'a> BindingsBuilder<'a> {
                 decorators: Box::new([]),
                 is_new_type,
                 pydantic_config_dict: PydanticConfigDict::default(),
+                pydantic_before_validator_fields: Box::default(),
                 django_field_info: Box::default(),
             },
         );

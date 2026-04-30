@@ -349,7 +349,6 @@ class MyBaseModel(BaseModel):
 );
 
 pydantic_testcase!(
-    bug = "mode='before' validators can transform input types, so C(x=0) should be accepted",
     test_field_validator_mode_before,
     r#"
 from pydantic import BaseModel, field_validator
@@ -361,7 +360,44 @@ class C(BaseModel):
     def validate_x(cls, x):
         return str(x)
 
-C(x=0) # E: Argument `Literal[0]` is not assignable to parameter `x` with type `bytearray | bytes | str` in function `C.__init__`
+C(x=0)
 C(x="hello")
+    "#,
+);
+
+pydantic_testcase!(
+    test_field_validator_mode_before_inherited,
+    r#"
+from pydantic import BaseModel, field_validator
+
+class Parent(BaseModel):
+    x: str
+    @field_validator('x', mode='before')
+    @classmethod
+    def validate_x(cls, x):
+        return str(x)
+
+class Child(Parent):
+    pass
+
+Child(x=0)
+Child(x="hello")
+    "#,
+);
+
+pydantic_testcase!(
+    test_field_validator_mode_plain,
+    r#"
+from pydantic import BaseModel, field_validator
+
+class P(BaseModel):
+    x: int
+    @field_validator('x', mode='plain')
+    @classmethod
+    def validate_x(cls, x) -> int:
+        return int(x)
+
+P(x="99")
+P(x=42)
     "#,
 );
