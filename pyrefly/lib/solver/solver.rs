@@ -173,6 +173,17 @@ struct OverloadWitnessPruningDecision {
 
 type OverloadPruningByWitness = HashMap<OverloadResidualIdentity, OverloadWitnessPruningDecision>;
 
+/// Snapshot of a solved quantified var after the bounds-first pass in
+/// `finish_quantified`.
+///
+/// Used by witness-level overload pruning: eliminate branches whose
+/// branch-implied bounds are incompatible with the solved type.
+#[derive(Clone, Debug)]
+struct SolvedVarWithResiduals {
+    solved_ty: Type,
+    overload_residuals: Vec<OverloadResidualForVar>,
+}
+
 #[derive(Clone, Debug)]
 enum Variable {
     /// A "partial type" (terminology borrowed from mypy) for an empty container.
@@ -2183,22 +2194,136 @@ impl Solver {
         }
     }
 
-    /// Called after a quantified function has been called. Given `def f[T](x: int): list[T]`,
-    /// after the generic has completed.
-    /// If `infer_with_first_use` is true, the variable `T` will be have like an
-    /// empty container and get pinned by the first subsequent usage.
-    /// If `infer_with_first_use` is false, the variable `T` will be replaced with `Any`
+    fn are_branch_bounds_compatible_with_solved_type(
+        &self,
+        branch_value: &Variable,
+        solved_ty: &Type,
+        is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
+    ) -> bool {
+        let bounds = match branch_value {
+            Variable::Quantified { bounds, .. } | Variable::Unwrap(bounds) => bounds,
+            Variable::Answer(branch_ty) | Variable::ResidualAnswer { ty: branch_ty, .. } => {
+                // If this branch already collapsed to a concrete type, treat
+                // compatibility as type equivalence against the solved type.
+                return is_subset(branch_ty, solved_ty).is_ok()
+                    && is_subset(solved_ty, branch_ty).is_ok();
+            }
+            Variable::PartialQuantified(_) => {
+                unreachable!("overload residual capture should not include PartialQuantified vars")
+            }
+            Variable::PartialContained(_) => {
+                unreachable!("overload residual capture should not include PartialContained vars")
+            }
+            Variable::Recursive => {
+                unreachable!("overload residual capture should not include Recursive vars")
+            }
+        };
+        bounds
+            .lower
+            .iter()
+            .all(|lower| is_subset(lower, solved_ty).is_ok())
+            && bounds
+                .upper
+                .iter()
+                .all(|upper| is_subset(solved_ty, upper).is_ok())
+    }
+
+    fn compute_overload_pruning_by_witness(
+        &self,
+        solved_vars_with_residuals: &[SolvedVarWithResiduals],
+        is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
+    ) -> OverloadPruningByWitness {
+        let mut all_branch_indices_by_witness: HashMap<OverloadResidualIdentity, SmallSet<usize>> =
+            HashMap::new();
+        let mut surviving_branch_indices_by_witness: HashMap<
+            OverloadResidualIdentity,
+            SmallSet<usize>,
+        > = HashMap::new();
+
+        for solved_var in solved_vars_with_residuals {
+            let mut surviving_per_witness_for_solved_var: HashMap<
+                OverloadResidualIdentity,
+                SmallSet<usize>,
+            > = HashMap::new();
+            for residual in &solved_var.overload_residuals {
+                let identity = OverloadResidualIdentity {
+                    witness_hash: residual.witness.identity.witness_hash,
+                };
+                let all_branch_indices = all_branch_indices_by_witness
+                    .entry(identity.clone())
+                    .or_default();
+                let surviving_for_solved_var = surviving_per_witness_for_solved_var
+                    .entry(identity)
+                    .or_default();
+                for branch in &residual.branches {
+                    all_branch_indices.insert(branch.branch_index);
+                    if self.are_branch_bounds_compatible_with_solved_type(
+                        &branch.value,
+                        &solved_var.solved_ty,
+                        is_subset,
+                    ) {
+                        surviving_for_solved_var.insert(branch.branch_index);
+                    }
+                }
+            }
+            for (identity, surviving_for_solved_var) in surviving_per_witness_for_solved_var {
+                if let Some(existing_surviving) =
+                    surviving_branch_indices_by_witness.get_mut(&identity)
+                {
+                    existing_surviving.retain(|idx| surviving_for_solved_var.contains(idx));
+                } else {
+                    surviving_branch_indices_by_witness.insert(identity, surviving_for_solved_var);
+                }
+            }
+        }
+
+        all_branch_indices_by_witness
+            .into_iter()
+            .map(|(identity, all_branch_indices)| {
+                let surviving_branch_indices = surviving_branch_indices_by_witness
+                    .get(&identity)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        unreachable!(
+                            "all observed overload residual witnesses must have surviving candidates"
+                        )
+                    });
+                let pruned_branch_indices = all_branch_indices
+                    .iter()
+                    .filter(|idx| !surviving_branch_indices.contains(*idx))
+                    .copied()
+                    .collect();
+                (
+                    identity,
+                    OverloadWitnessPruningDecision {
+                        surviving_branch_indices: surviving_branch_indices.clone(),
+                        pruned_branch_indices,
+                        all_pruned: surviving_branch_indices.is_empty(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Called after a quantified function has been called. Given
+    /// `def f[T](x: int): list[T]`, this runs after generic solving
+    /// completes.
+    ///
+    /// If `infer_with_first_use` is true, unresolved `T` behaves like an
+    /// empty-container partial type and may be pinned by first use.
+    /// If `infer_with_first_use` is false, unresolved `T` is replaced with
+    /// gradual (`Any`-like) fallback.
     pub fn finish_quantified(
         &self,
         vs: QuantifiedHandle,
         infer_with_first_use: bool,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        let lock = self.variables.lock();
-        let overload_pruning_by_witness: OverloadPruningByWitness = HashMap::new();
         let mut err = Vec::new();
-        for v in vs.0 {
-            let mut e = lock.get_mut(v);
-            match &mut *e {
+        let mut solved_vars_with_residuals = Vec::new();
+        let lock = self.variables.lock();
+        for &v in &vs.0 {
+            let mut variable = lock.get_mut(v);
+            match &mut *variable {
                 Variable::Answer(_) | Variable::ResidualAnswer { .. } => {
                     // We pin the quantified var to a type when it first appears in a subset constraint,
                     // and at that point we check the instantiation with the bound.
@@ -2207,50 +2332,81 @@ impl Solver {
                     }
                 }
                 Variable::Quantified {
-                    quantified: q,
                     bounds,
-                    residuals,
                     overload_residuals,
+                    ..
                 } => {
                     if let Some(e) = self.instantiation_errors.read().get(&v) {
                         err.push(e.clone());
                     }
-                    let solved_bound = self.solve_bounds(mem::take(bounds));
-                    let overload_residual_candidate =
-                        if solved_bound.is_none() && overload_residuals.len() == 1 {
-                            overload_residuals.first().cloned()
-                        } else {
-                            None
-                        };
-                    let residual_candidate = if solved_bound.is_none() && residuals.len() == 1 {
-                        residuals.first().cloned()
+                    let original_bounds = mem::take(bounds);
+                    if let Some(bound) = self.solve_bounds(original_bounds.clone()) {
+                        let overload_residuals = overload_residuals.clone();
+                        let solved_ty = bound.clone();
+                        *variable = Variable::Answer(bound);
+                        solved_vars_with_residuals.push(SolvedVarWithResiduals {
+                            solved_ty,
+                            overload_residuals,
+                        });
                     } else {
-                        None
-                    };
-                    *e = if let Some(bound) = solved_bound {
-                        Variable::Answer(bound)
-                    } else if let Some(overload_residual) = overload_residual_candidate {
-                        Variable::ResidualAnswer {
-                            target_vars: overload_residual.witness.identity.target_vars.clone(),
-                            ty: self.materialize_overload_residual_type(
-                                &overload_residual,
-                                &overload_pruning_by_witness,
-                            ),
-                        }
-                    } else if let Some(ResidualIdentity { target_vars, .. }) = residual_candidate {
-                        Variable::ResidualAnswer {
-                            target_vars,
-                            ty: self.materialize_generic_residual_type(q),
-                        }
-                    } else if infer_with_first_use {
-                        Variable::finished(q)
-                    } else {
-                        Variable::Answer(q.as_gradual_type())
-                    };
+                        *bounds = original_bounds;
+                    }
                 }
                 _ => {}
             }
         }
+        drop(lock);
+
+        let mut inert_subset = |_got: &Type, _want: &Type| Ok(());
+        let overload_pruning_by_witness = self
+            .compute_overload_pruning_by_witness(&solved_vars_with_residuals, &mut inert_subset);
+
+        let lock = self.variables.lock();
+        for &v in &vs.0 {
+            let mut e = lock.get_mut(v);
+            if let Variable::Quantified {
+                quantified: q,
+                bounds,
+                residuals,
+                overload_residuals,
+            } = &mut *e
+            {
+                let solved_bound = self.solve_bounds(mem::take(bounds));
+                let overload_residual_candidate =
+                    if solved_bound.is_none() && overload_residuals.len() == 1 {
+                        overload_residuals.first().cloned()
+                    } else {
+                        None
+                    };
+                let residual_candidate = if solved_bound.is_none() && residuals.len() == 1 {
+                    residuals.first().cloned()
+                } else {
+                    None
+                };
+                *e = if let Some(bound) = solved_bound {
+                    Variable::Answer(bound)
+                } else if let Some(overload_residual) = overload_residual_candidate {
+                    Variable::ResidualAnswer {
+                        target_vars: overload_residual.witness.identity.target_vars.clone(),
+                        ty: self.materialize_overload_residual_type(
+                            &overload_residual,
+                            &overload_pruning_by_witness,
+                        ),
+                    }
+                } else if let Some(ResidualIdentity { target_vars, .. }) = residual_candidate {
+                    Variable::ResidualAnswer {
+                        target_vars,
+                        ty: self.materialize_generic_residual_type(q),
+                    }
+                } else if infer_with_first_use {
+                    Variable::finished(q)
+                } else {
+                    Variable::Answer(q.as_gradual_type())
+                };
+            }
+        }
+        drop(lock);
+
         match Vec1::try_from_vec(err) {
             Ok(err) => Err(err),
             Err(_) => Ok(()),
