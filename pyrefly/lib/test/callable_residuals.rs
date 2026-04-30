@@ -5,6 +5,22 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+/* Callable residuals represent type parameters of higher order functions
+ * that "capture" complex structure in an argument that is a callable
+ *  type, when that callable is generic or overloaded.
+ *
+ * The resulting "residual" types can potentially live in the TArgs
+ * of a class (which lets us model things like callback protocols, where
+ * a class might capture the full callable structure of an input function).
+ *
+ * A residual always has a "fallback" behavior where it flattens to an approximate
+ * type, but if it appears in a Callable type then we will try to "explode" the
+ * generic and/or overload structure implied by residual types.
+ *
+ * This module is for tests that touch this residual-type and exploding-callable
+ * behavior.
+ */
+
 use crate::testcase;
 
 // Make sure no residual type leaks into user output, when a residual
