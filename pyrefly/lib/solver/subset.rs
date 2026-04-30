@@ -1430,15 +1430,14 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         vars.extend(want.collect_maybe_placeholder_vars());
         let vars = vars.into_iter().collect::<Vec<_>>();
         let vars_snapshot = self.solver.snapshot_vars(&vars);
-        let cache_size = self.subset_cache.len();
+        let cache_snapshot = self.subset_cache.clone();
+        self.subset_cache.clear();
         let protocol_assumptions = self.class_protocol_assumptions.clone();
         let deferred_vars = self.snapshot_witness_deferred_vars();
         let coinductive_assumptions_used = self.coinductive_assumptions_used;
         let result = self.is_subset_eq_with_context(got, want, &CallContext::outside());
         self.solver.restore_vars(vars_snapshot);
-        while self.subset_cache.len() > cache_size {
-            self.subset_cache.pop();
-        }
+        self.subset_cache = cache_snapshot;
         self.class_protocol_assumptions = protocol_assumptions;
         self.restore_witness_deferred_vars(deferred_vars);
         self.coinductive_assumptions_used = coinductive_assumptions_used;

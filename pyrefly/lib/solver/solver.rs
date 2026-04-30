@@ -163,11 +163,9 @@ struct OverloadResidualForVar {
 /// This is not-yet-used plumbing for overload residual pruning.
 #[derive(Clone, Debug, Default)]
 struct OverloadWitnessPruningDecision {
-    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
     surviving_branch_indices: SmallSet<usize>,
     #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
     pruned_branch_indices: SmallSet<usize>,
-    #[expect(dead_code, reason = "not-yet-used overload pruning plumbing")]
     all_pruned: bool,
 }
 
@@ -2146,10 +2144,44 @@ impl Solver {
                     overload_pruning_by_witness,
                 ),
             })
-            .collect();
-        Type::CallableResidual(Box::new(CallableResidual {
-            kind: CallableResidualKind::Overload { identity, branches },
-        }))
+            .collect::<Vec<_>>();
+        let surviving_branch_indices = overload_pruning_by_witness
+            .get(&identity)
+            .map(|decision| decision.surviving_branch_indices.clone())
+            .unwrap_or_else(|| branches.iter().map(|branch| branch.branch_index).collect());
+        let surviving_branches = branches
+            .into_iter()
+            .filter(|branch| surviving_branch_indices.contains(&branch.branch_index))
+            .collect::<Vec<_>>();
+        match surviving_branches.len() {
+            0 => {
+                if overload_pruning_by_witness
+                    .get(&identity)
+                    .is_some_and(|decision| decision.all_pruned)
+                {
+                    // All candidate branches were pruned for this witness.
+                    // Use Never as a safe sentinel instead of silently widening.
+                    Type::never()
+                } else {
+                    unreachable!(
+                        "overload residual pruning produced no surviving branches without all_pruned"
+                    )
+                }
+            }
+            1 => {
+                surviving_branches
+                    .into_iter()
+                    .next()
+                    .expect("single surviving overload branch must exist")
+                    .ty
+            }
+            _ => Type::CallableResidual(Box::new(CallableResidual {
+                kind: CallableResidualKind::Overload {
+                    identity,
+                    branches: surviving_branches,
+                },
+            })),
+        }
     }
 
     fn materialize_overload_residual_branch_value(
