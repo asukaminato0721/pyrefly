@@ -1116,6 +1116,9 @@ impl Solver {
                 }
             }
             Type::Function(function) => {
+                if !function.signature.contains_callable_residual() {
+                    return (false, false);
+                }
                 let mut signature = function.signature.clone();
                 let (changed, consumed_residual) = self.finalize_callable_residuals_mut(
                     &mut signature.ret,
