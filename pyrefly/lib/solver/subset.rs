@@ -580,6 +580,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             .type_order
             .get_protocol_member_names(protocol.class_object());
         for name in protocol_members {
+            let allow_residual_capture = name == dunder::CALL;
             if name == dunder::INIT || name == dunder::NEW {
                 // Protocols can't be instantiated
                 continue;
@@ -600,20 +601,39 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                             self.is_subset_eq(got, want).is_ok()
                         })
                 {
-                    self.is_subset_eq(&got, &want_no_self)?;
+                    self.is_subset_eq_for_protocol_member(
+                        &got,
+                        &want_no_self,
+                        allow_residual_capture,
+                    )?;
                 } else {
-                    self.is_subset_eq(&got, &want)?;
+                    self.is_subset_eq_for_protocol_member(&got, &want, allow_residual_capture)?;
                 }
             } else {
                 self.type_order.is_protocol_subset_at_attr(
                     &got,
                     &protocol,
                     &name,
-                    &mut |got, want| self.is_subset_eq(got, want),
+                    &mut |got, want| {
+                        self.is_subset_eq_for_protocol_member(got, want, allow_residual_capture)
+                    },
                 )?;
             }
         }
         Ok(())
+    }
+
+    fn is_subset_eq_for_protocol_member(
+        &mut self,
+        got: &Type,
+        want: &Type,
+        allow_residual_capture: bool,
+    ) -> Result<(), SubsetError> {
+        if allow_residual_capture {
+            self.is_subset_eq(got, want)
+        } else {
+            self.with_active_call_context(&CallContext::outside(), |me| me.is_subset_eq(got, want))
+        }
     }
 
     fn is_subset_tuple(&mut self, got: &Tuple, want: &Tuple) -> Result<(), SubsetError> {
