@@ -2129,9 +2129,20 @@ impl Solver {
         let identity = OverloadResidualIdentity {
             witness_hash: residual.witness.identity.witness_hash,
         };
-        let branches = residual
+        let surviving_branch_indices = overload_pruning_by_witness
+            .get(&identity)
+            .map(|decision| decision.surviving_branch_indices.clone())
+            .unwrap_or_else(|| {
+                residual
+                    .branches
+                    .iter()
+                    .map(|branch| branch.branch_index)
+                    .collect()
+            });
+        let surviving_branches = residual
             .branches
             .iter()
+            .filter(|branch| surviving_branch_indices.contains(&branch.branch_index))
             .map(|branch| OverloadBranchProjection {
                 branch_index: branch.branch_index,
                 ty: self.materialize_overload_residual_branch_value(
@@ -2139,14 +2150,6 @@ impl Solver {
                     overload_pruning_by_witness,
                 ),
             })
-            .collect::<Vec<_>>();
-        let surviving_branch_indices = overload_pruning_by_witness
-            .get(&identity)
-            .map(|decision| decision.surviving_branch_indices.clone())
-            .unwrap_or_else(|| branches.iter().map(|branch| branch.branch_index).collect());
-        let surviving_branches = branches
-            .into_iter()
-            .filter(|branch| surviving_branch_indices.contains(&branch.branch_index))
             .collect::<Vec<_>>();
         match surviving_branches.len() {
             0 => {
