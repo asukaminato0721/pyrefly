@@ -697,6 +697,33 @@ reveal_type(out_b)  # E: revealed type: int
 "#,
 );
 
+testcase!(
+    bug =
+        "Overload residual through callback protocol produces union instead of overloaded callable",
+    test_overload_residual_into_callback_protocol,
+    r#"
+from typing import Callable, Protocol, overload, reveal_type
+
+class Callback[A, R](Protocol):
+    def __call__(self, x: A) -> R: ...
+
+def lift[A, R](f: Callable[[A], R]) -> Callback[A, R]: ...
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: str) -> int: ...
+def f(x) -> str | int: ...
+
+result = lift(f)
+# Should be Overload[(int) -> str, (str) -> int], but overload residual
+# is flattened into a union of protocol instances instead.
+reveal_type(result)  # E: revealed type: Callback[int, str] | Callback[str, int]
+result(1)  # E: Argument `Literal[1]` is not assignable to parameter `x` with type `str` in function `Callback.__call__`
+result("ok")  # E: Argument `Literal['ok']` is not assignable to parameter `x` with type `int` in function `Callback.__call__`
+"#,
+);
+
 // Regression tests for https://github.com/facebook/pyrefly/issues/2105
 // Overloaded callable protocol passed to higher-order function with ParamSpec.
 // The solver commits to one overload branch too early and rejects valid calls.
