@@ -36,6 +36,7 @@ use pyrefly_util::owner::Owner;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
+use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::callable::CallArg;
@@ -1406,6 +1407,42 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             }
         }
         res
+    }
+
+    /// Run a speculative subset check used only for overload-branch pruning in
+    /// quantified finishing.
+    ///
+    /// Why this exists:
+    /// Pruning asks "would this branch be compatible with the solved type?" so we
+    /// can trim impossible overload residual branches before final materialization.
+    ///
+    /// Why we snapshot:
+    /// `is_subset_eq` is not pure - it can pin vars, refine bounds, and update
+    /// subset/protocol/witness side-state. None of those probe side effects are
+    /// semantically part of the real solve path, so we snapshot and restore the
+    /// relevant local state after each probe.
+    pub(crate) fn is_subset_eq_probe_for_pruning(
+        &mut self,
+        got: &Type,
+        want: &Type,
+    ) -> Result<(), SubsetError> {
+        let mut vars: SmallSet<Var> = got.collect_maybe_placeholder_vars().into_iter().collect();
+        vars.extend(want.collect_maybe_placeholder_vars());
+        let vars = vars.into_iter().collect::<Vec<_>>();
+        let vars_snapshot = self.solver.snapshot_vars(&vars);
+        let cache_size = self.subset_cache.len();
+        let protocol_assumptions = self.class_protocol_assumptions.clone();
+        let deferred_vars = self.snapshot_witness_deferred_vars();
+        let coinductive_assumptions_used = self.coinductive_assumptions_used;
+        let result = self.is_subset_eq_with_context(got, want, &CallContext::outside());
+        self.solver.restore_vars(vars_snapshot);
+        while self.subset_cache.len() > cache_size {
+            self.subset_cache.pop();
+        }
+        self.class_protocol_assumptions = protocol_assumptions;
+        self.restore_witness_deferred_vars(deferred_vars);
+        self.coinductive_assumptions_used = coinductive_assumptions_used;
+        result
     }
 
     fn is_subset_eq_no_recursive_check(

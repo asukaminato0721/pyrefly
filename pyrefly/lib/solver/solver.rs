@@ -2318,6 +2318,15 @@ impl Solver {
         vs: QuantifiedHandle,
         infer_with_first_use: bool,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        self.finish_quantified_with_subset(vs, infer_with_first_use, &mut |_got, _want| Ok(()))
+    }
+
+    pub(crate) fn finish_quantified_with_subset(
+        &self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+        is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let mut err = Vec::new();
         let mut solved_vars_with_residuals = Vec::new();
         let lock = self.variables.lock();
@@ -2357,9 +2366,8 @@ impl Solver {
         }
         drop(lock);
 
-        let mut inert_subset = |_got: &Type, _want: &Type| Ok(());
-        let overload_pruning_by_witness = self
-            .compute_overload_pruning_by_witness(&solved_vars_with_residuals, &mut inert_subset);
+        let overload_pruning_by_witness =
+            self.compute_overload_pruning_by_witness(&solved_vars_with_residuals, is_subset);
 
         let lock = self.variables.lock();
         for &v in &vs.0 {
@@ -3210,7 +3218,18 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         hasher.finish()
     }
 
-    pub fn make_forall_witness_context(
+    pub fn snapshot_witness_deferred_vars(&self) -> SmallMap<u64, SmallSet<Var>> {
+        self.witness_deferred_vars.clone()
+    }
+
+    pub(crate) fn restore_witness_deferred_vars(
+        &mut self,
+        deferred_vars: SmallMap<u64, SmallSet<Var>>,
+    ) {
+        self.witness_deferred_vars = deferred_vars;
+    }
+
+    pub(crate) fn make_forall_witness_context(
         &mut self,
         got: &Type,
         vars: &QuantifiedHandle,
@@ -3910,10 +3929,13 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
     }
 
     pub fn finish_quantified(
-        &self,
+        &mut self,
         vs: QuantifiedHandle,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        self.solver
-            .finish_quantified(vs, self.solver.infer_with_first_use)
+        self.solver.finish_quantified_with_subset(
+            vs,
+            self.solver.infer_with_first_use,
+            &mut |got, want| self.is_subset_eq_probe_for_pruning(got, want),
+        )
     }
 }
