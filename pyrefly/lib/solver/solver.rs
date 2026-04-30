@@ -579,6 +579,22 @@ impl Solver {
         )
     }
 
+    /// Witnesses track both origin and deferred vars for residual plumbing,
+    /// but overload branch capture snapshots only quantified vars. Only
+    /// quantified vars can carry the per-branch residual candidates that we
+    /// later materialize at finishing boundaries.
+    pub(crate) fn overload_capture_quantified_vars(
+        &self,
+        witness: &ResidualWitnessContext,
+    ) -> Vec<Var> {
+        let variables = self.variables.lock();
+        witness
+            .capture_candidate_vars()
+            .into_iter()
+            .filter(|var| matches!(&*variables.get(*var), Variable::Quantified { .. }))
+            .collect()
+    }
+
     /// Snapshot the current state of the given vars so they can be restored later.
     pub fn snapshot_vars(&self, vars: &[Var]) -> VarSnapshot {
         if vars.is_empty() {
@@ -675,6 +691,22 @@ impl Solver {
             .into_iter()
             .partition(|(t, _)| matches!(t, Type::Var(_)));
         nonvars.into_iter().chain(wrapped_vars).chain(bare_vars)
+    }
+
+    pub(crate) fn extract_overload_branch_capture(
+        &self,
+        branch_index: usize,
+        vars: &[Var],
+    ) -> OverloadBranchCapture {
+        let variables = self.variables.lock();
+        let values: SmallMap<Var, Variable> = vars
+            .iter()
+            .map(|var| (*var, variables.get(*var).clone()))
+            .collect();
+        OverloadBranchCapture {
+            branch_index,
+            values,
+        }
     }
 
     /// Finish the type returned from a function call. This entails expanding solved variables,
@@ -1712,10 +1744,6 @@ impl Solver {
 
     /// Record per-var overload residuals from full branch captures.
     /// Decomposes each branch's full capture into per-var entries.
-    #[expect(
-        dead_code,
-        reason = "Called when overload capture call sites are wired"
-    )]
     pub(crate) fn record_overload_residuals_for_witness(
         &self,
         witness: &ResidualWitnessContext,
@@ -2494,6 +2522,14 @@ impl ResidualWitnessContext {
         self.identity.witness_id
     }
 
+    pub(crate) fn capture_candidate_vars(&self) -> SmallSet<Var> {
+        self.origin_vars
+            .iter()
+            .chain(self.deferred_vars.iter())
+            .copied()
+            .collect()
+    }
+
     pub(crate) fn extend_deferred_vars(&mut self, vars: SmallSet<Var>) {
         self.deferred_vars.extend(vars);
     }
@@ -2712,6 +2748,17 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         self.witness_deferred_vars.shift_remove(&witness_id)
     }
 
+    pub(crate) fn active_overload_residual_witness(&self) -> Option<ResidualWitnessContext> {
+        if !self.active_call_context.residual_hooks_enabled() {
+            return None;
+        }
+        let mut witness = self.active_call_context.residual_witness()?.clone();
+        if let Some(deferred_vars) = self.witness_deferred_vars.get(&witness.witness_id()) {
+            witness.extend_deferred_vars(deferred_vars.clone());
+        }
+        Some(witness)
+    }
+
     fn record_deferred_residual_target_vars(&mut self, origin_var: Var, other: &Type) {
         if !self.active_call_context.residual_hooks_enabled() {
             return;
@@ -2887,13 +2934,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                             v1_bounds.extend(mem::take(v2_bounds));
                             *v2_bounds = v1_bounds.clone();
                             Solver::merge_residual_candidates(v1_residuals, v2_residuals);
-                            // Invariant for not-yet-used plumbing: overload candidates are still empty.
-                            // Keep this loud until overload merge semantics are implemented.
-                            debug_assert!(
-                                v1_overload_residuals.is_empty()
-                                    && v2_overload_residuals.is_empty(),
-                                "unexpected overload_residuals before overload capture is enabled",
-                            );
+                            // Overload residual merge semantics (identity-aware dedupe/pruning)
+                            // are not wired yet; for now keep all captured candidates.
                             v1_overload_residuals.extend(mem::take(v2_overload_residuals));
                             *v2_overload_residuals = v1_overload_residuals.clone();
                         }

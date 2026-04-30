@@ -31,6 +31,7 @@ use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::typed_dict::TypedDictField;
 use pyrefly_types::types::Overload;
 use pyrefly_types::types::Union;
+use pyrefly_types::types::Var;
 use pyrefly_util::owner::Owner;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
@@ -41,6 +42,7 @@ use crate::alt::callable::CallArg;
 use crate::alt::expr::TypeOrExpr;
 use crate::solver::solver::CallContext;
 use crate::solver::solver::OpenTypedDictSubsetError;
+use crate::solver::solver::ResidualWitnessContext;
 use crate::solver::solver::Subset;
 use crate::solver::solver::SubsetCacheEntry;
 use crate::solver::solver::SubsetError;
@@ -1158,12 +1160,64 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         })
     }
 
+    fn witness_and_captured_vars_for_overload(
+        &mut self,
+    ) -> Option<(ResidualWitnessContext, Vec<Var>)> {
+        if let Some(witness) = self.active_overload_residual_witness() {
+            let captured_vars = self.solver.overload_capture_quantified_vars(&witness);
+            if !captured_vars.is_empty() {
+                return Some((witness, captured_vars));
+            }
+        }
+        None
+    }
+
     fn is_subset_overload(&mut self, overload: &Overload, want: &Type) -> Result<(), SubsetError> {
-        if any(overload.signatures.iter(), |l| {
-            self.is_subset_eq(&l.as_type(), want)
-        })
-        .is_ok()
+        let initial_is_subset = if let Some((witness, captured_vars)) =
+            self.witness_and_captured_vars_for_overload()
         {
+            let mut first_success_snapshot = None;
+            let mut successful_branch_captures = Vec::new();
+            let mut first_error = None;
+            for (branch_index, l) in overload.signatures.iter().enumerate() {
+                let probe_snapshot = self.solver.snapshot_vars(&captured_vars);
+                match self.is_subset_eq(&l.as_type(), want) {
+                    Ok(()) => {
+                        if first_success_snapshot.is_none() {
+                            first_success_snapshot =
+                                Some(self.solver.snapshot_vars(&captured_vars));
+                        }
+                        successful_branch_captures.push(
+                            self.solver
+                                .extract_overload_branch_capture(branch_index, &captured_vars),
+                        );
+                    }
+                    Err(err) => {
+                        if first_error.is_none() {
+                            first_error = Some(err);
+                        }
+                    }
+                }
+                self.solver.restore_vars(probe_snapshot);
+            }
+            if let Some(snapshot) = first_success_snapshot {
+                if successful_branch_captures.is_empty() {
+                    unreachable!("successful overload probe must produce a branch capture");
+                }
+                self.solver.restore_vars(snapshot);
+                self.solver
+                    .record_overload_residuals_for_witness(&witness, successful_branch_captures);
+                true
+            } else {
+                false
+            }
+        } else {
+            any(overload.signatures.iter(), |l| {
+                self.is_subset_eq(&l.as_type(), want)
+            })
+            .is_ok()
+        };
+        if initial_is_subset {
             return Ok(());
         }
         if let Type::Callable(box Callable {
