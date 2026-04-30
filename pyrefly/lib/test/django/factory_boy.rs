@@ -5,23 +5,22 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-// TODO: Create a dedicated factory_boy_testcase! macro with factory-boy stubs.
-use crate::django_testcase;
+use crate::factory_boy_testcase;
 
-django_testcase!(
+factory_boy_testcase!(
     bug = "https://github.com/facebook/pyrefly/issues/3214",
     test_create_returns_model,
     r#"
 from typing import assert_type
 
 from django.db import models
-from factory.django import DjangoModelFactory  # E: Cannot find module `factory.django`
+from factory.django import DjangoModelFactory
 
 class User(models.Model):
     username = models.CharField(max_length=150)
 
 class UserFactory(DjangoModelFactory):
-    class Meta:
+    class Meta:  # E: Class member `UserFactory.Meta` overrides parent class `DjangoModelFactory` in an inconsistent manner
         model = User
 
     username = "testuser"
