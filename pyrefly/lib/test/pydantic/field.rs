@@ -328,3 +328,22 @@ a = A(MyModel)
 a.print_model_fields()
     "#,
 );
+
+pydantic_testcase!(
+    test_field_validator,
+    r#"
+from pydantic import BaseModel
+from pydantic import field_validator
+
+
+class MyBaseModel(BaseModel):
+    name: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Name cannot be empty")
+        return v
+    "#,
+);
