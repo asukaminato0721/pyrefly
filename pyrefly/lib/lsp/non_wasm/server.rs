@@ -931,7 +931,7 @@ mod tests {
 
     use super::SOURCE_FIX_ALL_PYREFLY;
     use super::format_diagnostic_message_for_markdown;
-    use super::is_fix_all_code_action_kind_requested;
+    use super::matches_fix_all_kind;
 
     #[test]
     fn test_format_diagnostic_message_for_markdown() {
@@ -975,22 +975,22 @@ mod tests {
 
     #[test]
     fn test_fix_all_kind_filter_matches_supported_kinds() {
-        assert!(is_fix_all_code_action_kind_requested(
-            &CodeActionKind::SOURCE_FIX_ALL
-        ));
-        assert!(is_fix_all_code_action_kind_requested(&CodeActionKind::new(
+        assert!(matches_fix_all_kind(&CodeActionKind::SOURCE_FIX_ALL));
+        assert!(matches_fix_all_kind(&CodeActionKind::new(
             SOURCE_FIX_ALL_PYREFLY,
         )));
     }
 
     #[test]
-    fn test_fix_all_kind_filter_rejects_pyrefly_suffix_kinds() {
-        assert!(!is_fix_all_code_action_kind_requested(
-            &CodeActionKind::new("source.fixAll.pyrefly.foo",)
-        ));
-        assert!(!is_fix_all_code_action_kind_requested(
-            &CodeActionKind::new("source.fixAll.pyreflyyyyyy",)
-        ));
+    fn test_fix_all_kind_filter_rejects_unsupported_kinds() {
+        assert!(!matches_fix_all_kind(&CodeActionKind::new(
+            "source.fixAll.pyrefly.foo",
+        )));
+        assert!(!matches_fix_all_kind(&CodeActionKind::new(
+            "source.fixAll.pyreflyyyyyy",
+        )));
+        assert!(!matches_fix_all_kind(&CodeActionKind::QUICKFIX));
+        assert!(!matches_fix_all_kind(&CodeActionKind::REFACTOR_EXTRACT));
     }
 }
 
@@ -1532,7 +1532,7 @@ pub enum ProcessEvent {
 const PYTHON_SECTION: &str = "python";
 const SOURCE_FIX_ALL_PYREFLY: &str = "source.fixAll.pyrefly";
 
-fn is_fix_all_code_action_kind_requested(kind: &CodeActionKind) -> bool {
+fn matches_fix_all_kind(kind: &CodeActionKind) -> bool {
     kind == &CodeActionKind::SOURCE_FIX_ALL || kind.as_str() == SOURCE_FIX_ALL_PYREFLY
 }
 
@@ -4494,8 +4494,7 @@ impl Server {
         let only_kinds = params.context.only.as_ref();
         let allow_quickfix = only_kinds
             .is_none_or(|kinds| kinds.iter().any(|kind| kind == &CodeActionKind::QUICKFIX));
-        let allow_fix_all =
-            only_kinds.is_none_or(|kinds| kinds.iter().any(is_fix_all_code_action_kind_requested));
+        let allow_fix_all = only_kinds.is_none_or(|kinds| kinds.iter().any(matches_fix_all_kind));
         let allow_refactor = only_kinds.is_none_or(|kinds| {
             kinds
                 .iter()
