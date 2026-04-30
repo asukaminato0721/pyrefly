@@ -2129,6 +2129,14 @@ impl Solver {
         let identity = OverloadResidualIdentity {
             witness_hash: residual.witness.identity.witness_hash,
         };
+        if overload_pruning_by_witness
+            .get(&identity)
+            .is_some_and(|decision| decision.all_pruned)
+        {
+            // All candidate branches were pruned for this witness.
+            // Return Never immediately and avoid any branch materialization work.
+            return Type::never();
+        }
         let surviving_branch_indices = overload_pruning_by_witness
             .get(&identity)
             .map(|decision| decision.surviving_branch_indices.clone())
@@ -2153,18 +2161,9 @@ impl Solver {
             .collect::<Vec<_>>();
         match surviving_branches.len() {
             0 => {
-                if overload_pruning_by_witness
-                    .get(&identity)
-                    .is_some_and(|decision| decision.all_pruned)
-                {
-                    // All candidate branches were pruned for this witness.
-                    // Use Never as a safe sentinel instead of silently widening.
-                    Type::never()
-                } else {
-                    unreachable!(
-                        "overload residual pruning produced no surviving branches without all_pruned"
-                    )
-                }
+                unreachable!(
+                    "overload residual pruning produced no surviving branches without all_pruned"
+                )
             }
             1 => {
                 surviving_branches
