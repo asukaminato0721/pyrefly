@@ -22,7 +22,6 @@ use pyrefly_types::types::TParams;
 use pyrefly_types::types::Union;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::prelude::VecExt;
-use pyrefly_util::visit::Visit;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
