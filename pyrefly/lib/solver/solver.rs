@@ -321,7 +321,7 @@ struct Variables(SmallMap<Var, RefCell<VariableNode>>);
 #[derive(Clone, Debug)]
 enum VariableNode {
     Goto(Cell<Var>),
-    Root(Variable, usize),
+    Root(Box<Variable>, usize),
 }
 
 impl Display for VariableNode {
@@ -338,7 +338,7 @@ impl Variables {
         let root = self.get_root(x);
         let variable = self.get_node(root).borrow();
         Ref::map(variable, |v| match v {
-            VariableNode::Root(v, _) => v,
+            VariableNode::Root(v, _) => v.as_ref(),
             _ => unreachable!(),
         })
     }
@@ -347,7 +347,7 @@ impl Variables {
         let root = self.get_root(x);
         let variable = self.get_node(root).borrow_mut();
         RefMut::map(variable, |v| match v {
-            VariableNode::Root(v, _) => v,
+            VariableNode::Root(v, _) => v.as_mut(),
             _ => unreachable!(),
         })
     }
@@ -388,7 +388,7 @@ impl Variables {
     fn insert_fresh(&mut self, x: Var, v: Variable) {
         assert!(
             self.0
-                .insert(x, RefCell::new(VariableNode::Root(v, 0)))
+                .insert(x, RefCell::new(VariableNode::Root(Box::new(v), 0)))
                 .is_none()
         );
     }
