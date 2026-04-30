@@ -2431,6 +2431,22 @@ def f(c: C):
 );
 
 testcase!(
+    test_do_not_promote_augmented_addition_of_explicit_literal_strings,
+    r#"
+from typing import LiteralString, assert_type
+
+class C:
+    def __init__(self, x: LiteralString, y: LiteralString) -> None:
+        z = x
+        z += y
+        self.attr = z
+
+def f(c: C):
+    assert_type(c.attr, LiteralString)
+    "#,
+);
+
+testcase!(
     test_top_level_anonymous_typeddict,
     r#"
 from typing import NotRequired, TypedDict

@@ -616,10 +616,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 } else if let Type::Any(style) = &rhs {
                     style.propagate()
                 } else if x.op == Operator::Add
-                    && base.is_literal_string()
-                    && rhs.is_literal_string()
+                    && let Some(lhs_style) = lhs.lit_string_style()
+                    && let Some(rhs_style) = rhs.lit_string_style()
                 {
-                    self.heap.mk_literal_string(LitStyle::Implicit)
+                    self.heap.mk_literal_string(match (lhs_style, rhs_style) {
+                        (LitStyle::Explicit, LitStyle::Explicit) => LitStyle::Explicit,
+                        _ => LitStyle::Implicit,
+                    })
                 } else if x.op == Operator::Add
                     && let Type::Tuple(ref l) = base
                     && let Type::Tuple(r) = rhs
