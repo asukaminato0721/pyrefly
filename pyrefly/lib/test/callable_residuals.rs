@@ -539,6 +539,93 @@ reveal_type(out_b)  # E: revealed type: list[int]
 "#,
 );
 
+testcase!(
+    test_overload_pruning_bool_projection_baseline,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
+
+@overload
+def f(x: int) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
+@overload
+def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to implementation return type `None`
+@overload
+def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, True)
+reveal_type(result)  # E: revealed type: Overload[
+"#,
+);
+
+testcase!(
+    bug = "Pruning missing: no-viable overload branches do not raise an incompatibility",
+    test_overload_pruning_eliminates_all_branches_float_str_vs_int,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
+
+@overload
+def f(x: int) -> float: ...  # E: Overload return type `float` is not assignable to implementation return type `None`
+@overload
+def f(x: str) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, 1)
+reveal_type(result)  # E: revealed type: Overload[
+"#,
+);
+
+testcase!(
+    bug = "Pruning missing: survivor branch is not collapsed to a non-overload callable",
+    test_overload_pruning_collapses_to_single_branch,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
+
+@overload
+def f(x: int) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
+@overload
+def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to implementation return type `None`
+@overload
+def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, "ok")
+reveal_type(result)  # E: revealed type: Overload[
+out = result(1)
+reveal_type(out)  # E: revealed type: str
+"#,
+);
+
+testcase!(
+    bug = "Pruning missing: three-way overload does not collapse to two viable branches",
+    test_overload_pruning_three_way_to_two_way,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
+
+@overload
+def f(x: int) -> int: ...  # E: Overload return type `int` is not assignable to implementation return type `None`
+@overload
+def f(x: str) -> int: ...  # E: Overload return type `int` is not assignable to implementation return type `None`
+@overload
+def f(x: bytes) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, 1)
+reveal_type(result)  # E: revealed type: Overload[
+out_a = result(1)
+reveal_type(out_a)  # E: revealed type: int
+out_b = result("ok")
+reveal_type(out_b)  # E: revealed type: int
+"#,
+);
+
 // Regression tests for https://github.com/facebook/pyrefly/issues/2105
 // Overloaded callable protocol passed to higher-order function with ParamSpec.
 // The solver commits to one overload branch too early and rejects valid calls.
