@@ -22,6 +22,7 @@ use pyrefly_types::types::TParams;
 use pyrefly_types::types::Union;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::prelude::VecExt;
+use pyrefly_util::visit::Visit;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
@@ -63,6 +64,7 @@ use crate::types::type_var::Restriction;
 use crate::types::typed_dict::TypedDict;
 use crate::types::types::AnyStyle;
 use crate::types::types::BoundMethod;
+use crate::types::types::CallableResidualKind;
 use crate::types::types::OverloadType;
 use crate::types::types::Type;
 
@@ -177,6 +179,16 @@ impl ConstructedInstance {
 }
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    fn type_contains_overload_callable_residual(&self, ty: &Type) -> bool {
+        ty.any(|inner| {
+            matches!(
+                inner,
+                Type::CallableResidual(residual)
+                    if matches!(&residual.kind, CallableResidualKind::Overload { .. })
+            )
+        })
+    }
+
     fn error_call_target(
         &self,
         errors: &ErrorCollector,
@@ -243,7 +255,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 )))
             }
             Type::BoundMethod(bm) => {
-                let BoundMethod { obj, func } = *bm;
+                let bound_method = *bm;
+                if self.type_contains_overload_callable_residual(&bound_method.obj) {
+                    let mut is_subset = |got: &Type, want: &Type| self.is_subset_eq(got, want);
+                    if let Some(bound) = self.bind_boundmethod(&bound_method, &mut is_subset) {
+                        return self.as_call_target_impl(bound, quantified);
+                    }
+                }
+                let BoundMethod { obj, func } = bound_method;
                 match self.as_call_target_impl(func.as_type(), quantified) {
                     CallTargetLookup::Ok(box CallTarget::Function(func)) => {
                         CallTargetLookup::Ok(Box::new(CallTarget::BoundMethod(obj, func)))

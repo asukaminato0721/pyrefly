@@ -671,7 +671,6 @@ reveal_type(out_b)  # E: revealed type: int
 );
 
 testcase!(
-    bug = "Overload residuals degrade to Unknown through class type params",
     test_overload_through_class_tparam,
     r#"
 from typing import Callable, overload, reveal_type
@@ -691,10 +690,10 @@ def f(x) -> str | int: ...
 
 wrapper = Wrapper(f)
 reveal_type(wrapper.fn)  # E: revealed type: Overload[
-out_a = wrapper(1)  # E: No matching overload found
-reveal_type(out_a)  # E: revealed type: Unknown
-out_b = wrapper("ok")  # E: No matching overload found
-reveal_type(out_b)  # E: revealed type: Unknown
+out_a = wrapper(1)
+reveal_type(out_a)  # E: revealed type: str
+out_b = wrapper("ok")
+reveal_type(out_b)  # E: revealed type: int
 "#,
 );
 
