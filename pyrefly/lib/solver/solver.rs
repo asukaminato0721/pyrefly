@@ -759,8 +759,15 @@ impl Solver {
                     CallableResidualKind::Generic { quantified } => {
                         *inner = quantified.as_gradual_type();
                     }
-                    CallableResidualKind::Overload { .. } => {
-                        *inner = Type::any_implicit();
+                    CallableResidualKind::Overload { branches, .. } => {
+                        // Compatibility path for non-target reads: pick one deterministic
+                        // branch rather than degrading to Any. This preserves existing fallback
+                        // behavior until overload residual reconstruction is wired.
+                        let first_branch = branches
+                            .iter()
+                            .min_by_key(|branch| branch.branch_index)
+                            .expect("overload residual should include at least one branch");
+                        *inner = first_branch.ty.clone();
                     }
                 }
             }
