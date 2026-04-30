@@ -782,25 +782,24 @@ impl Solver {
         self.simplify_mut(t);
     }
 
+    // Canonical fallback policy for residual elimination outside callable-preserving paths.
+    fn residual_fallback_type(&self, residual: &CallableResidual) -> Type {
+        match &residual.kind {
+            CallableResidualKind::Generic { quantified } => quantified.as_gradual_type(),
+            CallableResidualKind::Overload { branches, .. } => branches
+                .iter()
+                .min_by_key(|branch| branch.branch_index)
+                .expect("overload residual should include at least one branch")
+                .ty
+                .clone(),
+        }
+    }
+
     fn flatten_residual_for_non_target_read(&self, ty: &Type) -> Type {
         let mut flattened = ty.clone();
         flattened.transform_mut(&mut |inner| {
             if let Type::CallableResidual(residual) = inner {
-                match &residual.kind {
-                    CallableResidualKind::Generic { quantified } => {
-                        *inner = quantified.as_gradual_type();
-                    }
-                    CallableResidualKind::Overload { branches, .. } => {
-                        // Compatibility path for non-target reads: pick one deterministic
-                        // branch rather than degrading to Any. This preserves existing fallback
-                        // behavior until overload residual reconstruction is wired.
-                        let first_branch = branches
-                            .iter()
-                            .min_by_key(|branch| branch.branch_index)
-                            .expect("overload residual should include at least one branch");
-                        *inner = first_branch.ty.clone();
-                    }
-                }
+                *inner = self.residual_fallback_type(residual);
             }
         });
         flattened
@@ -930,15 +929,11 @@ impl Solver {
             if let Type::CallableResidual(residual) = inner
                 && let CallableResidualKind::Overload {
                     identity: marker_identity,
-                    branches,
+                    ..
                 } = &residual.kind
                 && marker_identity == identity
             {
-                let first_branch = branches
-                    .iter()
-                    .min_by_key(|branch| branch.branch_index)
-                    .expect("overload residual should include at least one branch");
-                *inner = first_branch.ty.clone();
+                *inner = self.residual_fallback_type(residual);
             }
         });
     }
@@ -1050,30 +1045,22 @@ impl Solver {
         preserve_class_targs: bool,
     ) -> (bool, bool) {
         match ty {
-            Type::CallableResidual(residual) => {
-                match &residual.kind {
-                    CallableResidualKind::Generic { .. } => {
-                        if !callable_slot {
-                            *ty = self.generic_residual_quantified(residual).as_gradual_type();
-                            return (true, false);
-                        }
-                        *ty = self
-                            .heap
-                            .mk_quantified(self.generic_residual_quantified(residual));
-                        (true, true)
+            Type::CallableResidual(residual) => match &residual.kind {
+                CallableResidualKind::Generic { .. } => {
+                    if !callable_slot {
+                        *ty = self.residual_fallback_type(residual);
+                        return (true, false);
                     }
-                    CallableResidualKind::Overload { branches, .. } => {
-                        // Compatibility path until overload reconstruction is implemented:
-                        // flatten to one deterministic branch.
-                        let first_branch = branches
-                            .iter()
-                            .min_by_key(|branch| branch.branch_index)
-                            .expect("overload residual should include at least one branch");
-                        *ty = first_branch.ty.clone();
-                        (true, false)
-                    }
+                    *ty = self
+                        .heap
+                        .mk_quantified(self.generic_residual_quantified(residual));
+                    (true, true)
                 }
-            }
+                CallableResidualKind::Overload { .. } => {
+                    *ty = self.residual_fallback_type(residual);
+                    (true, false)
+                }
+            },
             Type::Callable(callable) => {
                 let mut changed = false;
                 let mut consumed_residual = false;
