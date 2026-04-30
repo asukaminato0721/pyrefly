@@ -347,3 +347,21 @@ class MyBaseModel(BaseModel):
         return v
     "#,
 );
+
+pydantic_testcase!(
+    bug = "mode='before' validators can transform input types, so C(x=0) should be accepted",
+    test_field_validator_mode_before,
+    r#"
+from pydantic import BaseModel, field_validator
+
+class C(BaseModel):
+    x: str
+    @field_validator('x', mode='before')
+    @classmethod
+    def validate_x(cls, x):
+        return str(x)
+
+C(x=0) # E: Argument `Literal[0]` is not assignable to parameter `x` with type `bytearray | bytes | str` in function `C.__init__`
+C(x="hello")
+    "#,
+);
