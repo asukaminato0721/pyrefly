@@ -408,11 +408,12 @@ pub enum CallableResidualKind {
 }
 
 /// Correlation key for matching overload residuals across vars during finalization.
+/// The hash is derived from the got-side type at the comparison that produced the
+/// residual, making it a stable function of the value rather than of solve order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq)]
 pub struct OverloadResidualIdentity {
-    pub call_site_id: usize,
-    pub witness_id: usize,
+    pub witness_hash: u64,
 }
 
 /// Per-branch result for a single var in an overload residual.

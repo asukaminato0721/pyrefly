@@ -40,6 +40,7 @@ use starlark_map::small_map::SmallMap;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::callable::CallArg;
 use crate::alt::expr::TypeOrExpr;
+use crate::solver::solver::ArgumentSide;
 use crate::solver::solver::CallContext;
 use crate::solver::solver::OpenTypedDictSubsetError;
 use crate::solver::solver::ResidualWitnessContext;
@@ -1172,50 +1173,86 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         None
     }
 
+    fn is_subset_overload_with_active_witness(
+        &mut self,
+        witness: &ResidualWitnessContext,
+        captured_vars: &[Var],
+        overload: &Overload,
+        want: &Type,
+    ) -> bool {
+        let mut first_success_snapshot = None;
+        let mut successful_branch_captures = Vec::new();
+        for (branch_index, l) in overload.signatures.iter().enumerate() {
+            let probe_snapshot = self.solver.snapshot_vars(captured_vars);
+            if self.is_subset_eq(&l.as_type(), want).is_ok() {
+                if first_success_snapshot.is_none() {
+                    first_success_snapshot = Some(self.solver.snapshot_vars(captured_vars));
+                }
+                successful_branch_captures.push(
+                    self.solver
+                        .extract_overload_branch_capture(branch_index, captured_vars),
+                );
+            }
+            self.solver.restore_vars(probe_snapshot);
+        }
+        if let Some(snapshot) = first_success_snapshot {
+            if successful_branch_captures.is_empty() {
+                unreachable!("successful overload probe must produce a branch capture");
+            }
+            self.solver.restore_vars(snapshot);
+            self.solver
+                .record_overload_residuals_for_witness(witness, successful_branch_captures);
+            true
+        } else {
+            false
+        }
+    }
+
     fn is_subset_overload(&mut self, overload: &Overload, want: &Type) -> Result<(), SubsetError> {
         let initial_is_subset = if let Some((witness, captured_vars)) =
             self.witness_and_captured_vars_for_overload()
         {
-            let mut first_success_snapshot = None;
-            let mut successful_branch_captures = Vec::new();
-            let mut first_error = None;
-            for (branch_index, l) in overload.signatures.iter().enumerate() {
-                let probe_snapshot = self.solver.snapshot_vars(&captured_vars);
-                match self.is_subset_eq(&l.as_type(), want) {
-                    Ok(()) => {
-                        if first_success_snapshot.is_none() {
-                            first_success_snapshot =
-                                Some(self.solver.snapshot_vars(&captured_vars));
-                        }
-                        successful_branch_captures.push(
-                            self.solver
-                                .extract_overload_branch_capture(branch_index, &captured_vars),
-                        );
-                    }
-                    Err(err) => {
-                        if first_error.is_none() {
-                            first_error = Some(err);
-                        }
-                    }
-                }
-                self.solver.restore_vars(probe_snapshot);
-            }
-            if let Some(snapshot) = first_success_snapshot {
-                if successful_branch_captures.is_empty() {
-                    unreachable!("successful overload probe must produce a branch capture");
-                }
-                self.solver.restore_vars(snapshot);
-                self.solver
-                    .record_overload_residuals_for_witness(&witness, successful_branch_captures);
-                true
-            } else {
-                false
-            }
+            self.is_subset_overload_with_active_witness(&witness, &captured_vars, overload, want)
         } else {
-            any(overload.signatures.iter(), |l| {
-                self.is_subset_eq(&l.as_type(), want)
-            })
-            .is_ok()
+            let argument_side = self.active_argument_side();
+            let can_synthesize_witness = !matches!(argument_side, ArgumentSide::NotAnalyzingACall);
+            if can_synthesize_witness {
+                let eligible_vars: Vec<Var> = want
+                    .collect_maybe_placeholder_vars()
+                    .into_iter()
+                    .filter(|v| self.solver.var_is_quantified(*v))
+                    .collect();
+                if eligible_vars.is_empty() {
+                    any(overload.signatures.iter(), |l| {
+                        self.is_subset_eq(&l.as_type(), want)
+                    })
+                    .is_ok()
+                } else {
+                    let overload_type = Type::Overload(overload.clone());
+                    let synthesized = self.make_overload_witness_context(
+                        &overload_type,
+                        &eligible_vars,
+                        argument_side,
+                    );
+                    self.with_active_call_context(&synthesized, |me| {
+                        let (witness, captured_vars) =
+                            me.witness_and_captured_vars_for_overload().expect(
+                                "synthesized overload witness must be active for capture probing",
+                            );
+                        me.is_subset_overload_with_active_witness(
+                            &witness,
+                            &captured_vars,
+                            overload,
+                            want,
+                        )
+                    })
+                }
+            } else {
+                any(overload.signatures.iter(), |l| {
+                    self.is_subset_eq(&l.as_type(), want)
+                })
+                .is_ok()
+            }
         };
         if initial_is_subset {
             return Ok(());
@@ -2166,16 +2203,18 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     .mk_class_type(self.type_order.stdlib().none_type().clone()),
             ),
             (Type::Forall(forall), _) => {
+                let forall_type = Type::Forall(forall.clone());
                 // Finalizing the quantified vars returns instantiation errors
                 let (vs, got) = self.type_order.instantiate_fresh_forall((**forall).clone());
-                let mut witness_context = self.make_forall_witness_context(&vs, want, call_context);
+                let mut witness_context =
+                    self.make_forall_witness_context(&forall_type, &vs, want, call_context);
                 let result = self.is_subset_eq_with_context(&got, want, &witness_context);
                 if result.is_ok()
                     && witness_context.residual_hooks_enabled()
                     && let Some(witness) = witness_context.residual_witness_mut()
                 {
                     if let Some(deferred_vars) =
-                        self.take_witness_deferred_vars(witness.witness_id())
+                        self.take_witness_deferred_vars(witness.witness_hash())
                     {
                         witness.extend_deferred_vars(deferred_vars);
                     }

@@ -10,8 +10,11 @@ use std::cell::Ref;
 use std::cell::RefCell;
 use std::cell::RefMut;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fmt::Display;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::mem;
 use std::sync::Arc;
 
@@ -114,8 +117,7 @@ impl Bounds {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResidualIdentity {
-    call_site_id: usize,
-    witness_id: usize,
+    witness_hash: u64,
     /// Vars that are allowed to observe the residualized answer for this candidate.
     /// This is captured during subset checks and threaded into `Variable::ResidualAnswer`.
     target_vars: SmallSet<Var>,
@@ -577,6 +579,15 @@ impl Solver {
             &*variable,
             Variable::PartialQuantified(_) | Variable::PartialContained(_) | Variable::Unwrap(_)
         )
+    }
+
+    /// Witnesses track both origin and deferred vars for residual plumbing,
+    /// but overload branch capture snapshots only quantified vars. Only
+    /// quantified vars can carry the per-branch residual candidates that we
+    /// later materialize at finishing boundaries.
+    pub(crate) fn var_is_quantified(&self, var: Var) -> bool {
+        let variables = self.variables.lock();
+        matches!(&*variables.get(var), Variable::Quantified { .. })
     }
 
     /// Witnesses track both origin and deferred vars for residual plumbing,
@@ -2248,7 +2259,6 @@ impl Solver {
             class_protocol_assumptions: SmallSet::new(),
             coinductive_assumptions_used: false,
             witness_deferred_vars: SmallMap::new(),
-            next_witness_context_id: 0,
         }
     }
 }
@@ -2493,7 +2503,7 @@ pub(crate) enum SubsetCacheContext {
     #[default]
     Default,
     Witness {
-        witness_id: usize,
+        witness_hash: u64,
         argument_side: ArgumentSide,
     },
 }
@@ -2518,8 +2528,8 @@ pub struct ResidualWitnessContext {
 }
 
 impl ResidualWitnessContext {
-    pub(crate) fn witness_id(&self) -> usize {
-        self.identity.witness_id
+    pub(crate) fn witness_hash(&self) -> u64 {
+        self.identity.witness_hash
     }
 
     pub(crate) fn capture_candidate_vars(&self) -> SmallSet<Var> {
@@ -2602,7 +2612,7 @@ impl CallContext {
             // witness/polarity-sensitive side effects isolated. Most checks run
             // under Default context and keep prior cache behavior.
             SubsetCacheContext::Witness {
-                witness_id: witness.identity.witness_id,
+                witness_hash: witness.identity.witness_hash,
                 argument_side: self.argument_side,
             }
         } else {
@@ -2648,28 +2658,28 @@ pub struct Subset<'a, Ans: LookupAnswer> {
     /// the current computation. Used to avoid caching protocol results in the
     /// persistent cross-call cache when they depend on coinductive assumptions.
     pub coinductive_assumptions_used: bool,
-    witness_deferred_vars: SmallMap<usize, SmallSet<Var>>,
-    next_witness_context_id: usize,
+    witness_deferred_vars: SmallMap<u64, SmallSet<Var>>,
 }
 
 impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
+    fn type_witness_hash(ty: &Type) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        ty.hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub fn make_forall_witness_context(
         &mut self,
+        got: &Type,
         vars: &QuantifiedHandle,
         want: &Type,
         call_context: &CallContext,
     ) -> CallContext {
-        let id = self.next_witness_context_id;
-        self.next_witness_context_id = self
-            .next_witness_context_id
-            .checked_add(1)
-            .expect("witness context id overflow");
         let argument_side = call_context.argument_side();
         CallContext::with_witness_and_side(
             ResidualWitnessContext {
                 identity: ResidualIdentity {
-                    call_site_id: id,
-                    witness_id: id,
+                    witness_hash: Self::type_witness_hash(got),
                     target_vars: want.collect_maybe_placeholder_vars().into_iter().collect(),
                 },
                 argument_side,
@@ -2743,9 +2753,35 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
 
     pub(crate) fn take_witness_deferred_vars(
         &mut self,
-        witness_id: usize,
+        witness_hash: u64,
     ) -> Option<SmallSet<Var>> {
-        self.witness_deferred_vars.shift_remove(&witness_id)
+        self.witness_deferred_vars.shift_remove(&witness_hash)
+    }
+
+    pub(crate) fn active_argument_side(&self) -> ArgumentSide {
+        self.active_call_context.argument_side()
+    }
+
+    pub(crate) fn make_overload_witness_context(
+        &mut self,
+        got: &Type,
+        eligible_vars: &[Var],
+        argument_side: ArgumentSide,
+    ) -> CallContext {
+        let target_vars: SmallSet<Var> = eligible_vars.iter().copied().collect();
+        let origin_vars = target_vars.clone();
+        CallContext::with_witness_and_side(
+            ResidualWitnessContext {
+                identity: ResidualIdentity {
+                    witness_hash: Self::type_witness_hash(got),
+                    target_vars,
+                },
+                argument_side,
+                origin_vars,
+                deferred_vars: SmallSet::new(),
+            },
+            argument_side,
+        )
     }
 
     pub(crate) fn active_overload_residual_witness(&self) -> Option<ResidualWitnessContext> {
@@ -2753,7 +2789,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             return None;
         }
         let mut witness = self.active_call_context.residual_witness()?.clone();
-        if let Some(deferred_vars) = self.witness_deferred_vars.get(&witness.witness_id()) {
+        if let Some(deferred_vars) = self.witness_deferred_vars.get(&witness.witness_hash()) {
             witness.extend_deferred_vars(deferred_vars.clone());
         }
         Some(witness)
@@ -2769,9 +2805,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         if !witness.origin_vars.contains(&origin_var) {
             return;
         }
-        let witness_id = witness.identity.witness_id;
+        let witness_hash = witness.identity.witness_hash;
         let target_vars = witness.identity.target_vars.clone();
-        let deferred_vars = self.witness_deferred_vars.entry(witness_id).or_default();
+        let deferred_vars = self.witness_deferred_vars.entry(witness_hash).or_default();
         for var in other.collect_maybe_placeholder_vars() {
             if target_vars.contains(&var) {
                 deferred_vars.insert(var);
