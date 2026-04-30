@@ -184,13 +184,14 @@ mod tests {
         assert_eq!(pyrefly_cfg.preset, Some(Preset::Legacy));
         assert!(pyrefly_cfg.root.errors.is_none());
 
-        // After configure(), the preset disables mutable-override
+        // After configure(), the preset disables mutable-override and unbound-name
         pyrefly_cfg.configure();
         let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
         assert_eq!(
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Ignore
         );
+        assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Ignore);
     }
 
     #[test]
@@ -216,6 +217,28 @@ mod tests {
             errors.severity(ErrorKind::BadOverrideMutableAttribute),
             Severity::Error
         );
+    }
+
+    #[test]
+    fn test_migrate_from_mypy_possibly_undefined_enabled() {
+        let mut mypy_cfg = Ini::new();
+        mypy_cfg.set(
+            "mypy",
+            "enable_error_code",
+            Some("possibly-undefined".to_owned()),
+        );
+
+        let mut pyrefly_cfg = ConfigFile::default();
+
+        let error_codes = ErrorCodes;
+        error_codes
+            .migrate_from_mypy(&mypy_cfg, &mut pyrefly_cfg)
+            .expect("migration should succeed");
+
+        // Explicit enable overrides the legacy preset's Ignore after configure()
+        pyrefly_cfg.configure();
+        let errors = pyrefly_cfg.root.errors.as_ref().unwrap();
+        assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Error);
     }
 
     #[test]

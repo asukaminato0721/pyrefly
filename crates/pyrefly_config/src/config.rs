@@ -2273,6 +2273,7 @@ output-format = "omit-errors"
             errors.severity(ErrorKind::BadOverrideParamName),
             Severity::Ignore
         );
+        assert_eq!(errors.severity(ErrorKind::UnboundName), Severity::Ignore);
     }
 
     #[test]

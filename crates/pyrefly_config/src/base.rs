@@ -149,6 +149,7 @@ impl Preset {
                 let errors = HashMap::from([
                     (ErrorKind::BadOverrideMutableAttribute, Severity::Ignore),
                     (ErrorKind::BadOverrideParamName, Severity::Ignore),
+                    (ErrorKind::UnboundName, Severity::Ignore),
                 ]);
                 ConfigBase {
                     errors: Some(ErrorDisplayConfig::new(errors)),
