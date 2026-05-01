@@ -185,6 +185,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         tcc,
                         subset_error,
                         None,
+                        Vec::new(),
                     );
                 }
             }

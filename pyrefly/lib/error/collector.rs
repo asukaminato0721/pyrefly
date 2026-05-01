@@ -22,6 +22,7 @@ use crate::config::error::ErrorConfig;
 use crate::config::error_kind::Severity;
 use crate::error::context::ErrorInfo;
 use crate::error::error::Error;
+use crate::error::error::ErrorQuickFix;
 use crate::error::style::ErrorStyle;
 use crate::module::module_info::ModuleInfo;
 use crate::state::errors::find_containing_range;
@@ -131,25 +132,8 @@ impl ErrorCollector {
         }
     }
 
-    pub fn add(&self, range: TextRange, info: ErrorInfo, mut msg: Vec1<String>) {
-        if self.style == ErrorStyle::Never {
-            return;
-        }
-        let (kind, annotations) = match info {
-            ErrorInfo::Context(ctx) => {
-                let ctx = ctx();
-                let kind = ctx.as_error_kind();
-                let annotations = ctx.annotations();
-                msg.insert(0, ctx.format());
-                (kind, annotations)
-            }
-            ErrorInfo::Kind(kind) => (kind, Vec::new()),
-        };
-        let mut err = Error::new(self.module_info.dupe(), range, msg, kind);
-        for (range, label) in annotations {
-            err = err.with_annotation(range, label);
-        }
-        self.errors.lock().push(err);
+    pub fn add(&self, range: TextRange, info: ErrorInfo, msg: Vec1<String>) {
+        self.add_with_annotations_and_quick_fixes(range, info, msg, Vec::new(), Vec::new());
     }
 
     /// Add an error with secondary annotations for richer diagnostics.
@@ -157,8 +141,19 @@ impl ErrorCollector {
         &self,
         range: TextRange,
         info: ErrorInfo,
+        msg: Vec1<String>,
+        annotations: Vec<(TextRange, String)>,
+    ) {
+        self.add_with_annotations_and_quick_fixes(range, info, msg, annotations, Vec::new());
+    }
+
+    pub fn add_with_annotations_and_quick_fixes(
+        &self,
+        range: TextRange,
+        info: ErrorInfo,
         mut msg: Vec1<String>,
         annotations: Vec<(TextRange, String)>,
+        quick_fixes: Vec<ErrorQuickFix>,
     ) {
         if self.style == ErrorStyle::Never {
             return;
@@ -176,6 +171,9 @@ impl ErrorCollector {
         let mut err = Error::new(self.module_info.dupe(), range, msg, kind);
         for (range, label) in ctx_annotations.into_iter().chain(annotations) {
             err = err.with_annotation(range, label);
+        }
+        for quick_fix in quick_fixes {
+            err = err.with_quick_fix(quick_fix);
         }
         self.errors.lock().push(err);
     }

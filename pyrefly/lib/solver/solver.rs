@@ -52,6 +52,7 @@ use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
+use crate::error::error::ErrorQuickFix;
 use crate::solver::type_order::TypeOrder;
 use crate::types::callable::Callable;
 use crate::types::callable::Function;
@@ -1993,6 +1994,7 @@ impl Solver {
         tcc: &dyn Fn() -> TypeCheckContext,
         subset_error: SubsetError,
         note: Option<String>,
+        quick_fixes: Vec<ErrorQuickFix>,
     ) {
         let tcc = tcc();
         let msg = tcc.kind.format_error(
@@ -2010,19 +2012,21 @@ impl Solver {
         let extra_annotations = tcc.annotations;
         match tcc.context {
             Some(ctx) => {
-                errors.add_with_annotations(
+                errors.add_with_annotations_and_quick_fixes(
                     loc,
                     ErrorInfo::Context(&|| ctx.clone()),
                     msg_lines,
                     extra_annotations,
+                    quick_fixes,
                 );
             }
             None => {
-                errors.add_with_annotations(
+                errors.add_with_annotations_and_quick_fixes(
                     loc,
                     ErrorInfo::Kind(tcc.kind.as_error_kind()),
                     msg_lines,
                     extra_annotations,
+                    quick_fixes,
                 );
             }
         }

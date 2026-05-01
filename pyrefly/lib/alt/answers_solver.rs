@@ -76,6 +76,7 @@ use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
+use crate::error::error::ErrorQuickFix;
 use crate::error::style::ErrorStyle;
 use crate::export::exports::LookupExport;
 use crate::module::module_info::ModuleInfo;
@@ -3058,11 +3059,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         match subset_result {
             Ok(()) => true,
             Err(error) => {
-                let note = self
-                    .suggest_enum_member_for_value(got, want)
+                let enum_member_suggestion = self.suggest_enum_member_for_value(got, want);
+                let note = enum_member_suggestion
+                    .as_ref()
                     .map(|s| format!("Did you mean `{s}`?"));
+                let quick_fixes = enum_member_suggestion
+                    .map(|replacement| ErrorQuickFix::ReplaceWithEnumMember { replacement })
+                    .into_iter()
+                    .collect();
                 self.solver()
-                    .error(got, want, errors, loc, tcc, error, note);
+                    .error(got, want, errors, loc, tcc, error, note, quick_fixes);
                 false
             }
         }

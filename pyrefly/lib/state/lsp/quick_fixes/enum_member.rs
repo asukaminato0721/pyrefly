@@ -15,13 +15,14 @@ use ruff_text_size::TextRange;
 
 use crate::ModuleInfo;
 use crate::error::error::Error;
+use crate::error::error::ErrorQuickFix;
 
 pub(crate) fn replace_with_enum_member_code_action(
     module_info: &ModuleInfo,
     ast: &ModModule,
     error: &Error,
 ) -> Option<(String, Module, TextRange, String)> {
-    let replacement = enum_member_suggestion(error)?;
+    let replacement = enum_member_replacement(error)?;
     let literal_range = enclosing_string_literal_range(ast, error.range())?;
     Some((
         format!("Replace with `{replacement}`"),
@@ -31,31 +32,9 @@ pub(crate) fn replace_with_enum_member_code_action(
     ))
 }
 
-fn enum_member_suggestion(error: &Error) -> Option<&str> {
-    let details = error.msg_details()?;
-    for line in details.lines() {
-        let Some(suggestion) = line.trim().strip_prefix("Did you mean `") else {
-            continue;
-        };
-        let Some(suggestion) = suggestion.strip_suffix("`?") else {
-            continue;
-        };
-        if is_qualified_identifier(suggestion) {
-            return Some(suggestion);
-        }
-    }
-    None
-}
-
-fn is_qualified_identifier(s: &str) -> bool {
-    s.split('.').count() >= 2
-        && s.split('.').all(|part| {
-            let mut chars = part.chars();
-            chars
-                .next()
-                .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
-                && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-        })
+fn enum_member_replacement(error: &Error) -> Option<&str> {
+    let ErrorQuickFix::ReplaceWithEnumMember { replacement } = error.quick_fixes().first()?;
+    Some(replacement.as_str())
 }
 
 fn enclosing_string_literal_range(ast: &ModModule, error_range: TextRange) -> Option<TextRange> {
