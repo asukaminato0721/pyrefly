@@ -1208,12 +1208,7 @@ impl Solver {
 
     /// Finalize callable residuals at a substitution boundary (a return type or class field).
     ///
-    /// Because residuals can resolve to residuals, we do this until all residuals are removed.
-    ///
-    /// TODO(stroxler): We might be able to simplify this if we can guarantee that residuals
-    /// nest at most one deep; I *think* we only really need to handle generic residuals inside
-    /// an overload residual, which means two passes should suffice, but it is not trivial
-    /// to be certain about this.
+    /// We run overload handling first and generic handling second.
     fn finalize_callable_residuals_at_boundary_impl(
         &self,
         ty: Type,
@@ -1303,20 +1298,29 @@ impl Solver {
             }
         }
 
-        for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
-            if !self
-                .finalize_callable_residuals_mut(
-                    &mut ty,
-                    false,
-                    preserve_class_targs,
-                    CallableResidualFinalizePhase::Both,
-                )
-                .0
-            {
-                return ty;
+        for phase in [
+            CallableResidualFinalizePhase::Overload,
+            CallableResidualFinalizePhase::Generic,
+        ] {
+            let mut converged = false;
+            // TODO(stroxler): do we still need this? We should audit the logic - I'm not
+            // confident residuals can nest except for generic residuals inside of overloads.
+            //
+            // This means we might be able to tighten the logic and make it both simpler and cheaper.
+            for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
+                if !self
+                    .finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs, phase)
+                    .0
+                {
+                    converged = true;
+                    break;
+                }
+            }
+            if !converged {
+                return self.flatten_residual_for_non_target_read(&ty);
             }
         }
-        self.flatten_residual_for_non_target_read(&ty)
+        ty
     }
 
     pub(crate) fn finalize_callable_residuals_at_boundary(&self, ty: Type) -> Type {
