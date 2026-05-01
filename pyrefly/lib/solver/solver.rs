@@ -869,15 +869,6 @@ impl Solver {
         consumed_residual && !callable_slot
     }
 
-    fn generic_residual_quantified(&self, residual: &CallableResidual) -> Quantified {
-        match &residual.kind {
-            CallableResidualKind::Generic { quantified } => quantified.clone(),
-            CallableResidualKind::Overload { .. } => {
-                unreachable!("generic_residual_quantified called on overload residual")
-            }
-        }
-    }
-
     /// Analyze overload residual markers in one pass.
     /// Returns:
     /// - `None`: no overload residual markers in this type
@@ -1058,14 +1049,12 @@ impl Solver {
     ) -> (bool, bool) {
         match ty {
             Type::CallableResidual(residual) => match &residual.kind {
-                CallableResidualKind::Generic { .. } => {
+                CallableResidualKind::Generic { quantified } => {
                     if !callable_slot {
                         *ty = self.residual_fallback_type(residual);
                         return (true, false);
                     }
-                    *ty = self
-                        .heap
-                        .mk_quantified(self.generic_residual_quantified(residual));
+                    *ty = self.heap.mk_quantified(quantified.clone());
                     (true, true)
                 }
                 CallableResidualKind::Overload { .. } => {
@@ -1132,7 +1121,7 @@ impl Solver {
     ) -> (bool, bool) {
         match ty {
             Type::CallableResidual(residual) => match &residual.kind {
-                CallableResidualKind::Generic { .. } => {
+                CallableResidualKind::Generic { quantified } => {
                     if phase != CallableResidualFinalizePhase::Generic {
                         return (false, false);
                     }
@@ -1140,9 +1129,7 @@ impl Solver {
                         *ty = self.residual_fallback_type(residual);
                         return (true, false);
                     }
-                    *ty = self
-                        .heap
-                        .mk_quantified(self.generic_residual_quantified(residual));
+                    *ty = self.heap.mk_quantified(quantified.clone());
                     (true, true)
                 }
                 CallableResidualKind::Overload { .. } => {
