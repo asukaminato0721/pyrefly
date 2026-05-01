@@ -96,7 +96,6 @@ const VAR_LEAK: &str = "Internal error: a variable has leaked from one module to
 /// and each recursive call to is_subset_eq can use several KB of stack space
 /// due to large enums (Type) and lock guards.
 const INITIAL_GAS: Gas = Gas::new(200);
-const MAX_RESIDUAL_FINALIZE_ITERS: usize = 8;
 /// Accumulated bounds for a solver variable.
 #[derive(Clone, Debug, Default)]
 struct Bounds {
@@ -1306,14 +1305,7 @@ impl Solver {
             CallableResidualFinalizePhase::Overload,
             CallableResidualFinalizePhase::Generic,
         ] {
-            for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
-                if !self
-                    .finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs, phase)
-                    .0
-                {
-                    break;
-                }
-            }
+            self.finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs, phase);
         }
         ty
     }
