@@ -801,12 +801,13 @@ impl Solver {
     fn residual_fallback_type(&self, residual: &CallableResidual) -> Type {
         match &residual.kind {
             CallableResidualKind::Generic { quantified } => quantified.as_gradual_type(),
-            CallableResidualKind::Overload { branches, .. } => branches
-                .iter()
-                .min_by_key(|branch| branch.branch_index)
-                .expect("overload residual should include at least one branch")
-                .ty
-                .clone(),
+            CallableResidualKind::Overload { branches, .. } => unions(
+                branches
+                    .iter()
+                    .map(|branch| branch.ty.clone())
+                    .collect::<Vec<_>>(),
+                &self.heap,
+            ),
         }
     }
 

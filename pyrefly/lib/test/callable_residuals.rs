@@ -787,9 +787,9 @@ def fmt(x) -> str | bytes: ...
 
 # Two independent overloaded callables produce distinct overload residual
 # witnesses - in this case we flatten the types (which currently means
-# we produce the first-branch match, for backward compatibility).
+# we produce the branch union fallback).
 result = compose(parse, fmt)
-reveal_type(result)  # E: revealed type: (str) -> str
+reveal_type(result)  # E: revealed type: (bytes | str) -> bytes | str
 "#,
 );
 
