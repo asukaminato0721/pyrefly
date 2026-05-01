@@ -861,14 +861,6 @@ impl Solver {
         Forallable::Function(func).forall(self.quantified_tparams_for_forall(&callable_ty))
     }
 
-    fn should_promote_after_callable_finalization(
-        &self,
-        consumed_residual: bool,
-        callable_slot: bool,
-    ) -> bool {
-        consumed_residual && !callable_slot
-    }
-
     /// Analyze overload residual markers in one pass.
     /// Returns:
     /// - `None`: no overload residual markers in this type
@@ -1068,10 +1060,22 @@ impl Solver {
                 }
             },
             Type::Callable(callable) => {
-                let (changed, consumed_residual) =
-                    self.finalize_callable_type_two_phase_mut(callable, preserve_class_targs);
-                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
-                {
+                // NOTE: This loop is intentionally duplicated in the Type::Function
+                // arm below. The phase ordering and accumulation logic are identical,
+                // but extracting a shared higher-order helper adds closure/generic
+                // indirection without a clear zero-cost win here.
+                let mut changed = false;
+                let mut consumed_residual = false;
+                for phase in [
+                    CallableResidualFinalizePhase::Overload,
+                    CallableResidualFinalizePhase::Generic,
+                ] {
+                    let (phase_changed, phase_consumed) =
+                        self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
+                    changed |= phase_changed;
+                    consumed_residual |= phase_consumed;
+                }
+                if consumed_residual && !callable_slot {
                     let promoted = self.promote_callable_to_forall((**callable).clone());
                     *ty = promoted;
                     (true, true)
@@ -1080,13 +1084,22 @@ impl Solver {
                 }
             }
             Type::Function(function) => {
-                let (changed, consumed_residual) =
-                    self.finalize_function_type_two_phase_mut(function, preserve_class_targs);
+                // Intentionally kept in lockstep with the Type::Callable arm above.
+                let mut changed = false;
+                let mut consumed_residual = false;
+                for phase in [
+                    CallableResidualFinalizePhase::Overload,
+                    CallableResidualFinalizePhase::Generic,
+                ] {
+                    let (phase_changed, phase_consumed) =
+                        self.finalize_function_type_mut(function, preserve_class_targs, phase);
+                    changed |= phase_changed;
+                    consumed_residual |= phase_consumed;
+                }
                 if !changed {
                     return (false, false);
                 }
-                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
-                {
+                if consumed_residual && !callable_slot {
                     let promoted = self.promote_function_to_forall((**function).clone());
                     *ty = promoted;
                     (true, true)
@@ -1238,44 +1251,6 @@ impl Solver {
         }
         function.signature = signature;
         (true, consumed_residual)
-    }
-
-    fn finalize_callable_type_two_phase_mut(
-        &self,
-        callable: &mut Callable,
-        preserve_class_targs: bool,
-    ) -> (bool, bool) {
-        let mut changed = false;
-        let mut consumed_residual = false;
-        for phase in [
-            CallableResidualFinalizePhase::Overload,
-            CallableResidualFinalizePhase::Generic,
-        ] {
-            let (phase_changed, phase_consumed) =
-                self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
-            changed |= phase_changed;
-            consumed_residual |= phase_consumed;
-        }
-        (changed, consumed_residual)
-    }
-
-    fn finalize_function_type_two_phase_mut(
-        &self,
-        function: &mut Function,
-        preserve_class_targs: bool,
-    ) -> (bool, bool) {
-        let mut changed = false;
-        let mut consumed_residual = false;
-        for phase in [
-            CallableResidualFinalizePhase::Overload,
-            CallableResidualFinalizePhase::Generic,
-        ] {
-            let (phase_changed, phase_consumed) =
-                self.finalize_function_type_mut(function, preserve_class_targs, phase);
-            changed |= phase_changed;
-            consumed_residual |= phase_consumed;
-        }
-        (changed, consumed_residual)
     }
 
     /// Finalize callable residuals at a substitution boundary (a return type or class field).
