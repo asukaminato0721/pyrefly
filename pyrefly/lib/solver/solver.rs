@@ -191,12 +191,10 @@ struct OverloadBranchSubstitutionResult {
     marker_remaining: bool,
 }
 
-#[expect(dead_code, reason = "Just wiring up plumbing for now")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum CallableResidualFinalizePhase {
     Overload,
     Generic,
-    Both,
 }
 
 /// Snapshot of a solved quantified var after the bounds-first pass in
@@ -1058,11 +1056,7 @@ impl Solver {
         match ty {
             Type::CallableResidual(residual) => match &residual.kind {
                 CallableResidualKind::Generic { .. } => {
-                    if !matches!(
-                        phase,
-                        CallableResidualFinalizePhase::Generic
-                            | CallableResidualFinalizePhase::Both
-                    ) {
+                    if phase != CallableResidualFinalizePhase::Generic {
                         return (false, false);
                     }
                     if !callable_slot {
@@ -1075,11 +1069,7 @@ impl Solver {
                     (true, true)
                 }
                 CallableResidualKind::Overload { .. } => {
-                    if !matches!(
-                        phase,
-                        CallableResidualFinalizePhase::Overload
-                            | CallableResidualFinalizePhase::Both
-                    ) {
+                    if phase != CallableResidualFinalizePhase::Overload {
                         return (false, false);
                     }
                     *ty = self.residual_fallback_type(residual);
@@ -1302,6 +1292,8 @@ impl Solver {
             CallableResidualFinalizePhase::Overload,
             CallableResidualFinalizePhase::Generic,
         ] {
+            // Phase-specific traversal reports "no change" for residual kinds owned by
+            // the other phase, so both phases must run unconditionally in this order.
             let mut converged = false;
             // TODO(stroxler): do we still need this? We should audit the logic - I'm not
             // confident residuals can nest except for generic residuals inside of overloads.
