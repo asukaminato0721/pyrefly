@@ -768,6 +768,23 @@ impl ConfigFile {
             })
     }
 
+    /// Explicit search paths from CLI args and config file, excluding the
+    /// heuristic import_root.
+    pub fn explicit_search_path(&self) -> impl Iterator<Item = &PathBuf> + Clone {
+        self.search_path_from_args
+            .iter()
+            .chain(self.search_path_from_file.iter())
+    }
+
+    /// The heuristic import_root, if search path heuristics are enabled.
+    pub fn heuristic_search_path(&self) -> impl Iterator<Item = &PathBuf> + Clone {
+        if self.disable_search_path_heuristics {
+            None.iter()
+        } else {
+            self.import_root.iter()
+        }
+    }
+
     pub fn site_package_path(&self) -> impl Iterator<Item = &PathBuf> + Clone {
         // we can use unwrap here, because the value in the root config must
         // be set in `ConfigFile::configure()`.
@@ -976,14 +993,21 @@ impl ConfigFile {
         {
             Some(handle) => handle.dupe(),
             None => {
-                // Check site-package paths before search paths so that files
-                // in site-packages (which live under the project root) get their
-                // module name from the more specific site-packages prefix rather
-                // than from the project root.
+                // Order: explicit search paths (user intent) > site-package
+                // paths (known third-party roots) > heuristic import_root.
+                // This ensures files in site-packages nested under the project
+                // root resolve from the site-package prefix, not from the
+                // heuristic project root, while still letting explicit search
+                // paths override when the user has configured them.
+                let all_paths: Vec<&PathBuf> = self
+                    .explicit_search_path()
+                    .chain(self.site_package_path())
+                    .chain(self.heuristic_search_path())
+                    .collect();
                 let module_kind = if fallback_search_path.is_empty() {
                     let name = ModuleName::from_path(
                         module_path.as_path(),
-                        self.search_path().chain(self.site_package_path()),
+                        all_paths.iter().copied(),
                         &self.extra_file_extensions,
                     )
                     .unwrap_or_else(ModuleName::unknown);
@@ -993,7 +1017,7 @@ impl ConfigFile {
                         fallback_search_path.for_directory(Some(module_path.as_path()));
                     ModuleName::from_path_with_fallback(
                         module_path.as_path(),
-                        self.search_path().chain(self.site_package_path()),
+                        all_paths.iter().copied(),
                         fallback_paths.iter(),
                         &self.extra_file_extensions,
                     )

@@ -852,15 +852,9 @@ fn definition_relative_import_outside_search_path() {
     interaction.shutdown().unwrap();
 }
 
-/// BUG: Go-to-definition on relative imports in site-packages returns null
-/// when a pyproject.toml exists at the project root. The project root's
-/// import_root is in search_path(), which is checked before site_package_path()
-/// in from_path_impl (first-match). So strip_prefix(import_root) succeeds
-/// first, producing a bogus module name (e.g. `venv.lib.python3_13...`) instead
-/// of the correct one from the site-package root.
-///
-/// When this bug is fixed, update the assertions to expect the correct
-/// definition response instead of null.
+/// Relative imports in site-packages nested under the project root (e.g. in a
+/// venv) should resolve correctly for go-to-definition, even when a
+/// pyproject.toml establishes the project root as import_root.
 #[test]
 fn definition_site_packages_relative_import() {
     let root = get_test_files_root();
@@ -881,26 +875,25 @@ fn definition_site_packages_relative_import() {
     let init_file = "venv/lib/python3.13/site-packages/fake_site_package/__init__.py";
     interaction.client.did_open(init_file);
 
-    // BUG: Go-to-definition on `relative` in `from .relative import Foo`
-    // returns null because the module name is computed from import_root
-    // (project root) instead of from the site-package path.
-    // When fixed, this should be:
-    //   .expect_definition_response_from_root(
-    //       "venv/lib/python3.13/site-packages/fake_site_package/relative.py",
-    //       0, 0, 0, 0)
+    // Go-to-definition on `relative` in `from .relative import Foo` (line 0, char 6).
     interaction
         .client
         .definition(init_file, 0, 6)
-        .expect_response(json!(null))
+        .expect_definition_response_from_root(
+            "venv/lib/python3.13/site-packages/fake_site_package/relative.py",
+            0,
+            0,
+            0,
+            0,
+        )
         .unwrap();
 
-    // BUG: Hover on `Foo` shows Unknown for the same reason.
-    // When fixed, the hover should contain "(class) Foo".
+    // Hover on `Foo` in `from .relative import Foo` (line 0, char 22).
     interaction
         .client
         .hover(init_file, 0, 22)
         .expect_hover_response_with_markup(|value| {
-            value.is_some_and(|text| text.contains("Unknown"))
+            value.is_some_and(|text| text.contains("(class) Foo") && !text.contains("Unknown"))
         })
         .unwrap();
 
