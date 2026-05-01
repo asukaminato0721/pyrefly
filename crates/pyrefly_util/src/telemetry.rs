@@ -109,6 +109,10 @@ pub struct TelemetryEvent {
     /// The LSP request ID, used to correlate CancelRequest notifications with
     /// the requests they cancel.
     pub request_id: Option<String>,
+    /// Variable per-error detail paired with
+    /// the stable error kind in the top-level `error` column. Lets Scuba
+    /// group by kind without losing the underlying message.
+    pub error_detail: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -491,6 +495,7 @@ impl TelemetryEvent {
                 canceled: false,
                 empty_response_reason: None,
                 request_id: None,
+                error_detail: None,
             },
             queue,
         )
@@ -525,6 +530,7 @@ impl TelemetryEvent {
             canceled: false,
             empty_response_reason: None,
             request_id: None,
+            error_detail: None,
         }
     }
 
