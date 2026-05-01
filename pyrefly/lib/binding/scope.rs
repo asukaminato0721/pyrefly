@@ -525,6 +525,26 @@ impl Flow {
     }
 }
 
+/// Copy new or newly-initialized entries from `source` into `target`.
+/// Entries absent from `target` are inserted; entries present but uninitialized
+/// are overwritten when `source` has an initialized binding.
+fn propagate_new_flow_entries(
+    source: &SmallMap<Name, FlowInfo>,
+    target: &mut SmallMap<Name, FlowInfo>,
+) {
+    for (name, info) in source.iter() {
+        if let Some(existing) = target.get(name) {
+            if matches!(existing.initialized(), InitializedInFlow::No)
+                && !matches!(info.initialized(), InitializedInFlow::No)
+            {
+                target.insert(name.clone(), info.clone());
+            }
+        } else {
+            target.insert(name.clone(), info.clone());
+        }
+    }
+}
+
 /// Bound names can accumulate facet narrows from long assignment chains (e.g. huge
 /// literal dictionaries). Limiting how many consecutive narrows we remember keeps
 /// the flow graph shallow enough to avoid recursive explosions in the solver.
@@ -2142,19 +2162,21 @@ impl Scopes {
             .forks
             .last_mut()
             .expect("propagate_new_flow_entries_to_fork_base called outside of a fork");
-        for (name, info) in scope.flow.info.iter() {
-            if let Some(existing) = fork.base.info.get(name) {
-                // Update the base entry if it is uninitialized but the branch
-                // has an initialized binding (e.g. walrus targeting `x: int`).
-                if matches!(existing.initialized(), InitializedInFlow::No)
-                    && !matches!(info.initialized(), InitializedInFlow::No)
-                {
-                    fork.base.info.insert(name.clone(), info.clone());
-                }
-            } else {
-                fork.base.info.insert(name.clone(), info.clone());
-            }
-        }
+        propagate_new_flow_entries(&scope.flow.info, &mut fork.base.info);
+    }
+
+    /// Copy walrus-defined names from the current flow into the innermost
+    /// loop's base flow. The while-loop condition always evaluates at least
+    /// once, so any walrus target there is guaranteed to be assigned after the
+    /// loop. Without this propagation, `teardown_loop` sees the name only in
+    /// the loop flow and marks it `PossiblyUninitialized`.
+    pub fn propagate_new_flow_entries_to_loop_base(&mut self) {
+        let scope = self.current_mut();
+        let loop_ = scope
+            .loops
+            .last_mut()
+            .expect("propagate_new_flow_entries_to_loop_base called outside of a loop");
+        propagate_new_flow_entries(&scope.flow.info, &mut loop_.base.info);
     }
 
     /// Return the current binding index and flow style for `name`, if it exists
