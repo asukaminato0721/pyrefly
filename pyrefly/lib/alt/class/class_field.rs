@@ -2658,6 +2658,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    fn normalize_attr_ty(&self, mut ty: Type) -> Type {
+        self.expand_vars_mut(&mut ty);
+        self.solver().finalize_callable_residuals_at_boundary(ty)
+    }
+
     fn as_instance_attribute(
         &self,
         field_name: &Name,
@@ -2681,10 +2686,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 targs: instance.targs,
             },
             None => instance,
-        };
-        let normalize_attr_ty = |this: &Self, mut ty: Type| {
-            this.expand_vars_mut(&mut ty);
-            this.solver().finalize_callable_residuals_at_boundary(ty)
         };
         match field.instantiate_for(self.heap, instance).0 {
             ClassFieldInner::Property { ty, .. } => {
@@ -2721,7 +2722,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             ClassFieldInner::Method { mut ty, .. } => {
                 // bind_instance matches on the type, so resolve it if we can
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 // If the field is a dunder or ClassVar[Callable] & the assigned value is a callable, we replace it with a named function
                 // so that it gets treated as a bound method.
                 //
@@ -2766,7 +2767,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 read_only_reason,
                 ..
             } => {
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 if is_classvar {
                     ClassAttribute::read_only(ty, ReadOnlyReason::ClassVar)
                 } else if let Some(reason) = read_only_reason {
@@ -2780,7 +2781,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 read_only_reason,
                 ..
             } => {
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 if let Some(reason) = read_only_reason {
                     ClassAttribute::read_only(ty, reason)
                 } else {
@@ -2819,21 +2820,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 field.instantiate_for_class_tparams(self.heap, tparams, self_type, &mut ambiguous)
             }
         };
-        let normalize_attr_ty = |this: &Self, mut ty: Type| {
-            this.expand_vars_mut(&mut ty);
-            this.solver().finalize_callable_residuals_at_boundary(ty)
-        };
         match field.0 {
             ClassFieldInner::Property { mut ty, .. } => {
                 // When accessing a property on a class (not instance), you get the property object itself
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 bind_class_attribute(self.heap, cls, ty, None)
             }
             ClassFieldInner::Descriptor { descriptor, .. } => {
                 ClassAttribute::descriptor(descriptor, DescriptorBase::ClassDef(cls.clone()))
             }
             ClassFieldInner::Method { mut ty, .. } => {
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 // When accessing a method on a class (not instance), you get the unbound function.
                 // Filter overloads with narrower self-type annotations (e.g., `self: LiteralString`
                 // on str methods). These overloads only apply when the instance is known to be the
@@ -2879,7 +2876,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             ClassFieldInner::NestedClass { mut ty, .. } => {
                 // Nested classes are always read-only (ClassObjectInitializedOnBody)
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 bind_class_attribute(
                     self.heap,
                     cls,
@@ -2898,7 +2895,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 read_only_reason,
                 ..
             } => {
-                ty = normalize_attr_ty(self, ty);
+                ty = self.normalize_attr_ty(ty);
                 if ambiguous {
                     ClassAttribute::no_access(NoAccessReason::ClassAttributeIsGeneric(
                         cls.class_object().dupe(),
