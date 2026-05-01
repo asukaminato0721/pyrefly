@@ -776,7 +776,7 @@ impl Solver {
     /// expressions so that all-literal SizeExpr trees fold to single literals.
     pub fn finish_function_return(&self, mut t: Type) -> Type {
         self.expand_with_limit(&mut t, TYPE_LIMIT, &VarRecurser::new(), false, None);
-        t = self.finalize_callable_residuals_preserving_class_targs_at_boundary(t);
+        t = self.finalize_callable_residuals_at_boundary_impl(t, true);
         self.erase_unsolved_variables(&mut t);
         self.simplify_mut(&mut t);
         // After variable expansion, dimension expressions may have all-literal operands
@@ -1376,10 +1376,6 @@ impl Solver {
 
     pub(crate) fn finalize_callable_residuals_at_boundary(&self, ty: Type) -> Type {
         self.finalize_callable_residuals_at_boundary_impl(ty, false)
-    }
-
-    fn finalize_callable_residuals_preserving_class_targs_at_boundary(&self, ty: Type) -> Type {
-        self.finalize_callable_residuals_at_boundary_impl(ty, true)
     }
 
     fn residual_read_for_query_var(
