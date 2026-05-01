@@ -582,7 +582,6 @@ reveal_type(result)  # E: revealed type: (Never) -> int
 );
 
 testcase!(
-    bug = "All-pruned overload witness is ignored when vars are solved to Answer before residual materialization",
     test_overload_pruning_ignored_when_solved_before_materialization,
     r#"
 from typing import Callable, overload, reveal_type
@@ -595,8 +594,29 @@ def f(x: int) -> tuple[int, str]: ...  # E: Overload return type `tuple[int, str
 def f(x: str) -> tuple[str, int]: ...  # E: Overload return type `tuple[str, int]` is not assignable to implementation return type `None`
 def f(x): ...
 
-result = project(f, 1, 1)
+result = project(f, 1, 1)  # E: Overload type was not compatible with solved type variables: S = int, T = int
+# We keep solved type-variable substitutions in the result even when overload pruning
+# later rejects all captured branches.
 reveal_type(result)  # E: revealed type: () -> tuple[int, int]
+"#,
+);
+
+testcase!(
+    bug = "Constrained type vars can collapse to Answer before finishing, so overload pruning can miss them",
+    test_overload_pruning_ignored_for_constrained_tvar_solved_early,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T: (int, str)](f: Callable[[T], T], y: T) -> Callable[[T], T]: ...
+
+@overload
+def f(x: float) -> float: ...  # E: Overload return type `float` is not assignable to implementation return type `None`
+@overload
+def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, 1)
+reveal_type(result)  # E: revealed type: (int) -> int
 "#,
 );
 

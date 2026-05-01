@@ -2496,7 +2496,6 @@ impl Solver {
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let mut err = Vec::new();
         let mut solved_vars_with_residuals = Vec::new();
-        let mut reported_all_pruned_witnesses = SmallSet::new();
         let lock = self.variables.lock();
         for &v in &vs.0 {
             let mut variable = lock.get_mut(v);
@@ -2539,7 +2538,44 @@ impl Solver {
 
         let overload_pruning_by_witness =
             self.compute_overload_pruning_by_witness(&solved_vars_with_residuals, is_subset);
+        for decision in overload_pruning_by_witness.values() {
+            if !decision.all_pruned {
+                continue;
+            }
+            let all_pruned_cause = decision.all_pruned_cause.as_ref().unwrap_or_else(|| {
+                unreachable!("all-pruned witness diagnostics require solved-type cause")
+            });
+            let primary_constraint =
+                all_pruned_cause
+                    .solved_constraints
+                    .first()
+                    .unwrap_or_else(|| {
+                        unreachable!(
+                            "all-pruned witness diagnostics require at least one solved var"
+                        )
+                    });
+            err.push(TypeVarSpecializationError {
+                name: primary_constraint.quantified_name.clone(),
+                got: Type::never(),
+                want: primary_constraint.solved_ty.clone(),
+                error_kind: ErrorKind::IncompatibleOverloadResidual,
+                message_override: Some(format!(
+                    "Overload type was not compatible with solved type variables: {}",
+                    all_pruned_cause
+                        .solved_constraints
+                        .iter()
+                        .map(|constraint| format!(
+                            "{} = {}",
+                            constraint.quantified_name,
+                            constraint.solved_ty.clone().deterministic_printing()
+                        ))
+                        .join(", "),
+                )),
+                error: SubsetError::Other,
+            });
+        }
 
+        let mut reported_all_pruned_witnesses = SmallSet::new();
         let lock = self.variables.lock();
         for &v in &vs.0 {
             let mut e = lock.get_mut(v);
