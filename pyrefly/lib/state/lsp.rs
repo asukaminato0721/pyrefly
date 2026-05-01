@@ -602,14 +602,34 @@ impl<'a> Transaction<'a> {
         answers.get_type_at(idx)
     }
 
+    pub fn get_type_for_display(&self, handle: &Handle, key: &Key) -> Option<Type> {
+        let idx = self.get_bindings(handle)?.key_to_idx(key);
+        let answers = self.get_answers(handle)?;
+        answers.get_type_at_for_display(idx)
+    }
+
     pub fn get_type_trace(&self, handle: &Handle, range: TextRange) -> Option<Type> {
         let ans = self.get_answers(handle)?;
         ans.get_type_trace(range)
     }
 
+    pub fn get_type_trace_for_display(&self, handle: &Handle, range: TextRange) -> Option<Type> {
+        let ans = self.get_answers(handle)?;
+        ans.get_type_trace_for_display(range)
+    }
+
     fn get_chosen_overload_trace(&self, handle: &Handle, range: TextRange) -> Option<Type> {
         let ans = self.get_answers(handle)?;
         ans.get_chosen_overload_trace(range)
+    }
+
+    fn get_chosen_overload_trace_for_display(
+        &self,
+        handle: &Handle,
+        range: TextRange,
+    ) -> Option<Type> {
+        let ans = self.get_answers(handle)?;
+        ans.get_chosen_overload_trace_for_display(range)
     }
 
     fn import_handle_with_preference(
@@ -665,6 +685,22 @@ impl<'a> Transaction<'a> {
         self.type_from_expression_at_impl(handle, position, true)
     }
 
+    fn type_from_expression_at_for_display(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<Type> {
+        self.type_from_expression_at_impl_for_display(handle, position, false)
+    }
+
+    fn result_type_from_expression_at_for_display(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<Type> {
+        self.type_from_expression_at_impl_for_display(handle, position, true)
+    }
+
     fn type_from_expression_at_impl(
         &self,
         handle: &Handle,
@@ -690,6 +726,38 @@ impl<'a> Transaction<'a> {
                     return Some(callable);
                 }
                 if let Some(ty) = self.get_type_trace(handle, range) {
+                    return Some(ty);
+                }
+            }
+        }
+        None
+    }
+
+    fn type_from_expression_at_impl_for_display(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+        prefer_result_type: bool,
+    ) -> Option<Type> {
+        let module = self.get_ast(handle)?;
+        let covering_nodes = Ast::locate_node(&module, position);
+        for node in covering_nodes {
+            if node.as_expr_ref().is_none() {
+                continue;
+            }
+            let range = node.range();
+            if prefer_result_type {
+                if let Some(ty) = self.get_type_trace_for_display(handle, range) {
+                    return Some(ty);
+                }
+                if let Some(callable) = self.get_chosen_overload_trace_for_display(handle, range) {
+                    return Some(callable);
+                }
+            } else {
+                if let Some(callable) = self.get_chosen_overload_trace_for_display(handle, range) {
+                    return Some(callable);
+                }
+                if let Some(ty) = self.get_type_trace_for_display(handle, range) {
                     return Some(ty);
                 }
             }
@@ -1091,6 +1159,206 @@ impl<'a> Transaction<'a> {
         match self.identifier_at(handle, position) {
             None => self.result_type_from_expression_at(handle, position),
             _ => self.get_type_at(handle, position),
+        }
+    }
+
+    pub fn get_type_at_for_display(&self, handle: &Handle, position: TextSize) -> Option<Type> {
+        match self.identifier_at(handle, position) {
+            Some(IdentifierWithContext {
+                identifier: id,
+                context: IdentifierContext::Expr(expr_context),
+            }) => {
+                let key = match expr_context {
+                    ExprContext::Store => Key::Definition(ShortIdentifier::new(&id)),
+                    ExprContext::Load | ExprContext::Del | ExprContext::Invalid => {
+                        Key::BoundName(ShortIdentifier::new(&id))
+                    }
+                };
+
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                let mut ty = self.get_type_for_display(handle, &key)?;
+                let call_args_range = self.callee_at(handle, position).and_then(
+                    |ExprCall {
+                         func, arguments, ..
+                     }| (func.range() == id.range).then_some(arguments.range),
+                );
+                if let Some(arguments_range) = call_args_range {
+                    if let Some(ret) =
+                        self.get_chosen_overload_trace_for_display(handle, arguments_range)
+                    {
+                        return Some(ret);
+                    }
+                    ty = self.coerce_type_to_callable(handle, ty);
+                }
+                Some(ty)
+            }
+            Some(IdentifierWithContext {
+                identifier: _,
+                context:
+                    IdentifierContext::ImportedModule {
+                        name: module_name, ..
+                    },
+            }) => {
+                // TODO: Handle relative import (via ModuleName::new_maybe_relative)
+                Some(Type::Module(ModuleType::new(
+                    module_name.first_component(),
+                    OrderedSet::from_iter([module_name]),
+                )))
+            }
+            Some(IdentifierWithContext {
+                identifier: _,
+                context:
+                    IdentifierContext::ImportedName {
+                        name_after_import, ..
+                    },
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&name_after_import));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context:
+                    IdentifierContext::FunctionDef { docstring_range: _ }
+                    | IdentifierContext::MethodDef { docstring_range: _ },
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::ClassDef { docstring_range: _ },
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::Parameter,
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::TypeParameter,
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::ExceptionHandler,
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::PatternMatch(_),
+            }) => {
+                let key = Key::Definition(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::KeywordArgument(callee_kind),
+            }) => self
+                .find_definition_for_keyword_argument(
+                    handle,
+                    &identifier,
+                    &callee_kind,
+                    FindPreference::default(),
+                )
+                .first()
+                .and_then(|item| {
+                    let code_at_range = item.module.code_at(item.definition_range);
+                    // If refinement failed, definition_range points to the callee itself,
+                    // not a matching parameter. In that case, return None.
+                    if code_at_range != identifier.id.as_str() {
+                        return None;
+                    }
+                    let name = Name::new(code_at_range);
+                    let id = Identifier::new(name.clone(), item.definition_range);
+                    let key = Key::Definition(ShortIdentifier::new(&id));
+                    let bindings = self.get_bindings(handle)?;
+                    if !bindings.is_valid_key(&key) {
+                        return None;
+                    }
+                    self.get_type_for_display(handle, &key)
+                }),
+            Some(IdentifierWithContext {
+                identifier: _,
+                context: IdentifierContext::Attribute { range, .. },
+            }) => {
+                if let Some(ExprCall {
+                    node_index: _,
+                    range: _,
+                    func,
+                    arguments,
+                }) = &self.callee_at(handle, position)
+                    && func.range() == range
+                    && let Some(ret) =
+                        self.get_chosen_overload_trace_for_display(handle, arguments.range)
+                {
+                    Some(ret)
+                } else {
+                    self.get_type_trace_for_display(handle, range)
+                }
+            }
+            Some(IdentifierWithContext {
+                identifier,
+                context: IdentifierContext::MutableCapture,
+            }) => {
+                let key = Key::MutableCapture(ShortIdentifier::new(&identifier));
+                let bindings = self.get_bindings(handle)?;
+                if !bindings.is_valid_key(&key) {
+                    return None;
+                }
+                self.get_type_for_display(handle, &key)
+            }
+            None => self.type_from_expression_at_for_display(handle, position),
+        }
+    }
+
+    pub fn get_result_type_at_for_display(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+    ) -> Option<Type> {
+        match self.identifier_at(handle, position) {
+            None => self.result_type_from_expression_at_for_display(handle, position),
+            _ => self.get_type_at_for_display(handle, position),
         }
     }
 

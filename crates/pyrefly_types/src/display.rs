@@ -604,10 +604,18 @@ impl<'a> TypeDisplayContext<'a> {
             }
             Type::CallableResidual(box residual) => match &residual.kind {
                 CallableResidualKind::Generic { quantified } => {
-                    self.fmt_helper_generic(&quantified.as_gradual_type(), is_toplevel, output)
+                    output.write_str("GenericResidual@")?;
+                    write!(output, "{quantified}")
                 }
-                CallableResidualKind::Overload { .. } => {
-                    write!(output, "<overload residual>")
+                CallableResidualKind::Overload { branches, .. } => {
+                    output.write_str("OverloadResidual@[")?;
+                    for (i, branch) in branches.iter().enumerate() {
+                        if i > 0 {
+                            output.write_str(", ")?;
+                        }
+                        self.fmt_helper_generic(&branch.ty, false, output)?;
+                    }
+                    output.write_str("]")
                 }
             },
             Type::Function(box Function {

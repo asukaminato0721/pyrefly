@@ -147,7 +147,7 @@ impl<'a> Transaction<'a> {
                         match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
                             Binding::Function(x, _pred, _class_meta) => {
                                 if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
-                                    && let Some(mut ty) = self.get_type(handle, key)
+                                    && let Some(mut ty) = self.get_type_for_display(handle, key)
                                     && !ty.is_any()
                                 {
                                     let fun = bindings.get(bindings.get(*x).undecorated_idx);
@@ -182,7 +182,7 @@ impl<'a> Transaction<'a> {
                 }
                 key @ Key::Definition(_)
                     if inlay_hint_config.variable_types
-                        && let Some(ty) = self.get_type(handle, key) =>
+                        && let Some(ty) = self.get_type_for_display(handle, key) =>
                 {
                     // For unpacked values, extract the element expression if available
                     let (e, is_unpacked) = match bindings.get(idx) {
@@ -596,7 +596,7 @@ impl<'a> Transaction<'a> {
                     match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
                         Binding::Function(x, _pred, _class_meta) => {
                             if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
-                                && let Some(ty) = self.get_type(handle, key)
+                                && let Some(ty) = self.get_type_for_display(handle, key)
                                 && is_interesting_type(&ty)
                             {
                                 let fun = bindings.get(bindings.get(*x).undecorated_idx);
@@ -612,7 +612,7 @@ impl<'a> Transaction<'a> {
                 }
                 // Only annotate empty containers for now
                 key @ Key::Definition(_) if containers => {
-                    if let Some(ty) = self.get_type(handle, key) {
+                    if let Some(ty) = self.get_type_for_display(handle, key) {
                         let e = match bindings.get(idx) {
                             Binding::NameAssign(x) if !x.is_pinned() => match &*x.expr {
                                 Expr::List(ExprList { elts, .. }) => {

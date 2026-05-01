@@ -361,7 +361,7 @@ class Wrapper[**P, R]:
 
 def f[S](x: S) -> S: ...
 wrapper = Wrapper(f)
-reveal_type(wrapper)  # E: revealed type: Wrapper[[x: Unknown], Unknown]
+reveal_type(wrapper)  # E: revealed type: Wrapper[[x: GenericResidual@R], GenericResidual@R]
 reveal_type(wrapper.__call__)  # E: [R](self: Wrapper[[x: R], R], /, x: R) -> R
 "#,
 );
@@ -725,7 +725,7 @@ def f(x: str) -> int: ...
 def f(x) -> str | int: ...
 
 result = project(f)
-reveal_type(result)  # E: revealed type: list[tuple[int | str, int | str]]
+reveal_type(result)  # E: revealed type: list[tuple[OverloadResidual@[int, str], OverloadResidual@[str, int]]]
 "#,
 );
 
@@ -747,7 +747,7 @@ def f(x) -> str | int: ...
 
 result = lift(f)
 # Overload residual fallback should stay inline for non-callable roots.
-reveal_type(result)  # E: revealed type: Callback[int | str, int | str]
+reveal_type(result)  # E: revealed type: Callback[OverloadResidual@[int, str], OverloadResidual@[str, int]]
 assert_type(result(1), str)
 assert_type(result("ok"), int)
 "#,

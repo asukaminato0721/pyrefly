@@ -2685,7 +2685,6 @@ impl Solver {
     pub fn for_display(&self, t: Type) -> Type {
         let mut t = t;
         self.expand_with_limit(&mut t, TYPE_LIMIT, &VarRecurser::new(), true, None);
-        t = self.finalize_callable_residuals_at_boundary(t);
         self.simplify_mut(&mut t);
         t.deterministic_printing()
     }

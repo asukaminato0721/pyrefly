@@ -1005,9 +1005,21 @@ impl Answers {
         Some(self.force_for_export_boundary(self.get_idx(idx)?.arc_clone_ty()))
     }
 
+    pub fn get_type_at_for_display(&self, idx: Idx<Key>) -> Option<Type> {
+        Some(self.solver.for_display(self.get_idx(idx)?.arc_clone_ty()))
+    }
+
     pub fn get_type_trace(&self, range: TextRange) -> Option<Type> {
         let lock = self.trace.as_ref()?.lock();
         Some(self.force_for_export_boundary(lock.types.get(&range)?.as_ref().clone()))
+    }
+
+    pub fn get_type_trace_for_display(&self, range: TextRange) -> Option<Type> {
+        let lock = self.trace.as_ref()?.lock();
+        Some(
+            self.solver
+                .for_display(lock.types.get(&range)?.as_ref().clone()),
+        )
     }
 
     pub fn try_get_getter_for_range(&self, range: TextRange) -> Option<Type> {
@@ -1026,6 +1038,21 @@ impl Answers {
                 is_closest_chosen,
                 ..
             } if *is_closest_chosen => Some(self.force_for_export_boundary(closest.as_type())),
+            _ => None,
+        }
+    }
+
+    pub fn get_chosen_overload_trace_for_display(&self, range: TextRange) -> Option<Type> {
+        let lock = self.trace.as_ref()?.lock();
+        match lock.overloaded_callees.get(&range)? {
+            OverloadedCallee::Resolved { callable } => {
+                Some(self.solver.for_display(callable.as_type()))
+            }
+            OverloadedCallee::Candidates {
+                closest,
+                is_closest_chosen,
+                ..
+            } if *is_closest_chosen => Some(self.solver.for_display(closest.as_type())),
             _ => None,
         }
     }
