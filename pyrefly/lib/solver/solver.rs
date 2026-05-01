@@ -1227,15 +1227,15 @@ impl Solver {
         preserve_class_targs: bool,
         active_overload_identities: &mut Vec<OverloadResidualIdentity>,
     ) -> Type {
-        // Preserve class targs at this boundary so residualized class arguments
-        // can be finalized later at the access/call site with proper context.
-        let skip_overload_reconstruction = preserve_class_targs && matches!(ty, Type::ClassType(_));
+        // Overload reconstruction is only for callable roots. For non-callable
+        // roots, keep the outer structure and rely on inline residual fallback.
+        let callable_root = ty.is_toplevel_callable();
 
         // Reconstruction is only safe when all overload residual markers in
         // the type share a single witness identity. Multiple witnesses would
         // produce a cross-product explosion; strip all markers and fall
         // through to generic residual finalization instead.
-        if !skip_overload_reconstruction
+        if callable_root
             && let OverloadResidualIdentityAnalysis::Single {
                 identity,
                 branch_indices,
@@ -1289,9 +1289,8 @@ impl Solver {
                 {
                     ty = overload_ty;
                 } else {
-                    // TODO(stroxler): This behavior causes us to explode residuals into unions
-                    // whenever they appear in a non-Callable type. The behavior isn't exactly
-                    // bad, but it would be cleaner to flatten them inline. Fix this later.
+                    // This fallback only applies to callable roots. Non-callable
+                    // roots bypass reconstruction and rely on inline fallback.
                     ty = unions(reconstructed, &self.heap);
                     self.simplify_mut(&mut ty);
                 }

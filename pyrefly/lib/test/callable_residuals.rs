@@ -712,7 +712,24 @@ assert_type(wrapper("ok"), int)
 );
 
 testcase!(
-    bug = "The semantics here work, but the flattening in reveal_type display output is confusing",
+    test_overload_residual_nested_inline_union_fallback,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[A, R](f: Callable[[A], R]) -> list[tuple[A, R]]: ...
+
+@overload
+def f(x: int) -> str: ...
+@overload
+def f(x: str) -> int: ...
+def f(x) -> str | int: ...
+
+result = project(f)
+reveal_type(result)  # E: revealed type: list[tuple[int | str, int | str]]
+"#,
+);
+
+testcase!(
     test_overload_residual_into_callback_protocol,
     r#"
 from typing import Callable, Protocol, overload, assert_type, reveal_type
@@ -729,9 +746,8 @@ def f(x: str) -> int: ...
 def f(x) -> str | int: ...
 
 result = lift(f)
-# Should be Overload[(int) -> str, (str) -> int], but overload residual
-# is flattened into a union of protocol instances instead.
-reveal_type(result)  # E: revealed type: Callback[int, str] | Callback[str, int]
+# Overload residual fallback should stay inline for non-callable roots.
+reveal_type(result)  # E: revealed type: Callback[int | str, int | str]
 assert_type(result(1), str)
 assert_type(result("ok"), int)
 "#,
