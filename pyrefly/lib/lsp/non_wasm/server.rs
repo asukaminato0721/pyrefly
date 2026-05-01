@@ -4819,9 +4819,11 @@ impl Server {
                 return Err(reason);
             }
         };
+        let uri_for_telemetry = uri.clone();
         self.find_reference_queue.queue_task(
             TelemetryEventKind::FindFromDefinition,
             Box::new(move |server, telemetry, telemetry_event| {
+                server.set_file_stats(uri_for_telemetry, telemetry_event);
                 telemetry_event.set_activity_key(activity_key);
                 let mut transaction = server.state.cancellable_transaction();
                 server
