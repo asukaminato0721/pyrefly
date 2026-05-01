@@ -428,7 +428,7 @@ reveal_type(identity2.__call__)  # E: revealed type: (Wrapper[Ellipsis, Unknown]
 testcase!(
     test_paramspec_transform_overloaded,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def transform[**P, T](f: Callable[P, T]) -> Callable[P, T]: ...
 
 @overload
@@ -439,16 +439,15 @@ def multi(*args, **kwargs): ...
 
 result = transform(multi)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1, "ok")
-reveal_type(out_a)  # E: revealed type: bool
-out_b = result("ok")
+assert_type(result(1, "ok"), bool)
+result("ok")
 "#,
 );
 
 testcase!(
     test_paramspec_identity_overloaded,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def identity[**P, R](x: Callable[P, R]) -> Callable[P, R]:
     return x
 
@@ -460,16 +459,15 @@ def f(x): ...
 
 result = identity(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: str
-out_b = result("ok")
+assert_type(result(1), str)
+result("ok")
 "#,
 );
 
 testcase!(
     test_typevar_identity_overloaded,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def identity[A, R](x: Callable[[A], R]) -> Callable[[A], R]:
     return x
 
@@ -481,16 +479,15 @@ def f(x): ...
 
 result = identity(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: str
-out_b = result("ok")
+assert_type(result(1), str)
+result("ok")
 "#,
 );
 
 testcase!(
     test_typevar_identity_overloaded_two_arg,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def identity[A, B, R](x: Callable[[A, B], R]) -> Callable[[A, B], R]:
     return x
 
@@ -502,8 +499,7 @@ def f(x, y): ...
 
 result = identity(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1, "ok")
-reveal_type(out_a)  # E: revealed type: bool
+assert_type(result(1, "ok"), bool)
 result("x", "ok")  # E: No matching overload found for function `typing.overload` called with arguments: (Literal['x'], Literal['ok'])
 result(1, 1)  # E: No matching overload found for function `typing.overload` called with arguments: (Literal[1], Literal[1])
 "#,
@@ -512,7 +508,7 @@ result(1, 1)  # E: No matching overload found for function `typing.overload` cal
 testcase!(
     test_typevar_overloaded_return_wraps_argument,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def higher_order[A, R](x: Callable[[A], R]) -> Callable[[list[A]], R]: ...
 
 @overload
@@ -523,17 +519,15 @@ def f(x): ...
 
 result = higher_order(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result([1])
-reveal_type(out_a)  # E: revealed type: str
-out_b = result(["ok"])
-reveal_type(out_b)  # E: revealed type: int
+assert_type(result([1]), str)
+assert_type(result(["ok"]), int)
 "#,
 );
 
 testcase!(
     test_typevar_overloaded_return_wraps_return,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 def higher_order[A, R](x: Callable[[A], R]) -> Callable[[A], list[R]]: ...
 
 @overload
@@ -544,10 +538,8 @@ def f(x): ...
 
 result = higher_order(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: list[str]
-out_b = result("ok")
-reveal_type(out_b)  # E: revealed type: list[int]
+assert_type(result(1), list[str])
+assert_type(result("ok"), list[int])
 "#,
 );
 
