@@ -2266,7 +2266,12 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     self.solver.record_generic_residuals_for_witness(witness);
                 }
                 result.and(
-                    self.finish_quantified(vs)
+                    self.solver
+                        .finish_quantified_with_subset(
+                            vs,
+                            self.solver.infer_with_first_use,
+                            &mut |got, want| self.is_subset_eq_probe_for_pruning(got, want),
+                        )
                         .map_err(SubsetError::TypeVarSpecialization),
                 )
             }

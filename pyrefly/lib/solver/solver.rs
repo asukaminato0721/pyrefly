@@ -2964,7 +2964,9 @@ impl Solver {
         type_order: TypeOrder<Ans>,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let mut subset = self.subset(type_order);
-        subset.finish_quantified_with_infer(vs, infer_with_first_use)
+        self.finish_quantified_with_subset(vs, infer_with_first_use, &mut |got, want| {
+            subset.is_subset_eq_probe_for_pruning(got, want)
+        })
     }
 
     fn subset<'a, Ans: LookupAnswer>(&'a self, type_order: TypeOrder<'a, Ans>) -> Subset<'a, Ans> {
@@ -4093,23 +4095,5 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             }
             _ => self.is_subset_eq_impl(got, want),
         }
-    }
-
-    pub fn finish_quantified(
-        &mut self,
-        vs: QuantifiedHandle,
-    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        self.finish_quantified_with_infer(vs, self.solver.infer_with_first_use)
-    }
-
-    pub fn finish_quantified_with_infer(
-        &mut self,
-        vs: QuantifiedHandle,
-        infer_with_first_use: bool,
-    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        self.solver
-            .finish_quantified_with_subset(vs, infer_with_first_use, &mut |got, want| {
-                self.is_subset_eq_probe_for_pruning(got, want)
-            })
     }
 }
