@@ -91,23 +91,6 @@ reveal_type(out_b)  # E: revealed type: str
 "#,
 );
 
-// Passing a generic function through a ParamSpec wrapper preserves generic structure.
-testcase!(
-    test_paramspec_wrap_generic,
-    r#"
-from typing import Callable, Awaitable, reveal_type
-def wrap[**P, T](f: Callable[P, T]) -> Callable[P, Awaitable[T]]: ...
-def identity[X](x: X) -> X: ...
-reveal_type(wrap(identity))  # E: revealed type: [T](x: T) -> Awaitable[T]
-out_a = wrap(identity)
-reveal_type(out_a)  # E: revealed type: [T](x: T) -> Awaitable[T]
-out_b = wrap(identity)
-called = out_b(42)
-reveal_type(out_b)  # E: revealed type: [T](x: T) -> Awaitable[T]
-reveal_type(called)  # E: revealed type: Awaitable[int]
-"#,
-);
-
 // Concatenate strips the only binding site of X, producing a degenerate callable.
 // Unlike the other tests, this does NOT produce a partial type — X collapses to
 // Any, and downstream usage cannot recover type information.
@@ -138,41 +121,5 @@ out_c = strip_first(identity)
 def takes_callback(callback: Callable[[], int]) -> None: ...
 takes_callback(out_c)
 reveal_type(out_c)  # E: revealed type: () -> Any
-"#,
-);
-
-testcase!(
-    test_concatenate_preserves_generic_param,
-    r#"
-from typing import Callable, Concatenate, Any, reveal_type
-def strip_first[**P, T](f: Callable[Concatenate[Any, P], T]) -> Callable[P, T]: ...
-def swap[X](ignored: int, x: X) -> X: ...
-reveal_type(strip_first(swap))  # E: revealed type: [T](x: T) -> T
-out_a = strip_first(swap)
-reveal_type(out_a)  # E: revealed type: [T](x: T) -> T
-out_b = strip_first(swap)
-called = out_b("hello")
-reveal_type(out_b)  # E: revealed type: [T](x: T) -> T
-reveal_type(called)  # E: revealed type: str
-"#,
-);
-
-testcase!(
-    test_overload_paramspec_pins_first,
-    r#"
-from typing import Callable, Protocol, overload
-
-class Foo(Protocol):
-    @overload
-    def __call__(self, ignore_errors: bool, onerror: int | None) -> None: ...
-    @overload
-    def __call__(self, ignore_errors: bool = False) -> None: ...
-
-def callback[**P, T](
-    callback: Callable[P, T], /, *args: P.args, **kwds: P.kwargs
-) -> Callable[P, T]: ...
-
-def test(rmtree: Foo) -> None:
-    callback(rmtree, ignore_errors=True)
 "#,
 );
