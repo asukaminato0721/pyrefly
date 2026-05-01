@@ -252,7 +252,7 @@ reveal_type(result)  # E: revealed type: [P, T](x: (ParamSpec(P)) -> T) -> (Para
 testcase!(
     test_param_spec_identity_of_identity_behavior,
     r#"
-from typing import Callable, reveal_type
+from typing import Callable, assert_type, reveal_type
 def identity[**P, T](x: Callable[P, T]) -> Callable[P, T]:
     return x
 def f(x: int, y: str) -> str:
@@ -260,8 +260,7 @@ def f(x: int, y: str) -> str:
 result = identity(identity)
 lifted = result(f)
 reveal_type(lifted)  # E: revealed type: (x: int, y: str) -> str
-out = lifted(1, "ok")
-reveal_type(out)  # E: revealed type: str
+assert_type(lifted(1, "ok"), str)
 "#,
 );
 
@@ -293,7 +292,7 @@ reveal_type(result)  # E: revealed type: [T](y: T) -> T
 testcase!(
     test_typevar_class_field_projection_parity,
     r#"
-from typing import Callable, reveal_type
+from typing import Callable, assert_type, reveal_type
 
 class Box[T]:
     fn: Callable[[T], T]
@@ -303,15 +302,14 @@ class Box[T]:
 def f[S](x: S) -> S: ...
 b = Box(f)
 reveal_type(b.fn)  # E: revealed type: [S](S) -> S
-called = b.fn(1)
-reveal_type(called)  # E: revealed type: int
+assert_type(b.fn(1), int)
 "#,
 );
 
 testcase!(
     test_callable_class_wrapper,
     r#"
-from typing import Callable, reveal_type
+from typing import Callable, assert_type, reveal_type
 
 class Wrapper[**P, R]:
     fn: Callable[P, R]
@@ -324,15 +322,14 @@ def f[S](x: S) -> S: ...
 wrapper = Wrapper(f)
 reveal_type(wrapper.fn)  # E: revealed type: [R](x: R) -> R
 reveal_type(wrapper.__call__)  # E: [R](self: Wrapper[[x: R], R], /, x: R) -> R
-result = wrapper(1)
-reveal_type(result)  # E: revealed type: int
+assert_type(wrapper(1), int)
 "#,
 );
 
 testcase!(
     test_callable_class_wrapper_with_helper,
     r#"
-from typing import Callable, reveal_type
+from typing import Callable, assert_type, reveal_type
 
 class Wrapper[**P, R]:
     fn: Callable[P, R]
@@ -348,8 +345,7 @@ def f[S](x: S) -> S: ...
 wrapper = wrap(f)
 reveal_type(wrapper.fn)  # E: revealed type: [R](x: R) -> R
 reveal_type(wrapper.__call__)  # E: [R](self: Wrapper[[x: R], R], /, x: R) -> R
-result = wrapper(1)
-reveal_type(result)  # E: revealed type: int
+assert_type(wrapper(1), int)
 "#,
 );
 
