@@ -1046,26 +1046,84 @@ impl Solver {
         }))
     }
 
-    /// Finalize callable residuals after a substitution (either a return type or a class field)
-    /// once (as in, perform one round of finalization - if a residual resolves to another
-    /// residual, the second one will still be present).
+    /// Finalize callable residuals at a boundary with one outer traversal.
     ///
-    /// - Recursively replace `CallableResidual`s that are not nested in a Callable with flattened
-    ///   fallback types (for example generic residuals become the gradual fallback for that quantified)
-    /// - Transform callables that contain `CallableResidual`s (for example, if there are generic
-    ///   residuals, then replace them with the Quantified, and also promote to a Forall with
-    ///   those quantifieds scoped as type parameters).
-    ///
-    /// Returns
-    /// - did_we_encounter_any_residuals: used to terminate recursive
-    ///   transforms, which we need because residuals can nest (in particular,
-    ///   an overload residual can contain a generic residual)
-    /// - did_we_encounter_any_residuals_inside_a_callable: used to
-    ///
-    ///
-    /// TODO(stroxler): See if this can be simplified or otherwise made clearer at the top of the
-    /// stack, including after overload support gets added and after optimizations.
+    /// Non-callable structure is traversed once. Callable/function subtrees run
+    /// two phases (overload then generic) internally.
     fn finalize_callable_residuals_mut(
+        &self,
+        ty: &mut Type,
+        callable_slot: bool,
+        preserve_class_targs: bool,
+    ) -> (bool, bool) {
+        match ty {
+            Type::CallableResidual(residual) => match &residual.kind {
+                CallableResidualKind::Generic { .. } => {
+                    if !callable_slot {
+                        *ty = self.residual_fallback_type(residual);
+                        return (true, false);
+                    }
+                    *ty = self
+                        .heap
+                        .mk_quantified(self.generic_residual_quantified(residual));
+                    (true, true)
+                }
+                CallableResidualKind::Overload { .. } => {
+                    *ty = self.residual_fallback_type(residual);
+                    let (_nested_changed, nested_consumed) = self.finalize_callable_residuals_mut(
+                        ty,
+                        callable_slot,
+                        preserve_class_targs,
+                    );
+                    (true, nested_consumed)
+                }
+            },
+            Type::Callable(callable) => {
+                let (changed, consumed_residual) =
+                    self.finalize_callable_type_two_phase_mut(callable, preserve_class_targs);
+                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
+                {
+                    let promoted = self.promote_callable_to_forall((**callable).clone());
+                    *ty = promoted;
+                    (true, true)
+                } else {
+                    (changed, consumed_residual)
+                }
+            }
+            Type::Function(function) => {
+                let (changed, consumed_residual) =
+                    self.finalize_function_type_two_phase_mut(function, preserve_class_targs);
+                if !changed {
+                    return (false, false);
+                }
+                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
+                {
+                    let promoted = self.promote_function_to_forall((**function).clone());
+                    *ty = promoted;
+                    (true, true)
+                } else {
+                    (true, consumed_residual)
+                }
+            }
+            Type::ClassType(_) if preserve_class_targs && !callable_slot => (false, false),
+            _ => {
+                let mut changed = false;
+                let mut consumed_residual = false;
+                ty.recurse_mut(&mut |inner| {
+                    let (inner_changed, inner_consumed) = self.finalize_callable_residuals_mut(
+                        inner,
+                        callable_slot,
+                        preserve_class_targs,
+                    );
+                    changed |= inner_changed;
+                    consumed_residual |= inner_consumed;
+                });
+                (changed, consumed_residual)
+            }
+        }
+    }
+
+    fn finalize_callable_residuals_in_phase_mut(
         &self,
         ty: &mut Type,
         callable_slot: bool,
@@ -1096,43 +1154,23 @@ impl Solver {
                 }
             },
             Type::Callable(callable) => {
-                let (changed, consumed_residual) =
-                    self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
-                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
-                {
-                    let promoted = self.promote_callable_to_forall((**callable).clone());
-                    *ty = promoted;
-                    (true, true)
-                } else {
-                    (changed, consumed_residual)
-                }
+                self.finalize_callable_type_mut(callable, preserve_class_targs, phase)
             }
             Type::Function(function) => {
-                let (changed, consumed_residual) =
-                    self.finalize_function_type_mut(function, preserve_class_targs, phase);
-                if !changed {
-                    return (false, false);
-                }
-                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
-                {
-                    let promoted = self.promote_function_to_forall((**function).clone());
-                    *ty = promoted;
-                    (true, true)
-                } else {
-                    (true, consumed_residual)
-                }
+                self.finalize_function_type_mut(function, preserve_class_targs, phase)
             }
             Type::ClassType(_) if preserve_class_targs && !callable_slot => (false, false),
             _ => {
                 let mut changed = false;
                 let mut consumed_residual = false;
                 ty.recurse_mut(&mut |inner| {
-                    let (inner_changed, inner_consumed) = self.finalize_callable_residuals_mut(
-                        inner,
-                        callable_slot,
-                        preserve_class_targs,
-                        phase,
-                    );
+                    let (inner_changed, inner_consumed) = self
+                        .finalize_callable_residuals_in_phase_mut(
+                            inner,
+                            callable_slot,
+                            preserve_class_targs,
+                            phase,
+                        );
                     changed |= inner_changed;
                     consumed_residual |= inner_consumed;
                 });
@@ -1152,12 +1190,13 @@ impl Solver {
         match &mut callable.params {
             Params::List(params) => {
                 for param in params.items_mut() {
-                    let (param_changed, param_consumed) = self.finalize_callable_residuals_mut(
-                        param.as_type_mut(),
-                        true,
-                        preserve_class_targs,
-                        phase,
-                    );
+                    let (param_changed, param_consumed) = self
+                        .finalize_callable_residuals_in_phase_mut(
+                            param.as_type_mut(),
+                            true,
+                            preserve_class_targs,
+                            phase,
+                        );
                     changed |= param_changed;
                     consumed_residual |= param_consumed;
                 }
@@ -1167,23 +1206,24 @@ impl Solver {
                     let prefix_ty = match prefix_param {
                         PrefixParam::PosOnly(_, ty, _) | PrefixParam::Pos(_, ty, _) => ty,
                     };
-                    let (prefix_changed, prefix_consumed) = self.finalize_callable_residuals_mut(
-                        prefix_ty,
-                        true,
-                        preserve_class_targs,
-                        phase,
-                    );
+                    let (prefix_changed, prefix_consumed) = self
+                        .finalize_callable_residuals_in_phase_mut(
+                            prefix_ty,
+                            true,
+                            preserve_class_targs,
+                            phase,
+                        );
                     changed |= prefix_changed;
                     consumed_residual |= prefix_consumed;
                 }
-                let (paramspec_changed, paramspec_consumed) =
-                    self.finalize_callable_residuals_mut(p, true, preserve_class_targs, phase);
+                let (paramspec_changed, paramspec_consumed) = self
+                    .finalize_callable_residuals_in_phase_mut(p, true, preserve_class_targs, phase);
                 changed |= paramspec_changed;
                 consumed_residual |= paramspec_consumed;
             }
             Params::Ellipsis | Params::Materialization => {}
         }
-        let (ret_changed, ret_consumed) = self.finalize_callable_residuals_mut(
+        let (ret_changed, ret_consumed) = self.finalize_callable_residuals_in_phase_mut(
             &mut callable.ret,
             true,
             preserve_class_targs,
@@ -1211,6 +1251,44 @@ impl Solver {
         }
         function.signature = signature;
         (true, consumed_residual)
+    }
+
+    fn finalize_callable_type_two_phase_mut(
+        &self,
+        callable: &mut Callable,
+        preserve_class_targs: bool,
+    ) -> (bool, bool) {
+        let mut changed = false;
+        let mut consumed_residual = false;
+        for phase in [
+            CallableResidualFinalizePhase::Overload,
+            CallableResidualFinalizePhase::Generic,
+        ] {
+            let (phase_changed, phase_consumed) =
+                self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
+            changed |= phase_changed;
+            consumed_residual |= phase_consumed;
+        }
+        (changed, consumed_residual)
+    }
+
+    fn finalize_function_type_two_phase_mut(
+        &self,
+        function: &mut Function,
+        preserve_class_targs: bool,
+    ) -> (bool, bool) {
+        let mut changed = false;
+        let mut consumed_residual = false;
+        for phase in [
+            CallableResidualFinalizePhase::Overload,
+            CallableResidualFinalizePhase::Generic,
+        ] {
+            let (phase_changed, phase_consumed) =
+                self.finalize_function_type_mut(function, preserve_class_targs, phase);
+            changed |= phase_changed;
+            consumed_residual |= phase_consumed;
+        }
+        (changed, consumed_residual)
     }
 
     /// Finalize callable residuals at a substitution boundary (a return type or class field).
@@ -1305,14 +1383,7 @@ impl Solver {
             }
         }
 
-        // Generic residuals can appear under overload branches, so process
-        // overloads first and then generics.
-        for phase in [
-            CallableResidualFinalizePhase::Overload,
-            CallableResidualFinalizePhase::Generic,
-        ] {
-            self.finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs, phase);
-        }
+        self.finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs);
         ty
     }
 
