@@ -186,15 +186,24 @@ struct OverloadAllPrunedCause {
     solved_ty: Type,
 }
 
+struct OverloadBranchSubstitutionResult {
+    substituted: bool,
+    marker_remaining: bool,
+}
+
+#[expect(dead_code, reason = "Just wiring up plumbing for now")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CallableResidualFinalizePhase {
+    Overload,
+    Generic,
+    Both,
+}
+
 /// Snapshot of a solved quantified var after the bounds-first pass in
 /// `finish_quantified`.
 ///
 /// Used by witness-level overload pruning: eliminate branches whose
 /// branch-implied bounds are incompatible with the solved type.
-struct OverloadBranchSubstitutionResult {
-    substituted: bool,
-    marker_remaining: bool,
-}
 #[derive(Clone, Debug)]
 struct SolvedVarWithResiduals {
     quantified_name: Name,
@@ -1044,10 +1053,18 @@ impl Solver {
         ty: &mut Type,
         callable_slot: bool,
         preserve_class_targs: bool,
+        phase: CallableResidualFinalizePhase,
     ) -> (bool, bool) {
         match ty {
             Type::CallableResidual(residual) => match &residual.kind {
                 CallableResidualKind::Generic { .. } => {
+                    if !matches!(
+                        phase,
+                        CallableResidualFinalizePhase::Generic
+                            | CallableResidualFinalizePhase::Both
+                    ) {
+                        return (false, false);
+                    }
                     if !callable_slot {
                         *ty = self.residual_fallback_type(residual);
                         return (true, false);
@@ -1058,54 +1075,20 @@ impl Solver {
                     (true, true)
                 }
                 CallableResidualKind::Overload { .. } => {
+                    if !matches!(
+                        phase,
+                        CallableResidualFinalizePhase::Overload
+                            | CallableResidualFinalizePhase::Both
+                    ) {
+                        return (false, false);
+                    }
                     *ty = self.residual_fallback_type(residual);
                     (true, false)
                 }
             },
             Type::Callable(callable) => {
-                let mut changed = false;
-                let mut consumed_residual = false;
-                match &mut callable.params {
-                    Params::List(params) => {
-                        for param in params.items_mut() {
-                            let (param_changed, param_consumed) = self
-                                .finalize_callable_residuals_mut(
-                                    param.as_type_mut(),
-                                    true,
-                                    preserve_class_targs,
-                                );
-                            changed |= param_changed;
-                            consumed_residual |= param_consumed;
-                        }
-                    }
-                    Params::ParamSpec(prefix, p) => {
-                        for prefix_param in prefix.iter_mut() {
-                            let prefix_ty = match prefix_param {
-                                PrefixParam::PosOnly(_, ty, _) | PrefixParam::Pos(_, ty, _) => ty,
-                            };
-                            let (prefix_changed, prefix_consumed) = self
-                                .finalize_callable_residuals_mut(
-                                    prefix_ty,
-                                    true,
-                                    preserve_class_targs,
-                                );
-                            changed |= prefix_changed;
-                            consumed_residual |= prefix_consumed;
-                        }
-                        let (paramspec_changed, paramspec_consumed) =
-                            self.finalize_callable_residuals_mut(p, true, preserve_class_targs);
-                        changed |= paramspec_changed;
-                        consumed_residual |= paramspec_consumed;
-                    }
-                    Params::Ellipsis | Params::Materialization => {}
-                }
-                let (ret_changed, ret_consumed) = self.finalize_callable_residuals_mut(
-                    &mut callable.ret,
-                    true,
-                    preserve_class_targs,
-                );
-                changed |= ret_changed;
-                consumed_residual |= ret_consumed;
+                let (changed, consumed_residual) =
+                    self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
                 if consumed_residual {
                     if callable_slot {
                         (changed, true)
@@ -1119,61 +1102,11 @@ impl Solver {
                 }
             }
             Type::Function(function) => {
-                if !function.signature.contains_callable_residual() {
-                    return (false, false);
-                }
-                let mut signature = function.signature.clone();
-                let (changed, consumed_residual) = self.finalize_callable_residuals_mut(
-                    &mut signature.ret,
-                    true,
-                    preserve_class_targs,
-                );
-                let (params_changed, params_consumed) = match &mut signature.params {
-                    Params::List(params) => {
-                        let mut any_changed = false;
-                        let mut any_consumed = false;
-                        for param in params.items_mut() {
-                            let (param_changed, param_consumed) = self
-                                .finalize_callable_residuals_mut(
-                                    param.as_type_mut(),
-                                    true,
-                                    preserve_class_targs,
-                                );
-                            any_changed |= param_changed;
-                            any_consumed |= param_consumed;
-                        }
-                        (any_changed, any_consumed)
-                    }
-                    Params::ParamSpec(prefix, p) => {
-                        let mut any_changed = false;
-                        let mut any_consumed = false;
-                        for prefix_param in prefix.iter_mut() {
-                            let prefix_ty = match prefix_param {
-                                PrefixParam::PosOnly(_, ty, _) | PrefixParam::Pos(_, ty, _) => ty,
-                            };
-                            let (prefix_changed, prefix_consumed) = self
-                                .finalize_callable_residuals_mut(
-                                    prefix_ty,
-                                    true,
-                                    preserve_class_targs,
-                                );
-                            any_changed |= prefix_changed;
-                            any_consumed |= prefix_consumed;
-                        }
-                        let (paramspec_changed, paramspec_consumed) =
-                            self.finalize_callable_residuals_mut(p, true, preserve_class_targs);
-                        any_changed |= paramspec_changed;
-                        any_consumed |= paramspec_consumed;
-                        (any_changed, any_consumed)
-                    }
-                    Params::Ellipsis | Params::Materialization => (false, false),
-                };
-                let changed = changed | params_changed;
-                let consumed_residual = consumed_residual | params_consumed;
+                let (changed, consumed_residual) =
+                    self.finalize_function_type_mut(function, preserve_class_targs, phase);
                 if !changed {
                     return (false, false);
                 }
-                function.signature = signature;
                 if consumed_residual && !callable_slot {
                     let promoted = self.promote_function_to_forall((**function).clone());
                     *ty = promoted;
@@ -1191,6 +1124,7 @@ impl Solver {
                         inner,
                         callable_slot,
                         preserve_class_targs,
+                        phase,
                     );
                     changed |= inner_changed;
                     consumed_residual |= inner_consumed;
@@ -1198,6 +1132,78 @@ impl Solver {
                 (changed, consumed_residual)
             }
         }
+    }
+
+    fn finalize_callable_type_mut(
+        &self,
+        callable: &mut Callable,
+        preserve_class_targs: bool,
+        phase: CallableResidualFinalizePhase,
+    ) -> (bool, bool) {
+        let mut changed = false;
+        let mut consumed_residual = false;
+        match &mut callable.params {
+            Params::List(params) => {
+                for param in params.items_mut() {
+                    let (param_changed, param_consumed) = self.finalize_callable_residuals_mut(
+                        param.as_type_mut(),
+                        true,
+                        preserve_class_targs,
+                        phase,
+                    );
+                    changed |= param_changed;
+                    consumed_residual |= param_consumed;
+                }
+            }
+            Params::ParamSpec(prefix, p) => {
+                for prefix_param in prefix.iter_mut() {
+                    let prefix_ty = match prefix_param {
+                        PrefixParam::PosOnly(_, ty, _) | PrefixParam::Pos(_, ty, _) => ty,
+                    };
+                    let (prefix_changed, prefix_consumed) = self.finalize_callable_residuals_mut(
+                        prefix_ty,
+                        true,
+                        preserve_class_targs,
+                        phase,
+                    );
+                    changed |= prefix_changed;
+                    consumed_residual |= prefix_consumed;
+                }
+                let (paramspec_changed, paramspec_consumed) =
+                    self.finalize_callable_residuals_mut(p, true, preserve_class_targs, phase);
+                changed |= paramspec_changed;
+                consumed_residual |= paramspec_consumed;
+            }
+            Params::Ellipsis | Params::Materialization => {}
+        }
+        let (ret_changed, ret_consumed) = self.finalize_callable_residuals_mut(
+            &mut callable.ret,
+            true,
+            preserve_class_targs,
+            phase,
+        );
+        changed |= ret_changed;
+        consumed_residual |= ret_consumed;
+        (changed, consumed_residual)
+    }
+
+    fn finalize_function_type_mut(
+        &self,
+        function: &mut Function,
+        preserve_class_targs: bool,
+        phase: CallableResidualFinalizePhase,
+    ) -> (bool, bool) {
+        if !function.signature.contains_callable_residual() {
+            return (false, false);
+        }
+        let mut signature = function.signature.clone();
+        let (changed, consumed_residual) =
+            self.finalize_callable_type_mut(&mut signature, preserve_class_targs, phase);
+        if !changed {
+            return (false, false);
+        }
+        function.signature = signature;
+        (true, consumed_residual)
     }
 
     /// Finalize callable residuals at a substitution boundary (a return type or class field).
@@ -1299,7 +1305,12 @@ impl Solver {
 
         for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
             if !self
-                .finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs)
+                .finalize_callable_residuals_mut(
+                    &mut ty,
+                    false,
+                    preserve_class_targs,
+                    CallableResidualFinalizePhase::Both,
+                )
                 .0
             {
                 return ty;
