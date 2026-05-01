@@ -180,9 +180,14 @@ enum OverloadResidualIdentityAnalysis {
 }
 
 #[derive(Clone, Debug)]
-struct OverloadAllPrunedCause {
+struct OverloadSolvedConstraint {
     quantified_name: Name,
     solved_ty: Type,
+}
+
+#[derive(Clone, Debug)]
+struct OverloadAllPrunedCause {
+    solved_constraints: Vec<OverloadSolvedConstraint>,
 }
 
 struct OverloadBranchSubstitutionResult {
@@ -2335,9 +2340,9 @@ impl Solver {
             OverloadResidualIdentity,
             SmallSet<usize>,
         > = HashMap::new();
-        let mut all_pruned_cause_by_witness: HashMap<
+        let mut solved_constraints_by_witness: HashMap<
             OverloadResidualIdentity,
-            OverloadAllPrunedCause,
+            Vec<OverloadSolvedConstraint>,
         > = HashMap::new();
 
         for solved_var in solved_vars_with_residuals {
@@ -2352,6 +2357,18 @@ impl Solver {
                 let all_branch_indices = all_branch_indices_by_witness
                     .entry(identity.clone())
                     .or_default();
+                let solved_constraints_for_witness = solved_constraints_by_witness
+                    .entry(identity.clone())
+                    .or_default();
+                if !solved_constraints_for_witness
+                    .iter()
+                    .any(|constraint| constraint.quantified_name == solved_var.quantified_name)
+                {
+                    solved_constraints_for_witness.push(OverloadSolvedConstraint {
+                        quantified_name: solved_var.quantified_name.clone(),
+                        solved_ty: solved_var.solved_ty.clone(),
+                    });
+                }
                 let surviving_for_solved_var = surviving_per_witness_for_solved_var
                     .entry(identity.clone())
                     .or_default();
@@ -2364,14 +2381,6 @@ impl Solver {
                     ) {
                         surviving_for_solved_var.insert(branch.branch_index);
                     }
-                }
-                if surviving_for_solved_var.is_empty() {
-                    all_pruned_cause_by_witness
-                        .entry(identity)
-                        .or_insert_with(|| OverloadAllPrunedCause {
-                            quantified_name: solved_var.quantified_name.clone(),
-                            solved_ty: solved_var.solved_ty.clone(),
-                        });
                 }
             }
             for (identity, surviving_for_solved_var) in surviving_per_witness_for_solved_var {
@@ -2398,15 +2407,20 @@ impl Solver {
                     });
                 let all_pruned = surviving_branch_indices.is_empty();
                 let all_pruned_cause = if all_pruned {
+                    let mut solved_constraints = solved_constraints_by_witness
+                        .get(&identity)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            unreachable!(
+                                "all-pruned witness decisions must include solved constraints"
+                            )
+                        });
+                    solved_constraints
+                        .sort_by(|left, right| left.quantified_name.cmp(&right.quantified_name));
                     Some(
-                        all_pruned_cause_by_witness
-                            .get(&identity)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                unreachable!(
-                                    "all-pruned witness decisions must include a solved-type cause"
-                                )
-                            }),
+                        OverloadAllPrunedCause {
+                            solved_constraints,
+                        },
                     )
                 } else {
                     None
@@ -2572,9 +2586,16 @@ impl Solver {
                             want: q.as_gradual_type(),
                             error_kind: ErrorKind::IncompatibleOverloadResidual,
                             message_override: Some(format!(
-                                "Overload type was not compatible with the solved type `{}` of type variable `{}`",
-                                all_pruned_cause.solved_ty.clone().deterministic_printing(),
-                                all_pruned_cause.quantified_name,
+                                "Overload type was not compatible with solved type variables: {}",
+                                all_pruned_cause
+                                    .solved_constraints
+                                    .iter()
+                                    .map(|constraint| format!(
+                                        "{} = {}",
+                                        constraint.quantified_name,
+                                        constraint.solved_ty.clone().deterministic_printing()
+                                    ))
+                                    .join(", "),
                             )),
                             error: SubsetError::Other,
                         });

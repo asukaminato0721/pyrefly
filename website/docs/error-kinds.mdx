@@ -652,7 +652,7 @@ def f(x): ...
 def project[S](func: Callable[[S], S], y: S) -> Callable[[], S]:
     return lambda: y
 
-project(f, 1)  # Overload type was not compatible with the solved type `int` of type variable `S`
+project(f, 1)  # Overload type was not compatible with solved type variables: S = int
 ```
 
 ## inconsistent-inheritance

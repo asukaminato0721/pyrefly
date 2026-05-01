@@ -576,7 +576,7 @@ def f(x: int) -> float: ...  # E: Overload return type `float` is not assignable
 def f(x: str) -> str: ...  # E: Overload return type `str` is not assignable to implementation return type `None`
 def f(x): ...
 
-result = project(f, 1)  # E: Overload type was not compatible with the solved type `int` of type variable `S`
+result = project(f, 1)  # E: Overload type was not compatible with solved type variables: S = int
 reveal_type(result)  # E: revealed type: (Never) -> int
 "#,
 );
