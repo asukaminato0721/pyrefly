@@ -207,6 +207,30 @@ impl SpecialExport {
         }
     }
 
+    /// Returns true if subscripting this export produces a type expression,
+    /// even in a value context (e.g. `list["A | B"]`).
+    pub fn is_static_type_subscript(self) -> bool {
+        matches!(
+            self,
+            Self::Union
+                | Self::Optional
+                | Self::Annotated
+                | Self::Callable
+                | Self::BuiltinsDict
+                | Self::TypingDict
+                | Self::BuiltinsList
+                | Self::TypingList
+                | Self::BuiltinsTuple
+                | Self::TypingTuple
+                | Self::BuiltinsType
+                | Self::TypingType
+                | Self::BuiltinsSet
+                | Self::BuiltinsFrozenset
+                | Self::TypingMapping
+                | Self::TypeForm
+        )
+    }
+
     /// Returns true if this is a builtin type that has a single positional
     /// slot in pattern matching that binds the entire narrowed value.
     /// These types are: bool, bytearray, bytes, dict, float, frozenset, int, list, set, str, and tuple
