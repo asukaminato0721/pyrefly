@@ -287,14 +287,12 @@ pub enum ErrorKind {
     RedundantCondition,
     /// Raised by a call to reveal_type().
     RevealType,
+    /// Passing a string to something that expects an iterable of strings.
+    StringAsIterable,
     /// DEPRECATED: use [ImplicitAnyAttribute] (`implicit-any-attribute`) instead.
     /// Kept so that existing `# pyrefly: ignore[unannotated-attribute]` comments
     /// and config entries continue to work. This variant is never emitted by
     /// the type checker.
-    /// An attribute is missing a type annotation and is initialized with the `None` literal.
-    /// Passing a string to something that expects an iterable of strings.
-    StringAsIterable,
-    /// An attribute is missing a type annotation and is initialized with the `None` literal.
     UnannotatedAttribute,
     /// DEPRECATED: use [ImplicitAnyParameter] (`implicit-any-parameter`) instead.
     /// Kept so that existing `# pyrefly: ignore[unannotated-parameter]` comments
