@@ -1352,13 +1352,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
     /// during the failing computation are rolled back by popping the map back to
     /// the saved size, invalidating intermediate results that may have relied on
     /// a coinductive assumption that turned out to be false.
-    pub fn is_subset_eq_impl(
-        &mut self,
-        got: &Type,
-        want: &Type,
-        call_context: &CallContext,
-    ) -> Result<(), SubsetError> {
-        let context_key = call_context.subset_cache_context();
+    pub fn is_subset_eq_impl(&mut self, got: &Type, want: &Type) -> Result<(), SubsetError> {
+        let context_key = self.active_call_context.subset_cache_context();
         let cache_key = if self.can_be_recursive(got, want) {
             // Cache keys include residual context identity so witness-scoped
             // comparisons do not suppress context-sensitive side effects.
@@ -1386,7 +1381,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         } else {
             None
         };
-        let res = self.is_subset_eq_no_recursive_check(got, want, call_context);
+        let res = self.is_subset_eq_no_recursive_check(got, want);
         if let Some(key) = cache_key {
             match &res {
                 Ok(()) => {
@@ -1448,7 +1443,6 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         &mut self,
         got: &Type,
         want: &Type,
-        call_context: &CallContext,
     ) -> Result<(), SubsetError> {
         match (got, want) {
             (Type::Any(_), _) => {
@@ -1766,9 +1760,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     metadata: _,
                 }),
             ) => {
-                let params_context = call_context.with_negated_side();
+                let params_context = self.active_call_context.with_negated_side();
                 self.is_subset_params_with_context(&l.params, &u.params, &params_context)?;
-                let ret_context = call_context.with_preserved_side();
+                let ret_context = self.active_call_context.with_preserved_side();
                 self.is_subset_eq_with_context(&l.ret, &u.ret, &ret_context)
             }
             (Type::TypedDict(TypedDict::Anonymous(got)), Type::TypedDict(want)) => {
@@ -2133,12 +2127,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             }
             // ClassType(int) <: Dim[...]
             // Redirect: int <: Dim[...] becomes Dim[any_implicit] <: Dim[...]
-            (Type::ClassType(cls), want @ Type::Dim(_)) if cls.is_builtin("int") => self
-                .is_subset_eq_impl(
-                    &self.solver.heap.mk_dim(Type::any_implicit()),
-                    want,
-                    call_context,
-                ),
+            (Type::ClassType(cls), want @ Type::Dim(_)) if cls.is_builtin("int") => {
+                self.is_subset_eq_impl(&self.solver.heap.mk_dim(Type::any_implicit()), want)
+            }
             // ========== End Dim Subtyping Rules ==========
             (Type::Literal(l_lit), Type::Literal(u_lit)) => {
                 ok_or(l_lit.value == u_lit.value, SubsetError::Other)
@@ -2261,8 +2252,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                 let forall_type = Type::Forall(forall.clone());
                 // Finalizing the quantified vars returns instantiation errors
                 let (vs, got) = self.type_order.instantiate_fresh_forall((**forall).clone());
-                let mut witness_context =
-                    self.make_forall_witness_context(&forall_type, &vs, want, call_context);
+                let mut witness_context = self.make_forall_witness_context(&forall_type, &vs, want);
                 let result = self.is_subset_eq_with_context(&got, want, &witness_context);
                 if result.is_ok()
                     && witness_context.residual_hooks_enabled()

@@ -3309,7 +3309,7 @@ pub struct Subset<'a, Ans: LookupAnswer> {
     pub(crate) solver: &'a Solver,
     pub type_order: TypeOrder<'a, Ans>,
     gas: Gas,
-    active_call_context: CallContext,
+    pub(crate) active_call_context: CallContext,
     /// Memoization cache for recursive subset checks (protocols and recursive type aliases).
     /// Doubles as a cycle detector: `InProgress` entries break cycles via coinductive
     /// reasoning by optimistically returning `Ok(())`.
@@ -3366,9 +3366,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         got: &Type,
         vars: &QuantifiedHandle,
         want: &Type,
-        call_context: &CallContext,
     ) -> CallContext {
-        let argument_side = call_context.argument_side();
+        let argument_side = self.active_call_context.argument_side();
         CallContext::with_witness_and_side(
             ResidualWitnessContext {
                 identity: ResidualIdentity {
@@ -3394,8 +3393,25 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
     }
 
     pub fn is_subset_eq(&mut self, got: &Type, want: &Type) -> Result<(), SubsetError> {
-        let call_context = self.active_call_context.clone();
-        self.is_subset_eq_with_context(got, want, &call_context)
+        if self.gas.stop() {
+            return Err(SubsetError::Other);
+        }
+        if matches!(got, Type::Materialization) {
+            let res = self.is_subset_eq(
+                &self
+                    .solver
+                    .heap
+                    .mk_class_type(self.type_order.stdlib().object().clone()),
+                want,
+            );
+            return res;
+        } else if matches!(want, Type::Materialization) {
+            let res = self.is_subset_eq(got, &self.solver.heap.mk_never());
+            return res;
+        }
+        let res = self.is_subset_eq_var(got, want);
+        self.gas.restore();
+        res
     }
 
     pub fn is_subset_eq_with_context(
@@ -3405,30 +3421,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         call_context: &CallContext,
     ) -> Result<(), SubsetError> {
         let old_context = mem::replace(&mut self.active_call_context, call_context.clone());
-        if self.gas.stop() {
-            // We really have no idea. Just give up for now.
-            self.active_call_context = old_context;
-            return Err(SubsetError::Other);
-        }
-        if matches!(got, Type::Materialization) {
-            let res = self.is_subset_eq_with_context(
-                &self
-                    .solver
-                    .heap
-                    .mk_class_type(self.type_order.stdlib().object().clone()),
-                want,
-                call_context,
-            );
-            self.active_call_context = old_context;
-            return res;
-        } else if matches!(want, Type::Materialization) {
-            let res =
-                self.is_subset_eq_with_context(got, &self.solver.heap.mk_never(), call_context);
-            self.active_call_context = old_context;
-            return res;
-        }
-        let res = self.is_subset_eq_var(got, want, call_context);
-        self.gas.restore();
+        let res = self.is_subset_eq(got, want);
         self.active_call_context = old_context;
         res
     }
@@ -3620,13 +3613,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
     /// inequality, but not when it is on the left. This means that, e.g.:
     /// - if `f[T](x: T) -> T: ...`, then `f(1)` gets solved to `int`
     /// - if `f(x: Literal[0]): ...`, then `x = []; f(x[0])` results in `x: list[Literal[0]]`
-    fn is_subset_eq_var(
-        &mut self,
-        got: &Type,
-        want: &Type,
-        call_context: &CallContext,
-    ) -> Result<(), SubsetError> {
-        if let Some(witness) = call_context.residual_witness() {
+    fn is_subset_eq_var(&mut self, got: &Type, want: &Type) -> Result<(), SubsetError> {
+        if let Some(witness) = self.active_call_context.residual_witness() {
             let _ = (
                 &witness.identity,
                 &witness.origin_vars,
@@ -4063,7 +4051,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     }
                 }
             }
-            _ => self.is_subset_eq_impl(got, want, call_context),
+            _ => self.is_subset_eq_impl(got, want),
         }
     }
 
