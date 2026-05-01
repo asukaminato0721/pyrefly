@@ -735,6 +735,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         false
     }
 
+    /// Does any union branch have the attribute without `__getattr__`/`__getattribute__` fallback?
+    pub fn has_attr_without_dynamic_fallback(&self, base: &Type, attr_name: &Name) -> bool {
+        if let Some(attr_base) = self.as_attribute_base(base.clone()) {
+            let lookup_result = self.lookup_attr_from_attribute_base(attr_base, attr_name);
+            return lookup_result.internal_error.is_empty() && !lookup_result.found.is_empty();
+        }
+        false
+    }
+
     /// Compute the narrowed attribute type for `hasattr` narrowing.
     /// Returns `None` if the attribute exists on all union members (no narrowing needed).
     /// Otherwise returns `Some(ty)` where `ty` is the union of attribute types from

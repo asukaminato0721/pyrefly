@@ -1534,6 +1534,95 @@ class B:
     "#,
 );
 
+testcase!(
+    test_private_attribute_with_getattr,
+    r#"
+from typing import assert_type
+
+class Foo:
+    def __getattr__(self, attr: str) -> str:
+        return attr
+
+def main(f: Foo) -> None:
+    assert_type(f._foo, str)
+    assert_type(f.__foo, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_getattr_and_explicit_field,
+    r#"
+class A:
+    __secret: int = 0
+    def __getattr__(self, name: str) -> str: ...
+
+class B:
+    def leak(self, a: A):
+        return a.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_getattribute,
+    r#"
+from typing import assert_type
+
+class Foo:
+    def __getattribute__(self, name: str) -> str:
+        return name
+
+def main(f: Foo) -> None:
+    assert_type(f.__bar, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_inherited_getattr,
+    r#"
+from typing import assert_type
+
+class Base:
+    def __getattr__(self, name: str) -> str:
+        return name
+
+class Child(Base):
+    pass
+
+def main(c: Child) -> None:
+    assert_type(c.__foo, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_inherited_field_with_child_getattr,
+    r#"
+class Parent:
+    __secret: int = 0
+
+class Child(Parent):
+    def __getattr__(self, name: str) -> str: ...
+
+class External:
+    def leak(self, c: Child):
+        return c.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
+testcase!(
+    test_private_attribute_mixed_union_with_getattr,
+    r#"
+class A:
+    __secret: int = 0
+
+class Dyn:
+    def __getattr__(self, name: str) -> str: ...
+
+class External:
+    def leak(self, x: A | Dyn):
+        return x.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
 // We allow __attr access on modules, since name mangling only occurs on attributes of classes.
 testcase!(
     test_module_attr_is_not_private,

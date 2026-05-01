@@ -2505,8 +2505,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 return; // Valid private attribute access
             }
         }
-        if !self.has_attr(&value_type, &expect.attr.id) {
-            return; // Don't report this error if the attribute doesn't exist
+        // No defining class to restrict access to — the attribute is only
+        // reachable via dynamic fallback (__getattr__/__getattribute__), so
+        // name mangling is irrelevant.
+        if !self.has_attr_without_dynamic_fallback(&value_type, &expect.attr.id) {
+            return;
         }
         self.error(
             errors,
