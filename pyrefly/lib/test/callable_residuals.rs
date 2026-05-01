@@ -582,6 +582,25 @@ reveal_type(result)  # E: revealed type: (Never) -> int
 );
 
 testcase!(
+    bug = "All-pruned overload witness is ignored when vars are solved to Answer before residual materialization",
+    test_overload_pruning_ignored_when_solved_before_materialization,
+    r#"
+from typing import Callable, overload, reveal_type
+
+def project[T, S](f: Callable[[T], tuple[T, S]], y: T, z: S) -> Callable[[], tuple[T, S]]: ...
+
+@overload
+def f(x: int) -> tuple[int, str]: ...  # E: Overload return type `tuple[int, str]` is not assignable to implementation return type `None`
+@overload
+def f(x: str) -> tuple[str, int]: ...  # E: Overload return type `tuple[str, int]` is not assignable to implementation return type `None`
+def f(x): ...
+
+result = project(f, 1, 1)
+reveal_type(result)  # E: revealed type: () -> tuple[int, int]
+"#,
+);
+
+testcase!(
     test_overload_pruning_collapses_to_single_branch,
     r#"
 from typing import Callable, overload, assert_type, reveal_type
