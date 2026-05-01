@@ -97,7 +97,6 @@ const VAR_LEAK: &str = "Internal error: a variable has leaked from one module to
 /// due to large enums (Type) and lock guards.
 const INITIAL_GAS: Gas = Gas::new(200);
 const MAX_RESIDUAL_FINALIZE_ITERS: usize = 8;
-
 /// Accumulated bounds for a solver variable.
 #[derive(Clone, Debug, Default)]
 struct Bounds {
@@ -828,6 +827,19 @@ impl Solver {
         flattened
     }
 
+    /// Finishing invariant: overload residual branch types must not contain
+    /// overload residual markers. This keeps boundary finalization to one
+    /// overload pass followed by one generic pass.
+    fn flatten_overload_residual_markers(&self, ty: &mut Type) {
+        ty.transform_mut(&mut |inner| {
+            if let Type::CallableResidual(residual) = inner
+                && matches!(&residual.kind, CallableResidualKind::Overload { .. })
+            {
+                *inner = self.residual_fallback_type(residual);
+            }
+        });
+    }
+
     fn promote_callable_to_forall(&self, callable: Callable) -> Type {
         let callable_ty = self
             .heap
@@ -1288,28 +1300,19 @@ impl Solver {
             }
         }
 
+        // Generic residuals can appear under overload branches, so process
+        // overloads first and then generics.
         for phase in [
             CallableResidualFinalizePhase::Overload,
             CallableResidualFinalizePhase::Generic,
         ] {
-            // Phase-specific traversal reports "no change" for residual kinds owned by
-            // the other phase, so both phases must run unconditionally in this order.
-            let mut converged = false;
-            // TODO(stroxler): do we still need this? We should audit the logic - I'm not
-            // confident residuals can nest except for generic residuals inside of overloads.
-            //
-            // This means we might be able to tighten the logic and make it both simpler and cheaper.
             for _ in 0..MAX_RESIDUAL_FINALIZE_ITERS {
                 if !self
                     .finalize_callable_residuals_mut(&mut ty, false, preserve_class_targs, phase)
                     .0
                 {
-                    converged = true;
                     break;
                 }
-            }
-            if !converged {
-                return self.flatten_residual_for_non_target_read(&ty);
             }
         }
         ty
@@ -2169,12 +2172,16 @@ impl Solver {
             .branches
             .iter()
             .filter(|branch| surviving_branch_indices.contains(&branch.branch_index))
-            .map(|branch| OverloadBranchProjection {
-                branch_index: branch.branch_index,
-                ty: self.materialize_overload_residual_branch_value(
+            .map(|branch| {
+                let mut ty = self.materialize_overload_residual_branch_value(
                     &branch.value,
                     overload_pruning_by_witness,
-                ),
+                );
+                self.flatten_overload_residual_markers(&mut ty);
+                OverloadBranchProjection {
+                    branch_index: branch.branch_index,
+                    ty,
+                }
             })
             .collect::<Vec<_>>();
         match surviving_branches.len() {

@@ -401,6 +401,9 @@ pub enum CallableResidualKind {
     /// If it appears anywhere else, the fallback is `quantified.as_gradual_type()`
     Generic { quantified: Quantified },
     /// Per-var overload residual with identity for cross-var correlation.
+    ///
+    /// Finishing normalizes branch types so an overload residual does not
+    /// contain nested overload residual markers in `branches[*].ty`.
     Overload {
         identity: OverloadResidualIdentity,
         branches: Vec<OverloadBranchProjection>,
