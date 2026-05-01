@@ -839,26 +839,34 @@ impl Solver {
         });
     }
 
+    fn quantified_tparams_for_forall(&self, ty: &Type) -> Arc<TParams> {
+        let mut tparams = Vec::new();
+        ty.for_each_quantified(&mut |q| tparams.push(q.clone()));
+        tparams.sort();
+        tparams.dedup();
+        Arc::new(TParams::new(tparams))
+    }
+
     fn promote_callable_to_forall(&self, callable: Callable) -> Type {
         let callable_ty = self
             .heap
             .mk_callable(callable.params.clone(), callable.ret.clone());
-        let mut tparams = Vec::new();
-        callable_ty.for_each_quantified(&mut |q| tparams.push(q.clone()));
-        tparams.sort();
-        tparams.dedup();
-        Forallable::Callable(callable).forall(Arc::new(TParams::new(tparams)))
+        Forallable::Callable(callable).forall(self.quantified_tparams_for_forall(&callable_ty))
     }
 
     fn promote_function_to_forall(&self, func: Function) -> Type {
         let callable_ty = self
             .heap
             .mk_callable(func.signature.params.clone(), func.signature.ret.clone());
-        let mut tparams = Vec::new();
-        callable_ty.for_each_quantified(&mut |q| tparams.push(q.clone()));
-        tparams.sort();
-        tparams.dedup();
-        Forallable::Function(func).forall(Arc::new(TParams::new(tparams)))
+        Forallable::Function(func).forall(self.quantified_tparams_for_forall(&callable_ty))
+    }
+
+    fn should_promote_after_callable_finalization(
+        &self,
+        consumed_residual: bool,
+        callable_slot: bool,
+    ) -> bool {
+        consumed_residual && !callable_slot
     }
 
     fn generic_residual_quantified(&self, residual: &CallableResidual) -> Quantified {
@@ -1090,16 +1098,13 @@ impl Solver {
             Type::Callable(callable) => {
                 let (changed, consumed_residual) =
                     self.finalize_callable_type_mut(callable, preserve_class_targs, phase);
-                if consumed_residual {
-                    if callable_slot {
-                        (changed, true)
-                    } else {
-                        let promoted = self.promote_callable_to_forall((**callable).clone());
-                        *ty = promoted;
-                        (true, true)
-                    }
+                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
+                {
+                    let promoted = self.promote_callable_to_forall((**callable).clone());
+                    *ty = promoted;
+                    (true, true)
                 } else {
-                    (changed, false)
+                    (changed, consumed_residual)
                 }
             }
             Type::Function(function) => {
@@ -1108,7 +1113,8 @@ impl Solver {
                 if !changed {
                     return (false, false);
                 }
-                if consumed_residual && !callable_slot {
+                if self.should_promote_after_callable_finalization(consumed_residual, callable_slot)
+                {
                     let promoted = self.promote_function_to_forall((**function).clone());
                     *ty = promoted;
                     (true, true)
