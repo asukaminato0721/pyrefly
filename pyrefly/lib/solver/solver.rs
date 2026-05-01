@@ -51,6 +51,7 @@ use vec1::vec1;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::AttrSubsetError;
+use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
@@ -2569,6 +2570,7 @@ impl Solver {
                             name: q.name().clone(),
                             got: Type::never(),
                             want: q.as_gradual_type(),
+                            error_kind: ErrorKind::IncompatibleOverloadResidual,
                             message_override: Some(format!(
                                 "Overload type was not compatible with the solved type `{}` of type variable `{}`",
                                 all_pruned_cause.solved_ty.clone().deterministic_printing(),
@@ -3006,12 +3008,17 @@ pub struct TypeVarSpecializationError {
     pub name: Name,
     pub got: Type,
     pub want: Type,
+    pub error_kind: ErrorKind,
     pub message_override: Option<String>,
     #[allow(dead_code)]
     pub error: SubsetError,
 }
 
 impl TypeVarSpecializationError {
+    pub fn error_kind(&self) -> ErrorKind {
+        self.error_kind
+    }
+
     pub fn to_error_msg<Ans: LookupAnswer>(self, ans: &AnswersSolver<Ans>) -> String {
         if let Some(message_override) = self.message_override {
             return message_override;
@@ -3632,6 +3639,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                         name: q.name().clone(),
                         got: t1_p.clone(),
                         want: bound,
+                        error_kind: ErrorKind::BadSpecialization,
                         message_override: None,
                         error: err_p,
                     };
@@ -3651,6 +3659,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     name: q.name().clone(),
                     got: t1_p.clone(),
                     want: bound,
+                    error_kind: ErrorKind::BadSpecialization,
                     message_override: None,
                     error: err_p,
                 };
@@ -3936,6 +3945,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                         name,
                                         got: t2.clone(),
                                         want: bound,
+                                        error_kind: ErrorKind::BadSpecialization,
                                         message_override: None,
                                         error: e,
                                     },
@@ -3951,6 +3961,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                                         name,
                                         got: t2.clone(),
                                         want: bound,
+                                        error_kind: ErrorKind::BadSpecialization,
                                         message_override: None,
                                         error: e,
                                     },

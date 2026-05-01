@@ -713,10 +713,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
     ) {
         for e in specialization_errors {
+            let kind = e.error_kind();
             self.error(
                 errors,
                 range,
-                ErrorInfo::new(ErrorKind::BadSpecialization, context),
+                ErrorInfo::new(kind, context),
                 e.to_error_msg(self),
             );
         }
