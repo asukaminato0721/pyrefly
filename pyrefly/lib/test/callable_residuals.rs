@@ -584,7 +584,7 @@ reveal_type(result)  # E: revealed type: (Never) -> int
 testcase!(
     test_overload_pruning_collapses_to_single_branch,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
 
@@ -598,15 +598,14 @@ def f(x): ...
 
 result = project(f, "ok")
 reveal_type(result)  # E: revealed type: (int) -> str
-out = result(1)
-reveal_type(out)  # E: revealed type: str
+assert_type(result(1), str)
 "#,
 );
 
 testcase!(
     test_overload_pruning_three_way_to_two_way,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
 
@@ -620,17 +619,15 @@ def f(x): ...
 
 result = project(f, 1)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: int
-out_b = result("ok")
-reveal_type(out_b)  # E: revealed type: int
+assert_type(result(1), int)
+assert_type(result("ok"), int)
 "#,
 );
 
 testcase!(
     test_overload_pruning_no_pruning_baseline,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 def project[T, S](f: Callable[[T], S], y: S) -> Callable[[T], S]: ...
 
@@ -644,17 +641,15 @@ def f(x) -> str: ...
 # No pruning occurs; the result should be a full overload.
 result = project(f, "ok")
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: str
-out_b = result(b"ok")
-reveal_type(out_b)  # E: revealed type: str
+assert_type(result(1), str)
+assert_type(result(b"ok"), str)
 "#,
 );
 
 testcase!(
     test_overload_residual_equivalent_branch_collapse,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 def project[T, S](f: Callable[[T], S], y: S) -> Callable[[int], S]: ...
 
@@ -666,15 +661,14 @@ def f(x) -> str: ...
 
 result = project(f, "ok")
 reveal_type(result)  # E: revealed type: (int) -> str
-out = result(1)
-reveal_type(out)  # E: revealed type: str
+assert_type(result(1), str)
 "#,
 );
 
 testcase!(
     test_nested_higher_order_overload,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 def identity[A, R](x: Callable[[A], R]) -> Callable[[A], R]:
     return x
@@ -687,17 +681,15 @@ def f(x) -> str | int: ...
 
 result = identity(identity)(f)
 reveal_type(result)  # E: revealed type: Overload[
-out_a = result(1)
-reveal_type(out_a)  # E: revealed type: str
-out_b = result("ok")
-reveal_type(out_b)  # E: revealed type: int
+assert_type(result(1), str)
+assert_type(result("ok"), int)
 "#,
 );
 
 testcase!(
     test_overload_through_class_tparam,
     r#"
-from typing import Callable, overload, reveal_type
+from typing import Callable, overload, assert_type, reveal_type
 
 class Wrapper[A, R]:
     fn: Callable[[A], R]
@@ -714,10 +706,8 @@ def f(x) -> str | int: ...
 
 wrapper = Wrapper(f)
 reveal_type(wrapper.fn)  # E: revealed type: Overload[
-out_a = wrapper(1)
-reveal_type(out_a)  # E: revealed type: str
-out_b = wrapper("ok")
-reveal_type(out_b)  # E: revealed type: int
+assert_type(wrapper(1), str)
+assert_type(wrapper("ok"), int)
 "#,
 );
 
