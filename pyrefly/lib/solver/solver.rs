@@ -2422,9 +2422,13 @@ impl Solver {
             .collect()
     }
 
+    // Quantified finishing entrypoints. Keep these together so callsites can
+    // choose the right mode (no-pruning vs pruning) without hunting around.
+    ///
+    /// Finish a specific quantified set without pruning overload branches.
+    ///
     /// Called after a quantified function has been called. Given
-    /// `def f[T](x: int): list[T]`, this runs after generic solving
-    /// completes.
+    /// `def f[T](x: int): list[T]`, this runs after generic solving completes.
     ///
     /// If `infer_with_first_use` is true, unresolved `T` behaves like an
     /// empty-container partial type and may be pinned by first use.
@@ -2438,6 +2442,37 @@ impl Solver {
         self.finish_quantified_with_subset(vs, infer_with_first_use, &mut |_got, _want| Ok(()))
     }
 
+    /// Finish a specific quantified set with overload pruning checks driven by
+    /// the given `TypeOrder`.
+    ///
+    /// Useful in call/callable paths where we already have a type-order
+    /// context and want pruning decisions to use that same subset relation.
+    pub fn finish_quantified_with_type_order<Ans: LookupAnswer>(
+        &self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+        type_order: TypeOrder<Ans>,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        let mut subset = self.subset(type_order);
+        self.finish_quantified_with_subset(vs, infer_with_first_use, &mut |got, want| {
+            subset.is_subset_eq_probe_for_pruning(got, want)
+        })
+    }
+
+    /// Finish all quantified vars reachable from `ty` using the solver default
+    /// inference mode.
+    ///
+    /// Useful at boundaries where the caller has a type but not an explicit
+    /// quantified handle.
+    pub fn finish_all_quantified(&self, ty: &Type) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        let vs = QuantifiedHandle(ty.collect_maybe_placeholder_vars());
+        self.finish_quantified(vs, self.infer_with_first_use)
+    }
+
+    /// Core quantified-finishing implementation used by all wrappers.
+    ///
+    /// The injected `is_subset` callback controls whether/how overload branch
+    /// pruning compatibility is checked.
     pub(crate) fn finish_quantified_with_subset(
         &self,
         vs: QuantifiedHandle,
@@ -2578,11 +2613,6 @@ impl Solver {
             Ok(err) => Err(err),
             Err(_) => Ok(()),
         }
-    }
-
-    pub fn finish_all_quantified(&self, ty: &Type) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        let vs = QuantifiedHandle(ty.collect_maybe_placeholder_vars());
-        self.finish_quantified(vs, self.infer_with_first_use)
     }
 
     /// Given targs which contain quantified (as come from `instantiate`), replace the quantifieds
@@ -2955,18 +2985,6 @@ impl Solver {
     ) -> Result<(), SubsetError> {
         let mut subset = self.subset(type_order);
         subset.is_equivalent(got, want)
-    }
-
-    pub fn finish_quantified_with_type_order<Ans: LookupAnswer>(
-        &self,
-        vs: QuantifiedHandle,
-        infer_with_first_use: bool,
-        type_order: TypeOrder<Ans>,
-    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
-        let mut subset = self.subset(type_order);
-        self.finish_quantified_with_subset(vs, infer_with_first_use, &mut |got, want| {
-            subset.is_subset_eq_probe_for_pruning(got, want)
-        })
     }
 
     fn subset<'a, Ans: LookupAnswer>(&'a self, type_order: TypeOrder<'a, Ans>) -> Subset<'a, Ans> {
