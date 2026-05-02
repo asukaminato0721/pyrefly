@@ -22,5 +22,6 @@ pub(crate) mod move_module;
 pub(crate) mod pyrefly_ignore;
 pub(crate) mod pytest_fixture;
 pub(crate) mod redundant_cast;
+pub(crate) mod remove_unused_variable;
 pub(crate) mod safe_delete;
 pub(crate) mod types;
