@@ -17,6 +17,8 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::mem;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use itertools::Either;
 use itertools::Itertools;
@@ -313,6 +315,10 @@ pub struct QuantifiedHandle(Vec<Var>);
 impl QuantifiedHandle {
     pub fn empty() -> Self {
         Self(Vec::new())
+    }
+
+    pub(crate) fn vars(&self) -> &[Var] {
+        &self.0
     }
 
     /// Split the handle into (vars in ty, vars not in ty)
@@ -2570,6 +2576,118 @@ impl Solver {
         })
     }
 
+    /// Finish quantified vars at a call boundary by consuming tracked fresh
+    /// quantified vars from `CallContext`, then finishing the reachable
+    /// quantified closure from explicit roots plus tracked roots.
+    pub fn finish_quantified_with_type_order_and_call_context<Ans: LookupAnswer>(
+        &self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+        type_order: TypeOrder<Ans>,
+        call_context: &CallContext,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        let tracked_fresh_vars = call_context.take_deferred_quantified_vars();
+        let overload_witness_payloads = call_context.take_overload_witness_payloads();
+        call_context.mark_boundary_consumed_and_drained();
+        let payload_vars: SmallSet<Var> = overload_witness_payloads
+            .values()
+            .flat_map(|branch_captures| branch_captures.iter())
+            .flat_map(|capture| capture.values.keys().copied())
+            .collect();
+        let mut roots: SmallSet<Var> = vs.0.into_iter().collect();
+        roots.extend(tracked_fresh_vars.0);
+        // Forall instantiation during call analysis can unify call-scope vars
+        // with additional fresh vars that are only visible through Answer /
+        // ResidualAnswer payloads. Finish the full reachable closure so no
+        // reachable Variable::Quantified can leak to pinning.
+        //
+        // We also must include reachable vars that already became Answer but
+        // still have pending instantiation errors. Those errors are surfaced by
+        // finish_quantified, so excluding Answer vars here can silently drop
+        // call-site specialization diagnostics.
+        let roots = roots.into_iter().collect::<Vec<_>>();
+        let mut already_finished: SmallSet<Var> = SmallSet::new();
+        loop {
+            // Fixed-point: finishing can mutate solver state and expose new
+            // reachable vars that also require finishing.
+            let reachable_finish_vars = self.reachable_finish_vars_from_roots(&roots);
+            let mut next_round: Vec<Var> = reachable_finish_vars
+                .into_iter()
+                .filter(|var| !already_finished.contains(var))
+                .collect();
+            // Payload-driven overload pruning must consider solved vars even if
+            // they already collapsed to `Answer` before finishing and therefore
+            // are not selected by reachability-based finishing alone.
+            next_round.extend(
+                payload_vars
+                    .iter()
+                    .copied()
+                    .filter(|var| !already_finished.contains(var)),
+            );
+            next_round.sort_unstable();
+            next_round.dedup();
+            if next_round.is_empty() {
+                break;
+            }
+            already_finished.extend(next_round.iter().copied());
+            let mut subset = self.subset(type_order);
+            self.finish_quantified_with_subset_and_payloads(
+                QuantifiedHandle(next_round),
+                infer_with_first_use,
+                &mut |got, want| subset.is_subset_eq_probe_for_pruning(got, want),
+                Some(&overload_witness_payloads),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn reachable_finish_vars_from_roots(&self, roots: &[Var]) -> SmallSet<Var> {
+        if roots.is_empty() {
+            return SmallSet::new();
+        }
+        let variables = self.variables.lock();
+        let instantiation_errors = self.instantiation_errors.read();
+        let mut visited: SmallSet<Var> = SmallSet::new();
+        let mut reachable_finish_vars: SmallSet<Var> = SmallSet::new();
+        let mut stack = roots.to_vec();
+        while let Some(var) = stack.pop() {
+            if !visited.insert(var) {
+                continue;
+            }
+            let variable = variables.get(var);
+            let needs_finish = match &*variable {
+                Variable::Quantified { .. } => true,
+                Variable::Answer(_) | Variable::ResidualAnswer { .. } => {
+                    instantiation_errors.contains_key(&var)
+                }
+                _ => false,
+            };
+            if needs_finish {
+                reachable_finish_vars.insert(var);
+            }
+            match &*variable {
+                Variable::Answer(ty) => {
+                    stack.extend(ty.collect_maybe_placeholder_vars());
+                }
+                Variable::ResidualAnswer { target_vars: _, ty } => {
+                    // `target_vars` are read-gates for residual visibility,
+                    // not ownership edges for finishing reachability.
+                    stack.extend(ty.collect_maybe_placeholder_vars());
+                }
+                Variable::Quantified { .. } => {}
+                Variable::Unwrap(bounds) => {
+                    for ty in bounds.lower.iter().chain(bounds.upper.iter()) {
+                        stack.extend(ty.collect_maybe_placeholder_vars());
+                    }
+                }
+                Variable::PartialQuantified(_)
+                | Variable::PartialContained(_)
+                | Variable::Recursive => {}
+            }
+        }
+        reachable_finish_vars
+    }
+
     /// Finish all quantified vars reachable from `ty` using the solver default
     /// inference mode.
     ///
@@ -3499,6 +3617,10 @@ pub struct CallContext {
     /// Invariant: payload entries are scoped to this call-context lineage and
     /// must not leak across `with_outside_call_context` boundaries.
     overload_witness_payloads: Arc<Mutex<OverloadWitnessPayloadByHash>>,
+    /// Whether this context must be consumed at a solve boundary.
+    require_boundary_consumption: Arc<AtomicBool>,
+    /// Whether deferred state from this context lineage was consumed/drained.
+    boundary_consumed_and_drained: Arc<AtomicBool>,
 }
 
 impl Default for CallContext {
@@ -3508,6 +3630,8 @@ impl Default for CallContext {
             argument_side: ArgumentSide::default(),
             deferred_quantified_vars: Arc::new(Mutex::new(SmallSet::new())),
             overload_witness_payloads: Arc::new(Mutex::new(SmallMap::new())),
+            require_boundary_consumption: Arc::new(AtomicBool::new(false)),
+            boundary_consumed_and_drained: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -3519,6 +3643,18 @@ impl CallContext {
 
     pub fn set_argument_side(&mut self, argument_side: ArgumentSide) {
         self.argument_side = argument_side;
+    }
+
+    pub(crate) fn register_fresh_quantified_vars(&self, vars: &[Var]) {
+        let mut deferred_quantified_vars = self.deferred_quantified_vars.lock();
+        deferred_quantified_vars.extend(vars.iter().copied());
+    }
+
+    pub fn require_boundary_consumption(&self) {
+        self.require_boundary_consumption
+            .store(true, Ordering::Relaxed);
+        self.boundary_consumed_and_drained
+            .store(false, Ordering::Relaxed);
     }
 
     pub fn residual_witness(&self) -> Option<&ResidualWitnessContext> {
@@ -3554,6 +3690,53 @@ impl CallContext {
             }
         } else {
             SubsetCacheContext::Default
+        }
+    }
+
+    pub(crate) fn take_deferred_quantified_vars(&self) -> QuantifiedHandle {
+        let mut deferred_quantified_vars = self.deferred_quantified_vars.lock();
+        QuantifiedHandle(
+            mem::take(&mut *deferred_quantified_vars)
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    pub(crate) fn take_overload_witness_payloads(&self) -> OverloadWitnessPayloadByHash {
+        let mut overload_witness_payloads = self.overload_witness_payloads.lock();
+        mem::take(&mut *overload_witness_payloads)
+    }
+
+    fn mark_boundary_consumed_and_drained(&self) {
+        self.boundary_consumed_and_drained
+            .store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for CallContext {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            if std::thread::panicking()
+                || Arc::strong_count(&self.require_boundary_consumption) != 1
+            {
+                return;
+            }
+            if !self.require_boundary_consumption.load(Ordering::Relaxed) {
+                return;
+            }
+            assert!(
+                self.boundary_consumed_and_drained.load(Ordering::Relaxed),
+                "CallContext dropped without boundary consume/drain",
+            );
+            assert!(
+                self.deferred_quantified_vars.lock().is_empty(),
+                "CallContext dropped with deferred quantified vars still pending",
+            );
+            assert!(
+                self.overload_witness_payloads.lock().is_empty(),
+                "CallContext dropped with overload witness payloads still pending",
+            );
         }
     }
 }
@@ -3704,11 +3887,21 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             &mut self.active_call_context.overload_witness_payloads,
             call_context.overload_witness_payloads.clone(),
         );
+        let old_require_boundary_consumption = mem::replace(
+            &mut self.active_call_context.require_boundary_consumption,
+            call_context.require_boundary_consumption.clone(),
+        );
+        let old_boundary_consumed_and_drained = mem::replace(
+            &mut self.active_call_context.boundary_consumed_and_drained,
+            call_context.boundary_consumed_and_drained.clone(),
+        );
         let res = f(self);
         self.active_call_context.witness = old_witness;
         self.active_call_context.argument_side = old_argument_side;
         self.active_call_context.deferred_quantified_vars = old_deferred_quantified_vars;
         self.active_call_context.overload_witness_payloads = old_overload_witness_payloads;
+        self.active_call_context.require_boundary_consumption = old_require_boundary_consumption;
+        self.active_call_context.boundary_consumed_and_drained = old_boundary_consumed_and_drained;
         res
     }
 
@@ -3746,10 +3939,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             &mut self.active_call_context.argument_side,
             ArgumentSide::NotAnalyzingACall,
         );
-        let old_deferred_quantified_vars = mem::replace(
-            &mut self.active_call_context.deferred_quantified_vars,
-            Arc::new(Mutex::new(SmallSet::new())),
-        );
+        // Keep fresh-var tracking attached to the same boundary while
+        // temporarily disabling residual hooks. Fresh quantified vars created in
+        // this scope must still be finished when the outer boundary drains.
         let old_overload_witness_payloads = mem::replace(
             &mut self.active_call_context.overload_witness_payloads,
             Arc::new(Mutex::new(SmallMap::new())),
@@ -3757,7 +3949,6 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         let res = f(self);
         self.active_call_context.witness = old_witness;
         self.active_call_context.argument_side = old_argument_side;
-        self.active_call_context.deferred_quantified_vars = old_deferred_quantified_vars;
         self.active_call_context.overload_witness_payloads = old_overload_witness_payloads;
         res
     }

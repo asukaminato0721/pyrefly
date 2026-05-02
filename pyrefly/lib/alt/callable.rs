@@ -1385,6 +1385,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) {
         let mut call_context = CallContext::outside();
         call_context.set_argument_side(ArgumentSide::Got);
+        call_context.require_boundary_consumption();
 
         // Look up meta-shape early so we can conditionally collect bound args.
         // Only consult the registry when tensor_shapes is enabled to avoid
@@ -1422,6 +1423,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         } else {
             (QuantifiedHandle::empty(), callable)
         };
+        call_context.register_fresh_quantified_vars(callable_qs.vars());
         let (self_qs, remaining_callable_qs) = if self_obj.is_some()
             && let Some(first_param) = callable.get_first_param()
             // TODO(https://github.com/facebook/pyrefly/issues/105): handle nested vars
@@ -1437,6 +1439,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
         let ctor_qs = if let Some(targs) = ctor_targs.as_mut() {
             let qs = self.solver().freshen_class_targs(targs, self.uniques);
+            call_context.register_fresh_quantified_vars(qs.vars());
             let mp = targs.substitution_map();
             callable.params.visit_mut(&mut |t| t.subst_mut(&mp));
             if let Some(obj) = self_obj.as_mut() {
@@ -1564,10 +1567,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
         let mut errors = self
             .solver()
-            .finish_quantified_with_type_order(
+            .finish_quantified_with_type_order_and_call_context(
                 remaining_callable_qs,
                 self.solver().infer_with_first_use,
                 self.type_order(),
+                &call_context,
             )
             .map_or_else(|e| e.to_vec(), |_| Vec::new());
         if let Err(e) = self.solver().finish_quantified_with_type_order(

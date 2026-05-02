@@ -2248,6 +2248,8 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                 let forall_type = Type::Forall(forall.clone());
                 // Finalizing the quantified vars returns instantiation errors
                 let (vs, got) = self.type_order.instantiate_fresh_forall((**forall).clone());
+                self.active_call_context
+                    .register_fresh_quantified_vars(vs.vars());
                 let argument_side = self.active_argument_side();
                 let witness = self.make_forall_witness(&forall_type, &vs, want);
                 let (result, mut maybe_witness) =

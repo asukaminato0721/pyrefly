@@ -602,7 +602,6 @@ reveal_type(result)  # E: revealed type: () -> tuple[int, int]
 );
 
 testcase!(
-    bug = "Constrained type vars can collapse to Answer before finishing, so overload pruning can miss them",
     test_overload_pruning_ignored_for_constrained_tvar_solved_early,
     r#"
 from typing import Callable, overload, reveal_type
@@ -615,7 +614,7 @@ def f(x: float) -> float: ...  # E: Overload return type `float` is not assignab
 def f(x: bytes) -> bytes: ...  # E: Overload return type `bytes` is not assignable to implementation return type `None`
 def f(x): ...
 
-result = project(f, 1)
+result = project(f, 1)  # E: Overload type was not compatible with solved type variables: unknown = int
 reveal_type(result)  # E: revealed type: (int) -> int
 "#,
 );
