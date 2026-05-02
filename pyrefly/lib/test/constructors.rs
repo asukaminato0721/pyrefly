@@ -820,6 +820,7 @@ takes_Cstr_wrong(C) # E: Argument `type[C]` is not assignable to parameter `x` w
 );
 
 testcase!(
+    bug = "Early finishing of generic residuals is causing false positives here",
     test_init_to_callable_generics,
     r#"
 from typing import Generic, TypeVar, assert_type, Callable

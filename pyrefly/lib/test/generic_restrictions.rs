@@ -668,6 +668,7 @@ assert_type(f(), int)
 );
 
 testcase!(
+    bug = "Early finishing of generic residuals is causing false positives here",
     test_arg_against_typevar_bound,
     r#"
 from typing import Callable, Iterable
