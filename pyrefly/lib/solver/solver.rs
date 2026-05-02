@@ -3491,7 +3491,7 @@ impl ResidualWitnessContext {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CallContext {
     witness: Option<ResidualWitnessContext>,
     argument_side: ArgumentSide,
@@ -3517,13 +3517,8 @@ impl CallContext {
         Self::default()
     }
 
-    pub fn with_argument_side(&self, argument_side: ArgumentSide) -> Self {
-        Self {
-            witness: self.witness.clone(),
-            argument_side,
-            deferred_quantified_vars: self.deferred_quantified_vars.clone(),
-            overload_witness_payloads: self.overload_witness_payloads.clone(),
-        }
+    pub fn set_argument_side(&mut self, argument_side: ArgumentSide) {
+        self.argument_side = argument_side;
     }
 
     pub fn residual_witness(&self) -> Option<&ResidualWitnessContext> {
