@@ -363,40 +363,40 @@ impl CallArgPreEval<'_> {
             })
             .with_context(context.map(|ctx| ctx()))
         };
+        let warn_if_ok = |arg_ty: &Type, ok| {
+            if ok {
+                solver.warn_if_string_as_iterable(arg_ty, hint, range, call_errors);
+            }
+        };
+        let check_type_argument = |arg_ty: &Type| {
+            warn_if_ok(
+                arg_ty,
+                solver.check_type(arg_ty, hint, range, call_errors, tcc),
+            );
+        };
         match self {
             Self::Type(ty, done) => {
                 *done = true;
                 let arg_ty = (*ty).clone();
-                let ok = solver.check_type(&arg_ty, hint, range, call_errors, tcc);
-                if ok {
-                    solver.warn_if_string_as_iterable(&arg_ty, hint, range, call_errors);
-                }
+                check_type_argument(&arg_ty);
                 Some(arg_ty)
             }
             Self::Expr(x, done) => {
                 *done = true;
                 let (got, ok) =
                     solver.check_expr_argument(x, hint, range, arg_errors, call_errors, tcc);
-                if ok {
-                    solver.warn_if_string_as_iterable(&got, hint, range, call_errors);
-                }
+                warn_if_ok(&got, ok);
                 Some(got)
             }
             Self::Star(ty, done) => {
                 *done = vararg;
                 let arg_ty = ty.clone();
-                let ok = solver.check_type(&arg_ty, hint, range, call_errors, tcc);
-                if ok {
-                    solver.warn_if_string_as_iterable(&arg_ty, hint, range, call_errors);
-                }
+                check_type_argument(&arg_ty);
                 Some(arg_ty)
             }
             Self::Fixed(tys, i) => {
                 let arg_ty = tys[*i].clone();
-                let ok = solver.check_type(&arg_ty, hint, range, call_errors, tcc);
-                if ok {
-                    solver.warn_if_string_as_iterable(&arg_ty, hint, range, call_errors);
-                }
+                check_type_argument(&arg_ty);
                 *i += 1;
                 Some(arg_ty)
             }
