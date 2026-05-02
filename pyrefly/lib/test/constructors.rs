@@ -820,7 +820,6 @@ takes_Cstr_wrong(C) # E: Argument `type[C]` is not assignable to parameter `x` w
 );
 
 testcase!(
-    bug = "Early finishing of generic residuals is causing false positives here",
     test_init_to_callable_generics,
     r#"
 from typing import Generic, TypeVar, assert_type, Callable
@@ -828,10 +827,10 @@ T = TypeVar("T")
 class C(Generic[T]):
     def __init__[V](self: "C[V]", x: V) -> None: pass
 def takes_callable[V](x: Callable[[V], C[V]], y: V) -> C[V]: ...
-out1 = takes_callable(C, 42)  # E: Argument `Literal[42]` is not assignable to parameter `y` with type `GenericResidual@V` in function `takes_callable`
-assert_type(out1, C[int])  # E: assert_type(C[GenericResidual@V], C[int]) failed
-out2 = takes_callable(C, "hello")  # E: Argument `Literal['hello']` is not assignable to parameter `y` with type `GenericResidual@V` in function `takes_callable`
-assert_type(out2, C[str])  # E: assert_type(C[GenericResidual@V], C[str]) failed
+out1 = takes_callable(C, 42)
+assert_type(out1, C[int])
+out2 = takes_callable(C, "hello")
+assert_type(out2, C[str])
     "#,
 );
 

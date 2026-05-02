@@ -2246,11 +2246,14 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             ),
             (Type::Forall(forall), _) => {
                 let forall_type = Type::Forall(forall.clone());
-                // Finalizing the quantified vars returns instantiation errors
+                // Instantiate once, then either defer finishing to the active
+                // call boundary (when inside call analysis) or finish eagerly
+                // for ad-hoc subset checks outside calls.
                 let (vs, got) = self.type_order.instantiate_fresh_forall((**forall).clone());
                 self.active_call_context
                     .register_fresh_quantified_vars(vs.vars());
                 let argument_side = self.active_argument_side();
+                let in_call_analysis = !matches!(argument_side, ArgumentSide::NotAnalyzingACall);
                 let witness = self.make_forall_witness(&forall_type, &vs, want);
                 let (result, mut maybe_witness) =
                     self.with_active_witness_and_side(witness, argument_side, |me| {
@@ -2267,15 +2270,24 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     }
                     self.solver.record_generic_residuals_for_witness(witness);
                 }
-                result.and(
-                    self.solver
+                if in_call_analysis {
+                    result
+                } else {
+                    // Even when subset checking fails, finish the fresh vars
+                    // to avoid leaking Quantified placeholders in ad-hoc paths.
+                    let finish_result = self
+                        .solver
                         .finish_quantified_with_subset(
                             vs,
                             self.solver.infer_with_first_use,
                             &mut |got, want| self.is_subset_eq_probe_for_pruning(got, want),
                         )
-                        .map_err(SubsetError::TypeVarSpecialization),
-                )
+                        .map_err(SubsetError::TypeVarSpecialization);
+                    match result {
+                        Ok(()) => finish_result,
+                        Err(e) => Err(e),
+                    }
+                }
             }
             (_, Type::Forall(forall)) => self.is_subset_eq(got, &forall.body.clone().as_type()),
             (Type::TypeVar(l), Type::TypeVar(u)) => {

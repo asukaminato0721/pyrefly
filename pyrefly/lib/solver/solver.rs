@@ -2596,96 +2596,25 @@ impl Solver {
             .collect();
         let mut roots: SmallSet<Var> = vs.0.into_iter().collect();
         roots.extend(tracked_fresh_vars.0);
-        // Forall instantiation during call analysis can unify call-scope vars
-        // with additional fresh vars that are only visible through Answer /
-        // ResidualAnswer payloads. Finish the full reachable closure so no
-        // reachable Variable::Quantified can leak to pinning.
-        //
-        // We also must include reachable vars that already became Answer but
-        // still have pending instantiation errors. Those errors are surfaced by
-        // finish_quantified, so excluding Answer vars here can silently drop
-        // call-site specialization diagnostics.
-        let roots = roots.into_iter().collect::<Vec<_>>();
-        let mut already_finished: SmallSet<Var> = SmallSet::new();
-        loop {
-            // Fixed-point: finishing can mutate solver state and expose new
-            // reachable vars that also require finishing.
-            let reachable_finish_vars = self.reachable_finish_vars_from_roots(&roots);
-            let mut next_round: Vec<Var> = reachable_finish_vars
-                .into_iter()
-                .filter(|var| !already_finished.contains(var))
-                .collect();
-            // Payload-driven overload pruning must consider solved vars even if
-            // they already collapsed to `Answer` before finishing and therefore
-            // are not selected by reachability-based finishing alone.
-            next_round.extend(
-                payload_vars
-                    .iter()
-                    .copied()
-                    .filter(|var| !already_finished.contains(var)),
-            );
-            next_round.sort_unstable();
-            next_round.dedup();
-            if next_round.is_empty() {
-                break;
-            }
-            already_finished.extend(next_round.iter().copied());
-            let mut subset = self.subset(type_order);
-            self.finish_quantified_with_subset_and_payloads(
-                QuantifiedHandle(next_round),
-                infer_with_first_use,
-                &mut |got, want| subset.is_subset_eq_probe_for_pruning(got, want),
-                Some(&overload_witness_payloads),
-            )?;
+        // Solve boundaries explicitly own fresh quantified tracking. We finish
+        // the exact boundary set (explicit roots + fresh vars + payload vars),
+        // rather than using reachability expansion that can miss or overreach.
+        let mut all_boundary_vars: Vec<Var> = roots.into_iter().collect();
+        // Payload-driven overload pruning must include solved vars even if they
+        // already collapsed to `Answer` before boundary finishing.
+        all_boundary_vars.extend(payload_vars);
+        all_boundary_vars.sort_unstable();
+        all_boundary_vars.dedup();
+        if all_boundary_vars.is_empty() {
+            return Ok(());
         }
-        Ok(())
-    }
-
-    fn reachable_finish_vars_from_roots(&self, roots: &[Var]) -> SmallSet<Var> {
-        if roots.is_empty() {
-            return SmallSet::new();
-        }
-        let variables = self.variables.lock();
-        let instantiation_errors = self.instantiation_errors.read();
-        let mut visited: SmallSet<Var> = SmallSet::new();
-        let mut reachable_finish_vars: SmallSet<Var> = SmallSet::new();
-        let mut stack = roots.to_vec();
-        while let Some(var) = stack.pop() {
-            if !visited.insert(var) {
-                continue;
-            }
-            let variable = variables.get(var);
-            let needs_finish = match &*variable {
-                Variable::Quantified { .. } => true,
-                Variable::Answer(_) | Variable::ResidualAnswer { .. } => {
-                    instantiation_errors.contains_key(&var)
-                }
-                _ => false,
-            };
-            if needs_finish {
-                reachable_finish_vars.insert(var);
-            }
-            match &*variable {
-                Variable::Answer(ty) => {
-                    stack.extend(ty.collect_maybe_placeholder_vars());
-                }
-                Variable::ResidualAnswer { target_vars: _, ty } => {
-                    // `target_vars` are read-gates for residual visibility,
-                    // not ownership edges for finishing reachability.
-                    stack.extend(ty.collect_maybe_placeholder_vars());
-                }
-                Variable::Quantified { .. } => {}
-                Variable::Unwrap(bounds) => {
-                    for ty in bounds.lower.iter().chain(bounds.upper.iter()) {
-                        stack.extend(ty.collect_maybe_placeholder_vars());
-                    }
-                }
-                Variable::PartialQuantified(_)
-                | Variable::PartialContained(_)
-                | Variable::Recursive => {}
-            }
-        }
-        reachable_finish_vars
+        let mut subset = self.subset(type_order);
+        self.finish_quantified_with_subset_and_payloads(
+            QuantifiedHandle(all_boundary_vars),
+            infer_with_first_use,
+            &mut |got, want| subset.is_subset_eq_probe_for_pruning(got, want),
+            Some(&overload_witness_payloads),
+        )
     }
 
     /// Finish all quantified vars reachable from `ty` using the solver default

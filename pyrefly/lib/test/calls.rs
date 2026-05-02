@@ -226,11 +226,10 @@ f()  # E: Deprecated
 );
 
 testcase!(
-    bug = "There's a bug in generic overload resolution where we finish too early",
     test_reduce_call,
     r#"
 from functools import reduce
-reduce(max, [1,2])  # E: Overload type was not compatible with solved type variables: _T = int
+reduce(max, [1,2])
     "#,
 );
 
