@@ -166,7 +166,7 @@ testcase!(
 from typing import Literal
 
 good: Literal[Literal[Literal[1, 2, 3], "foo"], 5, None] = "foo"
-bad: Literal[Literal, 3]  # E: Expected a type argument for `Literal`  # E: Invalid type inside literal, `Literal`
+bad: Literal[Literal, 3]  # E: Expected a type argument for `Literal`
 "#,
 );
 

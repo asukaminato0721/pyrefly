@@ -5634,15 +5634,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         if let Type::SpecialForm(special_form) = ty
             && !type_form_context.is_valid_unparameterized_annotation(special_form)
         {
+            // Recover by returning the error sentinel rather than letting the
+            // bare `Type::SpecialForm(_)` propagate. Without this, downstream
+            // code (e.g. `type[TypedDict]` -> attribute access) sees a
+            // `Type::Type(box Type::SpecialForm(_))` it cannot normalize and
+            // emits an internal-error.
             if special_form.can_be_subscripted() {
-                self.error(
+                return self.error(
                     errors,
                     range,
                     ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
                     format!("Expected a type argument for `{special_form}`"),
                 );
             } else {
-                self.error(
+                return self.error(
                     errors,
                     range,
                     ErrorInfo::Kind(ErrorKind::InvalidAnnotation),
