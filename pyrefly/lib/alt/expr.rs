@@ -84,6 +84,7 @@ use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
 use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
+use crate::solver::solver::CallContext;
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
@@ -253,6 +254,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .into_ty()
     }
 
+    pub fn expr_with_separate_check_errors_with_call_context(
+        &self,
+        x: &Expr,
+        check: Option<(&Type, &ErrorCollector, &dyn Fn() -> TypeCheckContext)>,
+        errors: &ErrorCollector,
+        call_context: &CallContext,
+    ) -> Type {
+        self.expr_type_info_with_separate_check_errors_with_call_context(
+            x,
+            check,
+            errors,
+            call_context,
+        )
+        .into_ty()
+    }
+
     /// Infer a type for an expression.
     pub fn expr_infer(&self, x: &Expr, errors: &ErrorCollector) -> Type {
         self.expr_infer_type_info_with_hint(x, None, errors)
@@ -365,6 +382,33 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     errors,
                 );
                 self.check_and_return_type_info(got, hint, x.range(), hint_errors, tcc)
+            }
+            _ => self.expr_infer_type_info_with_hint(x, None, errors),
+        }
+    }
+
+    fn expr_type_info_with_separate_check_errors_with_call_context(
+        &self,
+        x: &Expr,
+        check: Option<(&Type, &ErrorCollector, &dyn Fn() -> TypeCheckContext)>,
+        errors: &ErrorCollector,
+        call_context: &CallContext,
+    ) -> TypeInfo {
+        match check {
+            Some((hint, hint_errors, tcc)) if !hint.is_any() => {
+                let got = self.expr_infer_type_info_with_hint(
+                    x,
+                    Some(HintRef::new(hint, Some(hint_errors))),
+                    errors,
+                );
+                self.check_and_return_type_info_with_call_context(
+                    got,
+                    hint,
+                    x.range(),
+                    hint_errors,
+                    tcc,
+                    call_context,
+                )
             }
             _ => self.expr_infer_type_info_with_hint(x, None, errors),
         }

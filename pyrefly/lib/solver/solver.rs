@@ -140,6 +140,8 @@ pub(crate) struct OverloadBranchCapture {
     values: SmallMap<Var, Variable>,
 }
 
+type OverloadWitnessPayloadByHash = SmallMap<u64, Vec<OverloadBranchCapture>>;
+
 /// Shared context for an overload capture event. Arc'd to avoid duplication across vars.
 #[derive(Clone, Debug)]
 struct OverloadResidualWitness {
@@ -211,6 +213,12 @@ struct SolvedVarWithResiduals {
     quantified_name: Name,
     solved_ty: Type,
     overload_residuals: Vec<OverloadResidualForVar>,
+}
+
+#[derive(Clone, Debug)]
+struct SolvedVarByPayload {
+    quantified_name: Option<Name>,
+    solved_ty: Type,
 }
 
 #[derive(Clone, Debug)]
@@ -2329,6 +2337,21 @@ impl Solver {
                 .all(|upper| is_subset(solved_ty, upper).is_ok())
     }
 
+    fn quantified_name_for_payload_var(
+        &self,
+        branch_value: &Variable,
+        existing_name: Option<Name>,
+        _var: Var,
+    ) -> Name {
+        existing_name
+            .or_else(|| match branch_value {
+                Variable::Quantified { quantified, .. }
+                | Variable::PartialQuantified(quantified) => Some(quantified.name().clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| Name::new("unknown"))
+    }
+
     fn compute_overload_pruning_by_witness(
         &self,
         solved_vars_with_residuals: &[SolvedVarWithResiduals],
@@ -2437,6 +2460,79 @@ impl Solver {
             .collect()
     }
 
+    fn compute_overload_pruning_by_witness_from_payloads(
+        &self,
+        solved_vars_by_payload: &SmallMap<Var, SolvedVarByPayload>,
+        overload_witness_payloads: &OverloadWitnessPayloadByHash,
+        is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
+    ) -> OverloadPruningByWitness {
+        overload_witness_payloads
+            .iter()
+            .filter_map(|(witness_hash, branch_captures)| {
+                let identity = OverloadResidualIdentity {
+                    witness_hash: *witness_hash,
+                };
+                let mut surviving_by_witness: Option<SmallSet<usize>> = None;
+                let mut solved_constraints = Vec::new();
+                for (var, solved_var) in solved_vars_by_payload {
+                    let mut surviving_for_solved_var = SmallSet::new();
+                    let mut saw_var_in_witness = false;
+                    for capture in branch_captures {
+                        let Some(branch_value) = capture.values.get(var) else {
+                            continue;
+                        };
+                        saw_var_in_witness = true;
+                        if self.are_branch_bounds_compatible_with_solved_type(
+                            branch_value,
+                            &solved_var.solved_ty,
+                            is_subset,
+                        ) {
+                            surviving_for_solved_var.insert(capture.branch_index);
+                        }
+                    }
+                    if !saw_var_in_witness {
+                        continue;
+                    }
+                    let quantified_name = branch_captures
+                        .iter()
+                        .find_map(|capture| {
+                            capture.values.get(var).map(|branch_value| {
+                                self.quantified_name_for_payload_var(
+                                    branch_value,
+                                    solved_var.quantified_name.clone(),
+                                    *var,
+                                )
+                            })
+                        })
+                        .unwrap_or_else(|| Name::new("unknown"));
+                    solved_constraints.push(OverloadSolvedConstraint {
+                        quantified_name,
+                        solved_ty: solved_var.solved_ty.clone(),
+                    });
+                    if let Some(existing_surviving) = surviving_by_witness.as_mut() {
+                        existing_surviving.retain(|idx| surviving_for_solved_var.contains(idx));
+                    } else {
+                        surviving_by_witness = Some(surviving_for_solved_var);
+                    }
+                }
+                let surviving_branch_indices = surviving_by_witness?;
+                solved_constraints
+                    .sort_by(|left, right| left.quantified_name.cmp(&right.quantified_name));
+                let all_pruned = surviving_branch_indices.is_empty();
+                let all_pruned_cause =
+                    all_pruned.then_some(OverloadAllPrunedCause { solved_constraints });
+                Some((
+                    identity,
+                    OverloadWitnessPruningDecision {
+                        surviving_branch_indices,
+                        all_pruned,
+                        all_pruned_cause,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     // Quantified finishing entrypoints. Keep these together so callsites can
     // choose the right mode (no-pruning vs pruning) without hunting around.
     ///
@@ -2494,7 +2590,20 @@ impl Solver {
         infer_with_first_use: bool,
         is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
     ) -> Result<(), Vec1<TypeVarSpecializationError>> {
+        self.finish_quantified_with_subset_and_payloads(vs, infer_with_first_use, is_subset, None)
+    }
+
+    fn finish_quantified_with_subset_and_payloads(
+        &self,
+        vs: QuantifiedHandle,
+        infer_with_first_use: bool,
+        is_subset: &mut dyn FnMut(&Type, &Type) -> Result<(), SubsetError>,
+        overload_witness_payloads: Option<&OverloadWitnessPayloadByHash>,
+    ) -> Result<(), Vec1<TypeVarSpecializationError>> {
         let mut err = Vec::new();
+        let use_payload_pruning =
+            overload_witness_payloads.is_some_and(|payloads| !payloads.is_empty());
+        let mut solved_quantified_names_by_var: SmallMap<Var, Name> = SmallMap::new();
         let mut solved_vars_with_residuals = Vec::new();
         let lock = self.variables.lock();
         for &v in &vs.0 {
@@ -2519,14 +2628,20 @@ impl Solver {
                     let original_bounds = mem::take(bounds);
                     if let Some(bound) = self.solve_bounds(original_bounds.clone()) {
                         let quantified_name = q.name().clone();
-                        let overload_residuals = overload_residuals.clone();
                         let solved_ty = bound.clone();
+                        let captured_overload_residuals =
+                            (!use_payload_pruning).then(|| overload_residuals.clone());
+                        if use_payload_pruning {
+                            solved_quantified_names_by_var.insert(v, quantified_name.clone());
+                        }
                         *variable = Variable::Answer(bound);
-                        solved_vars_with_residuals.push(SolvedVarWithResiduals {
-                            quantified_name,
-                            solved_ty,
-                            overload_residuals,
-                        });
+                        if let Some(overload_residuals) = captured_overload_residuals {
+                            solved_vars_with_residuals.push(SolvedVarWithResiduals {
+                                quantified_name,
+                                solved_ty,
+                                overload_residuals,
+                            });
+                        }
                     } else {
                         *bounds = original_bounds;
                     }
@@ -2536,8 +2651,33 @@ impl Solver {
         }
         drop(lock);
 
-        let overload_pruning_by_witness =
-            self.compute_overload_pruning_by_witness(&solved_vars_with_residuals, is_subset);
+        let overload_pruning_by_witness = if use_payload_pruning {
+            let overload_witness_payloads = overload_witness_payloads.unwrap_or_else(|| {
+                unreachable!("payload pruning requires call-context witness payloads")
+            });
+            let lock = self.variables.lock();
+            let solved_vars_by_payload: SmallMap<Var, SolvedVarByPayload> =
+                vs.0.iter()
+                    .filter_map(|&v| match &*lock.get(v) {
+                        Variable::Answer(solved_ty) => Some((
+                            v,
+                            SolvedVarByPayload {
+                                quantified_name: solved_quantified_names_by_var.get(&v).cloned(),
+                                solved_ty: solved_ty.clone(),
+                            },
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+            drop(lock);
+            self.compute_overload_pruning_by_witness_from_payloads(
+                &solved_vars_by_payload,
+                overload_witness_payloads,
+                is_subset,
+            )
+        } else {
+            self.compute_overload_pruning_by_witness(&solved_vars_with_residuals, is_subset)
+        };
         for decision in overload_pruning_by_witness.values() {
             if !decision.all_pruned {
                 continue;
@@ -3351,10 +3491,25 @@ impl ResidualWitnessContext {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CallContext {
     witness: Option<ResidualWitnessContext>,
     argument_side: ArgumentSide,
+    deferred_quantified_vars: Arc<Mutex<SmallSet<Var>>>,
+    /// Invariant: payload entries are scoped to this call-context lineage and
+    /// must not leak across `with_outside_call_context` boundaries.
+    overload_witness_payloads: Arc<Mutex<OverloadWitnessPayloadByHash>>,
+}
+
+impl Default for CallContext {
+    fn default() -> Self {
+        Self {
+            witness: None,
+            argument_side: ArgumentSide::default(),
+            deferred_quantified_vars: Arc::new(Mutex::new(SmallSet::new())),
+            overload_witness_payloads: Arc::new(Mutex::new(SmallMap::new())),
+        }
+    }
 }
 
 impl CallContext {
@@ -3366,6 +3521,8 @@ impl CallContext {
         Self {
             witness: self.witness.clone(),
             argument_side,
+            deferred_quantified_vars: self.deferred_quantified_vars.clone(),
+            overload_witness_payloads: self.overload_witness_payloads.clone(),
         }
     }
 
@@ -3544,9 +3701,19 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             &mut self.active_call_context.argument_side,
             call_context.argument_side,
         );
+        let old_deferred_quantified_vars = mem::replace(
+            &mut self.active_call_context.deferred_quantified_vars,
+            call_context.deferred_quantified_vars.clone(),
+        );
+        let old_overload_witness_payloads = mem::replace(
+            &mut self.active_call_context.overload_witness_payloads,
+            call_context.overload_witness_payloads.clone(),
+        );
         let res = f(self);
         self.active_call_context.witness = old_witness;
         self.active_call_context.argument_side = old_argument_side;
+        self.active_call_context.deferred_quantified_vars = old_deferred_quantified_vars;
+        self.active_call_context.overload_witness_payloads = old_overload_witness_payloads;
         res
     }
 
@@ -3584,9 +3751,19 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             &mut self.active_call_context.argument_side,
             ArgumentSide::NotAnalyzingACall,
         );
+        let old_deferred_quantified_vars = mem::replace(
+            &mut self.active_call_context.deferred_quantified_vars,
+            Arc::new(Mutex::new(SmallSet::new())),
+        );
+        let old_overload_witness_payloads = mem::replace(
+            &mut self.active_call_context.overload_witness_payloads,
+            Arc::new(Mutex::new(SmallMap::new())),
+        );
         let res = f(self);
         self.active_call_context.witness = old_witness;
         self.active_call_context.argument_side = old_argument_side;
+        self.active_call_context.deferred_quantified_vars = old_deferred_quantified_vars;
+        self.active_call_context.overload_witness_payloads = old_overload_witness_payloads;
         res
     }
 
@@ -3595,6 +3772,18 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         witness_hash: u64,
     ) -> Option<SmallSet<Var>> {
         self.witness_deferred_vars.shift_remove(&witness_hash)
+    }
+
+    /// Persist overload probe captures in call-context payload storage.
+    /// Finishing consumes these payloads as the authoritative pruning source
+    /// when present, with variable-backed residuals as fallback.
+    pub(crate) fn persist_overload_witness_payload(
+        &self,
+        witness_hash: u64,
+        branch_captures: Vec<OverloadBranchCapture>,
+    ) {
+        let mut payloads = self.active_call_context.overload_witness_payloads.lock();
+        payloads.insert(witness_hash, branch_captures);
     }
 
     pub(crate) fn active_argument_side(&self) -> ArgumentSide {

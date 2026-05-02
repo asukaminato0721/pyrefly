@@ -3015,6 +3015,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    pub fn check_and_return_type_info_with_call_context(
+        &self,
+        got: TypeInfo,
+        want: &Type,
+        loc: TextRange,
+        errors: &ErrorCollector,
+        tcc: &dyn Fn() -> TypeCheckContext,
+        call_context: &CallContext,
+    ) -> TypeInfo {
+        if self.check_type_with_call_context(got.ty(), want, loc, errors, tcc, call_context) {
+            got
+        } else {
+            got.with_ty(want.clone())
+        }
+    }
+
     /// Check if `got` matches `want`, returning `want` if the check fails.
     pub fn check_and_return_type(
         &self,
@@ -3025,6 +3041,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         tcc: &dyn Fn() -> TypeCheckContext,
     ) -> Type {
         if self.check_type(&got, want, loc, errors, tcc) {
+            got
+        } else {
+            want.clone()
+        }
+    }
+
+    pub fn check_and_return_type_with_call_context(
+        &self,
+        got: Type,
+        want: &Type,
+        loc: TextRange,
+        errors: &ErrorCollector,
+        tcc: &dyn Fn() -> TypeCheckContext,
+        call_context: &CallContext,
+    ) -> Type {
+        if self.check_type_with_call_context(&got, want, loc, errors, tcc, call_context) {
             got
         } else {
             want.clone()
@@ -3056,6 +3088,33 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             _ => self.is_subset_eq_with_reason(got, want),
         };
         match subset_result {
+            Ok(()) => true,
+            Err(error) => {
+                let note = self
+                    .suggest_enum_member_for_value(got, want)
+                    .map(|s| format!("Did you mean `{s}`?"));
+                self.solver()
+                    .error(got, want, errors, loc, tcc, error, note);
+                false
+            }
+        }
+    }
+
+    pub fn check_type_with_call_context(
+        &self,
+        got: &Type,
+        want: &Type,
+        loc: TextRange,
+        errors: &ErrorCollector,
+        tcc: &dyn Fn() -> TypeCheckContext,
+        call_context: &CallContext,
+    ) -> bool {
+        match self.solver().is_subset_eq_with_call_context(
+            got,
+            want,
+            self.type_order(),
+            call_context,
+        ) {
             Ok(()) => true,
             Err(error) => {
                 let note = self

@@ -1211,6 +1211,12 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             if successful_branch_captures.is_empty() {
                 unreachable!("successful overload probe must produce a branch capture");
             }
+            // Transitional dual-write: keep payload storage in sync while
+            // existing pruning continues to consume variable-backed residuals.
+            self.persist_overload_witness_payload(
+                witness.witness_hash(),
+                successful_branch_captures.clone(),
+            );
             self.solver
                 .record_overload_residuals_for_witness(witness, successful_branch_captures);
             true
