@@ -3295,7 +3295,7 @@ pub enum ArgumentSide {
 }
 
 impl ArgumentSide {
-    fn negated(self) -> Self {
+    pub(crate) fn negated(self) -> Self {
         match self {
             Self::Got => Self::Want,
             Self::Want => Self::Got,
@@ -3369,33 +3369,12 @@ impl CallContext {
         }
     }
 
-    pub(crate) fn with_witness_and_side(
-        witness: ResidualWitnessContext,
-        argument_side: ArgumentSide,
-    ) -> Self {
-        Self {
-            witness: Some(witness),
-            argument_side,
-        }
-    }
-
     pub fn residual_witness(&self) -> Option<&ResidualWitnessContext> {
         self.witness.as_ref()
     }
 
     pub fn residual_witness_mut(&mut self) -> Option<&mut ResidualWitnessContext> {
         self.witness.as_mut()
-    }
-
-    pub(crate) fn with_preserved_side(&self) -> Self {
-        self.clone()
-    }
-
-    pub fn with_negated_side(&self) -> Self {
-        Self {
-            witness: self.witness.clone(),
-            argument_side: self.argument_side.negated(),
-        }
     }
 
     pub(crate) fn argument_side(&self) -> ArgumentSide {
@@ -3433,6 +3412,9 @@ pub struct Subset<'a, Ans: LookupAnswer> {
     pub(crate) solver: &'a Solver,
     pub type_order: TypeOrder<'a, Ans>,
     gas: Gas,
+    /// Invariant: there is a single active call context for a subset query.
+    /// Nested work is recursive subset checking inside the same call, not a
+    /// nested full call pipeline with independent call-scoped solving.
     pub(crate) active_call_context: CallContext,
     /// Memoization cache for recursive subset checks (protocols and recursive type aliases).
     /// Doubles as a cycle detector: `InProgress` entries break cycles via coinductive
@@ -3485,25 +3467,27 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         self.witness_deferred_vars = deferred_vars;
     }
 
-    pub(crate) fn make_forall_witness_context(
+    pub(crate) fn make_forall_witness(
         &mut self,
         got: &Type,
         vars: &QuantifiedHandle,
         want: &Type,
-    ) -> CallContext {
+    ) -> ResidualWitnessContext {
         let argument_side = self.active_call_context.argument_side();
-        CallContext::with_witness_and_side(
-            ResidualWitnessContext {
-                identity: ResidualIdentity {
-                    witness_hash: Self::type_witness_hash(got),
-                    target_vars: want.collect_maybe_placeholder_vars().into_iter().collect(),
-                },
-                argument_side,
-                origin_vars: vars.0.iter().copied().collect(),
-                deferred_vars: SmallSet::new(),
+        // Residual reads may happen through either side: call-visible vars from
+        // `want`, or fresh vars created by this Forall instantiation.
+        let mut target_vars: SmallSet<Var> =
+            want.collect_maybe_placeholder_vars().into_iter().collect();
+        target_vars.extend(vars.0.iter().copied());
+        ResidualWitnessContext {
+            identity: ResidualIdentity {
+                witness_hash: Self::type_witness_hash(got),
+                target_vars,
             },
             argument_side,
-        )
+            origin_vars: vars.0.iter().copied().collect(),
+            deferred_vars: SmallSet::new(),
+        }
     }
 
     pub fn is_consistent(&mut self, got: &Type, want: &Type) -> Result<(), SubsetError> {
@@ -3544,10 +3528,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         want: &Type,
         call_context: &CallContext,
     ) -> Result<(), SubsetError> {
-        let old_context = mem::replace(&mut self.active_call_context, call_context.clone());
-        let res = self.is_subset_eq(got, want);
-        self.active_call_context = old_context;
-        res
+        self.with_active_call_context(call_context, |me| me.is_subset_eq(got, want))
     }
 
     pub(crate) fn with_active_call_context<T>(
@@ -3555,9 +3536,57 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         call_context: &CallContext,
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let old_context = mem::replace(&mut self.active_call_context, call_context.clone());
+        let old_witness = mem::replace(
+            &mut self.active_call_context.witness,
+            call_context.witness.clone(),
+        );
+        let old_argument_side = mem::replace(
+            &mut self.active_call_context.argument_side,
+            call_context.argument_side,
+        );
         let res = f(self);
-        self.active_call_context = old_context;
+        self.active_call_context.witness = old_witness;
+        self.active_call_context.argument_side = old_argument_side;
+        res
+    }
+
+    pub(crate) fn with_active_argument_side<T>(
+        &mut self,
+        argument_side: ArgumentSide,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let old_argument_side =
+            mem::replace(&mut self.active_call_context.argument_side, argument_side);
+        let res = f(self);
+        self.active_call_context.argument_side = old_argument_side;
+        res
+    }
+
+    pub(crate) fn with_active_witness_and_side<T>(
+        &mut self,
+        witness: ResidualWitnessContext,
+        argument_side: ArgumentSide,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> (T, Option<ResidualWitnessContext>) {
+        let old_witness = self.active_call_context.witness.replace(witness);
+        let old_argument_side =
+            mem::replace(&mut self.active_call_context.argument_side, argument_side);
+        let res = f(self);
+        let active_witness = self.active_call_context.witness.take();
+        self.active_call_context.witness = old_witness;
+        self.active_call_context.argument_side = old_argument_side;
+        (res, active_witness)
+    }
+
+    pub(crate) fn with_outside_call_context<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let old_witness = self.active_call_context.witness.take();
+        let old_argument_side = mem::replace(
+            &mut self.active_call_context.argument_side,
+            ArgumentSide::NotAnalyzingACall,
+        );
+        let res = f(self);
+        self.active_call_context.witness = old_witness;
+        self.active_call_context.argument_side = old_argument_side;
         res
     }
 
@@ -3572,26 +3601,23 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         self.active_call_context.argument_side()
     }
 
-    pub(crate) fn make_overload_witness_context(
+    pub(crate) fn make_overload_witness(
         &mut self,
         got: &Type,
         eligible_vars: &[Var],
         argument_side: ArgumentSide,
-    ) -> CallContext {
+    ) -> ResidualWitnessContext {
         let target_vars: SmallSet<Var> = eligible_vars.iter().copied().collect();
         let origin_vars = target_vars.clone();
-        CallContext::with_witness_and_side(
-            ResidualWitnessContext {
-                identity: ResidualIdentity {
-                    witness_hash: Self::type_witness_hash(got),
-                    target_vars,
-                },
-                argument_side,
-                origin_vars,
-                deferred_vars: SmallSet::new(),
+        ResidualWitnessContext {
+            identity: ResidualIdentity {
+                witness_hash: Self::type_witness_hash(got),
+                target_vars,
             },
             argument_side,
-        )
+            origin_vars,
+            deferred_vars: SmallSet::new(),
+        }
     }
 
     pub(crate) fn active_overload_residual_witness(&self) -> Option<ResidualWitnessContext> {

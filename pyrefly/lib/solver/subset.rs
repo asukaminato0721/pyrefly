@@ -496,15 +496,6 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         }
     }
 
-    fn is_subset_params_with_context(
-        &mut self,
-        l_params: &Params,
-        u_params: &Params,
-        call_context: &CallContext,
-    ) -> Result<(), SubsetError> {
-        self.with_active_call_context(call_context, |me| me.is_subset_params(l_params, u_params))
-    }
-
     fn is_subset_protocol(&mut self, got: Type, protocol: ClassType) -> Result<(), SubsetError> {
         let want = Type::ClassType(protocol.clone());
         let has_no_vars = got.collect_all_vars().is_empty() && want.collect_all_vars().is_empty();
@@ -633,7 +624,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         if allow_residual_capture {
             self.is_subset_eq(got, want)
         } else {
-            self.with_active_call_context(&CallContext::outside(), |me| me.is_subset_eq(got, want))
+            self.with_outside_call_context(|me| me.is_subset_eq(got, want))
         }
     }
 
@@ -1249,12 +1240,9 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     .is_ok()
                 } else {
                     let overload_type = Type::Overload(overload.clone());
-                    let synthesized = self.make_overload_witness_context(
-                        &overload_type,
-                        &eligible_vars,
-                        argument_side,
-                    );
-                    self.with_active_call_context(&synthesized, |me| {
+                    let synthesized =
+                        self.make_overload_witness(&overload_type, &eligible_vars, argument_side);
+                    self.with_active_witness_and_side(synthesized, argument_side, |me| {
                         let (witness, captured_vars) =
                             me.witness_and_captured_vars_for_overload().expect(
                                 "synthesized overload witness must be active for capture probing",
@@ -1266,6 +1254,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                             want,
                         )
                     })
+                    .0
                 }
             } else {
                 any(overload.signatures.iter(), |l| {
@@ -1760,10 +1749,11 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                     metadata: _,
                 }),
             ) => {
-                let params_context = self.active_call_context.with_negated_side();
-                self.is_subset_params_with_context(&l.params, &u.params, &params_context)?;
-                let ret_context = self.active_call_context.with_preserved_side();
-                self.is_subset_eq_with_context(&l.ret, &u.ret, &ret_context)
+                let argument_side = self.active_argument_side();
+                self.with_active_argument_side(argument_side.negated(), |me| {
+                    me.is_subset_params(&l.params, &u.params)
+                })?;
+                self.is_subset_eq(&l.ret, &u.ret)
             }
             (Type::TypedDict(TypedDict::Anonymous(got)), Type::TypedDict(want)) => {
                 self.is_subset_anonymous_typed_dict(got, want)
@@ -2252,11 +2242,15 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
                 let forall_type = Type::Forall(forall.clone());
                 // Finalizing the quantified vars returns instantiation errors
                 let (vs, got) = self.type_order.instantiate_fresh_forall((**forall).clone());
-                let mut witness_context = self.make_forall_witness_context(&forall_type, &vs, want);
-                let result = self.is_subset_eq_with_context(&got, want, &witness_context);
+                let argument_side = self.active_argument_side();
+                let witness = self.make_forall_witness(&forall_type, &vs, want);
+                let (result, mut maybe_witness) =
+                    self.with_active_witness_and_side(witness, argument_side, |me| {
+                        me.is_subset_eq(&got, want)
+                    });
                 if result.is_ok()
-                    && witness_context.residual_hooks_enabled()
-                    && let Some(witness) = witness_context.residual_witness_mut()
+                    && !matches!(argument_side, ArgumentSide::NotAnalyzingACall)
+                    && let Some(witness) = maybe_witness.as_mut()
                 {
                     if let Some(deferred_vars) =
                         self.take_witness_deferred_vars(witness.witness_hash())
