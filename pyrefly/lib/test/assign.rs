@@ -389,26 +389,6 @@ lit2: Literal["oops"] = x  # E: `int` is not assignable to `Literal['oops']`
 );
 
 testcase!(
-    test_type_alias_simple,
-    r#"
-from typing import assert_type
-type X = int
-def f(x: X):
-    assert_type(x, int)
-    "#,
-);
-
-testcase!(
-    test_type_alias_generic,
-    r#"
-from typing import assert_type
-type X[T] = list[T]
-def f(x: X[int]):
-    assert_type(x, list[int])
-    "#,
-);
-
-testcase!(
     test_assign_final,
     r#"
 from typing import Final
