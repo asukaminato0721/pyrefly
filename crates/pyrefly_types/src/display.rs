@@ -26,6 +26,7 @@ use starlark_map::smallmap;
 
 use crate::callable::Function;
 use crate::class::Class;
+use crate::heap::TypeHeap;
 use crate::literal::Lit;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedIdentity;
@@ -38,6 +39,7 @@ use crate::type_output::DisplayOutput;
 use crate::type_output::OutputWithLocations;
 use crate::type_output::TypeOutput;
 use crate::type_var::Restriction;
+use crate::typed_dict::AnonymousTypedDictInner;
 use crate::typed_dict::TypedDict;
 use crate::types::AnyStyle;
 use crate::types::BoundMethod;
@@ -421,6 +423,21 @@ impl<'a> TypeDisplayContext<'a> {
         }
     }
 
+    /// Format the value type of an anonymous typed dict by computing the union
+    /// of all field types on-the-fly. This avoids storing a redundant clone in the
+    /// type tree (which caused exponential memory growth for nested dict literals).
+    /// Delegates to `compute_value_type` + `fmt_helper_generic` so that union
+    /// display (dedup, literal grouping, etc.) stays in one place.
+    fn fmt_anonymous_typed_dict_value_type(
+        &self,
+        inner: &AnonymousTypedDictInner,
+        output: &mut impl TypeOutput,
+    ) -> fmt::Result {
+        let heap = TypeHeap::new();
+        let value_type = inner.compute_value_type(&heap);
+        self.fmt_helper_generic(&value_type, false, output)
+    }
+
     /// Core formatting logic for types that works with any `TypeOutput` implementation.
     ///
     /// The method uses the `TypeOutput` trait abstraction to write output in various ways.
@@ -507,7 +524,7 @@ impl<'a> TypeDisplayContext<'a> {
                     let str_qname = self.stdlib.map(|s| s.str().qname());
                     output.write_builtin("str", str_qname)?;
                     output.write_str(", ")?;
-                    self.fmt_helper_generic(&inner.value_type, false, output)?;
+                    self.fmt_anonymous_typed_dict_value_type(inner, output)?;
                     output.write_str("]")
                 }
             },
@@ -523,7 +540,7 @@ impl<'a> TypeDisplayContext<'a> {
                     let str_qname = self.stdlib.map(|s| s.str().qname());
                     output.write_builtin("str", str_qname)?;
                     output.write_str(", ")?;
-                    self.fmt_helper_generic(&inner.value_type, false, output)?;
+                    self.fmt_anonymous_typed_dict_value_type(inner, output)?;
                     output.write_str("]")
                 }
             },

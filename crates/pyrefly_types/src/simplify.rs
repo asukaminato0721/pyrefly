@@ -260,9 +260,8 @@ fn collapse_literals(
 fn promote_anonymous_typed_dicts(types: &mut [Type], stdlib: &Stdlib, heap: &TypeHeap) {
     for ty in types.iter_mut() {
         if let Type::TypedDict(TypedDict::Anonymous(inner)) = ty {
-            *ty = heap.mk_class_type(
-                stdlib.dict(stdlib.str().clone().to_type(), inner.value_type.clone()),
-            );
+            let value_type = inner.compute_value_type(heap);
+            *ty = heap.mk_class_type(stdlib.dict(stdlib.str().clone().to_type(), value_type));
         }
     }
 }

@@ -1213,17 +1213,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 && !typed_dict_fields_map.is_empty()
                 && typed_dict_fields_map.len() <= ANONYMOUS_TYPED_DICT_MAX_ITEMS
             {
-                // Compute the fallback value type from the field mapping, not from value_tys which
-                // may contain types from overridden keys
-                let final_value_tys: Vec<_> = typed_dict_fields_map
-                    .values()
-                    .map(|f| f.ty.clone())
-                    .collect();
                 let typed_dict_fields: Vec<_> = typed_dict_fields_map.into_iter().collect();
                 return self.heap.mk_typed_dict(TypedDict::Anonymous(Box::new(
                     AnonymousTypedDictInner {
                         fields: typed_dict_fields,
-                        value_type: self.unions(final_value_tys),
                     },
                 )));
             }

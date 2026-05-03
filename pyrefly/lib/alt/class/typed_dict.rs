@@ -741,7 +741,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     self.heap.mk_class_type(self.stdlib.object().clone())
                 }
             }
-            TypedDict::Anonymous(inner) => inner.value_type.clone(),
+            TypedDict::Anonymous(inner) => inner.compute_value_type(self.heap),
         }
     }
 
