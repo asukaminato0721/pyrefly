@@ -1393,6 +1393,23 @@ def test_isinstance_then_issubclass(x: object) -> None:
 );
 
 testcase!(
+    test_isinstance_type_and_issubclass_preserves_typevar,
+    r#"
+from typing import assert_type
+
+class Foo: ...
+
+def initialize[F: Foo](cls: type[F]) -> F:
+    assert isinstance(cls, type)
+    assert_type(cls, type[F])
+    assert issubclass(cls, Foo)
+    assert_type(cls, type[F])
+    inst = cls()
+    return inst
+    "#,
+);
+
+testcase!(
     test_issubclass_with_metaclass_instance,
     r#"
 class ModelBase(type):

@@ -397,6 +397,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let mut res = Vec::new();
         for right in self.as_class_info(right.clone()) {
             res.push(self.distribute_over_union(left, |l| {
+                if matches!(&right, Type::ClassDef(cls) if cls.is_builtin("type"))
+                    && matches!(l, Type::Type(_))
+                {
+                    return l.clone();
+                }
                 if let Some((tparams, right)) = self.unwrap_isinstance_target(l, &right) {
                     let (vs, right) = self
                         .solver()
@@ -579,15 +584,31 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let (vs, right_unwrapped) =
                     self.solver()
                         .fresh_quantified(&tparams, right_unwrapped, self.uniques);
+                let mut quantified_class_objects = Vec::new();
                 let mut quantifieds = Vec::new();
                 let mut nonquantifieds = Vec::new();
                 self.map_over_union(left, |left| {
-                    if let Type::Quantified(q) = left {
+                    if let Type::Type(box Type::Quantified(q)) = left {
+                        quantified_class_objects.push((**q).clone());
+                    } else if let Type::Quantified(q) = left {
                         quantifieds.push((**q).clone());
                     } else {
                         nonquantifieds.push(left.clone());
                     }
                 });
+                for q in quantified_class_objects {
+                    // `type[F]` should not become `type[Bound]`; check for impossible
+                    // subclass tests using the bound, but keep the quantified class object.
+                    let bound_class_object =
+                        self.heap.mk_type_of(q.bound_type(self.stdlib, self.heap));
+                    let quantified_class_object = self.heap.mk_type_of(q.to_type(self.heap));
+                    let intersection = narrow(&bound_class_object, right_unwrapped.clone());
+                    res.push(if matches!(&intersection, Type::Type(t) if t.is_never()) {
+                        intersection
+                    } else {
+                        quantified_class_object
+                    })
+                }
                 for q in quantifieds {
                     // The only time it's safe to simplify a quantified away is when the entire intersection is Never.
                     let intersection = narrow(
