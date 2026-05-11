@@ -2148,6 +2148,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             errors,
         )
         .or_else(|| self.get_property_class_field_type(class, name, field_definition))
+        .or_else(|| self.get_method_decorator_class_field_type(class, name, field_definition))
         .or_else(|| self.get_pydantic_root_model_class_field_type(class, name))
         .or_else(|| {
             let initial_value_expr = match field_definition {
@@ -2162,6 +2163,54 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             };
             self.get_django_field_type(ty, class, Some(name), initial_value_expr)
         })
+    }
+
+    /// Recognize `x = classmethod(f)` and `x = staticmethod(f)` as method
+    /// definitions, mirroring decorator syntax for callables like lambdas.
+    fn get_method_decorator_class_field_type(
+        &self,
+        class: &Class,
+        name: &Name,
+        field_definition: &ClassFieldDefinition,
+    ) -> Option<Type> {
+        let ClassFieldDefinition::AssignedInBody { value, .. } = field_definition else {
+            return None;
+        };
+        let ExprOrBinding::Expr(expr) = value.as_ref() else {
+            return None;
+        };
+        let call = expr.as_call_expr()?;
+        if !call.arguments.keywords.is_empty() {
+            return None;
+        }
+        if call.arguments.args.len() != 1 {
+            return None;
+        }
+        let arg = &call.arguments.args[0];
+
+        let errors = self.error_swallower();
+        let is_staticmethod = match self.expr_infer(&call.func, &errors).callee_kind() {
+            Some(CalleeKind::Class(ClassKind::StaticMethod(_))) => true,
+            Some(CalleeKind::Class(ClassKind::ClassMethod(_))) => false,
+            _ => return None,
+        };
+        let mut ty = self.expr_infer(arg, &errors);
+        if let Type::Callable(callable) = ty {
+            let mut metadata = FuncMetadata::method(class, name.clone());
+            metadata.flags.is_staticmethod = is_staticmethod;
+            metadata.flags.is_classmethod = !is_staticmethod;
+            return Some(Type::Function(Box::new(Function {
+                signature: *callable,
+                metadata,
+            })));
+        }
+        let mut applied = false;
+        ty.transform_toplevel_func_metadata(|meta: &mut FuncMetadata| {
+            meta.flags.is_staticmethod = is_staticmethod;
+            meta.flags.is_classmethod = !is_staticmethod;
+            applied = true;
+        });
+        applied.then_some(ty)
     }
 
     /// Recognize `x = property(fget, fset, fdel)` and return the corresponding

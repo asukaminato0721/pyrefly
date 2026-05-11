@@ -719,11 +719,41 @@ class Base:
     def method() -> int:
         return 1
 
+    @staticmethod
+    def method2() -> int:
+        return 1
+
 def a_method() -> int:
     return 1
 
 class Derived(Base):
     method = staticmethod(a_method)
+    method2 = staticmethod(lambda: 1)
+    "#,
+);
+
+testcase!(
+    test_classmethod_constructor_lambda_can_override_classmethod,
+    r#"
+import abc
+
+class Base(abc.ABC):
+    @classmethod
+    @abc.abstractmethod
+    def method1(cls) -> int:
+        return 1
+
+    @classmethod
+    @abc.abstractmethod
+    def method2(cls) -> int:
+        return 1
+
+def a_method(cls) -> int:
+    return 1
+
+class Derived(Base):
+    method2 = classmethod(a_method)
+    method1 = classmethod(lambda cls: 1)
     "#,
 );
 
