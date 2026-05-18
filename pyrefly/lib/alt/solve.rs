@@ -2271,6 +2271,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 new,
                 existing,
                 name,
+                kind,
             } => {
                 let ann_new = self.get_idx(*new);
                 let ann_existing = self.get_idx(*existing);
@@ -2281,16 +2282,26 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     let t_new = self.for_display(t_new.clone());
                     let t_existing = self.for_display(t_existing.clone());
                     let ctx = TypeDisplayContext::new(&[&t_new, &t_existing]);
-                    self.error(
-                        errors,
-                        self.bindings().idx_to_key(*new).range(),
-                        ErrorKind::Redefinition,
-                        format!(
+                    let message = match kind {
+                        ErrorKind::AnnotationMismatch => format!(
+                            "Inconsistent type annotations for `{}`: {}, {}",
+                            name,
+                            ctx.display(&t_new),
+                            ctx.display(&t_existing),
+                        ),
+                        ErrorKind::Redefinition => format!(
                             "`{}` cannot be annotated with `{}`, it is already defined with type `{}`",
                             name,
                             ctx.display(&t_new),
                             ctx.display(&t_existing),
                         ),
+                        _ => unreachable!("redefinition expectation emitted unexpected error kind"),
+                    };
+                    self.error(
+                        errors,
+                        self.bindings().idx_to_key(*new).range(),
+                        *kind,
+                        message,
                     );
                 }
             }

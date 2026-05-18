@@ -765,6 +765,7 @@ impl<'a> BindingsBuilder<'a> {
                             _ => AnnAssignHasValue::Yes,
                         },
                     );
+                    let has_flow_binding = self.scopes.current_flow_idx(&name.id).is_some();
                     let canonical_ann_idx = match value {
                         Some(value) => self.bind_single_name_assign(
                             &name,
@@ -800,6 +801,11 @@ impl<'a> BindingsBuilder<'a> {
                                 new: ann_idx,
                                 existing: ann,
                                 name: name.id.clone(),
+                                kind: if has_flow_binding {
+                                    ErrorKind::Redefinition
+                                } else {
+                                    ErrorKind::AnnotationMismatch
+                                },
                             },
                         );
                     }

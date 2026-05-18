@@ -357,6 +357,10 @@ testcase!(
     r#"
 from typing import Literal
 def f(cond: bool):
+    if cond:
+        a: int = 1
+    else:
+        a: str = "oops"  # E: Inconsistent type annotations for `a`: str, int
     x: int = 0
     if cond:
         x: int = 1  # OK

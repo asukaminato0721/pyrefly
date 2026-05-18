@@ -72,6 +72,7 @@ use crate::binding::narrow::NarrowingSubject;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::is_constant_name;
 use crate::binding::table::TableKeyed;
+use crate::config::error_kind::ErrorKind;
 use crate::export::special::SpecialExport;
 use crate::module::module_info::ModuleInfo;
 use crate::types::annotation::Annotation;
@@ -1125,6 +1126,7 @@ pub enum BindingExpect {
         new: Idx<KeyAnnotation>,
         existing: Idx<KeyAnnotation>,
         name: Name,
+        kind: ErrorKind,
     },
     /// Expression used in a boolean context (`bool()`, `if`, or `while`)
     Bool(Expr),
@@ -1228,12 +1230,14 @@ impl DisplayWith<Bindings> for BindingExpect {
                 new,
                 existing,
                 name,
+                kind,
             } => write!(
                 f,
-                "Redefinition({} == {} on {})",
+                "Redefinition({} == {} on {} as {})",
                 ctx.display(*new),
                 ctx.display(*existing),
-                name
+                name,
+                kind
             ),
             Self::PrivateAttributeAccess(expectation) => write!(
                 f,

@@ -61,7 +61,7 @@ variable. This is relatively uncommon, but it can happen in if-statements:
 if some_cond:
     x: int = 1
 else:
-    x: str = "two" # Inconsistent type annotations for x: str, int [annotation-mismatch]
+    x: str = "two" # Inconsistent type annotations for `x`: str, int [annotation-mismatch]
 ```
 
 It can be helpful to annotate the variable before branch, especially if there is
