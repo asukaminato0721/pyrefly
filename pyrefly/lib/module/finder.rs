@@ -767,6 +767,7 @@ fn resolve_third_party_stub(
     normal_result: Option<&FindResult>,
     bundled_stub: Option<FindingOrError<ModulePath>>,
     from_real_config_file: bool,
+    normal_result_has_py_typed: bool,
 ) -> Option<FindingOrError<ModulePath>> {
     // This is the case where we do have a config file, the package is installed, but there are no stubs
     // available besides the bundled stubs. In this case
@@ -776,6 +777,9 @@ fn resolve_third_party_stub(
         && normal_result.is_some()
         && stub_result.is_none()
     {
+        if normal_result_has_py_typed {
+            return Some(bundled.clone());
+        }
         if let Some(pip_package) = recommended_stubs_package(module) {
             return Some(bundled.clone().with_error(FindError::UntypedImport(
                 module,
@@ -822,6 +826,7 @@ fn combine_normal_and_stub_results(
     stub_result: Option<FindResult>,
     normal_result: Option<FindResult>,
     namespaces_found: &mut Vec<PathBuf>,
+    normal_result_has_py_typed: bool,
 ) -> Option<FindingOrError<ModulePath>> {
     match (normal_result, stub_result) {
         (None, Some(stub_result)) => Some(
@@ -834,7 +839,7 @@ fn combine_normal_and_stub_results(
             namespaces_found.append(&mut namespaces.into_vec());
             None
         }
-        (Some(normal_result), None) => {
+        (Some(normal_result), None) if !normal_result_has_py_typed => {
             if let Some(missing_stub_result) = recommended_stubs_package(module) {
                 Some(
                     normal_result
@@ -848,8 +853,22 @@ fn combine_normal_and_stub_results(
                 Some(normal_result.module_path())
             }
         }
+        (Some(normal_result), None) => Some(normal_result.module_path()),
         (None, _) => None,
     }
+}
+
+fn top_level_package_has_py_typed<'a>(
+    module: ModuleName,
+    roots: impl Iterator<Item = &'a PathBuf>,
+    dir_cache: &DirEntryCache,
+    timing: Option<&TransactionTimingCounters>,
+) -> bool {
+    let first_component = module.first_component();
+    let package_dir = first_component.as_str();
+    roots
+        .map(|root| root.join(package_dir).join("py.typed"))
+        .any(|path| timed_stat(timing, || dir_cache.file_exists(&path)))
 }
 
 /// Search for the given [`ModuleName`] in the given `include`, which is
@@ -908,6 +927,9 @@ where
                 dir_cache,
                 timing,
             );
+            let normal_result_has_py_typed = normal_result.as_ref().is_some_and(|_| {
+                top_level_package_has_py_typed(module, include.clone(), dir_cache, timing)
+            });
 
             // Check if third-party stub should take precedence
             if let Some(result) = resolve_third_party_stub(
@@ -916,11 +938,18 @@ where
                 normal_result.as_ref(),
                 typeshed_third_party_stub,
                 from_real_config_file,
+                normal_result_has_py_typed,
             ) {
                 return Some(result);
             }
 
-            combine_normal_and_stub_results(module, stub_result, normal_result, namespaces_found)
+            combine_normal_and_stub_results(
+                module,
+                stub_result,
+                normal_result,
+                namespaces_found,
+                normal_result_has_py_typed,
+            )
         }
     }
 }
@@ -4080,6 +4109,54 @@ mod tests {
                 "Expected Finding with UntypedImport error, got: {:?}",
                 result
             );
+        }
+    }
+
+    #[test]
+    fn test_typeshed_third_party_with_py_typed_package_does_not_recommend_types_package() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let root = tempdir.path();
+
+        TestPath::setup_test_directory(
+            root,
+            vec![TestPath::dir(
+                "site_packages",
+                vec![TestPath::dir(
+                    "requests",
+                    vec![TestPath::file("py.typed"), TestPath::file("__init__.py")],
+                )],
+            )],
+        );
+
+        let mut config = get_config(ConfigSource::File("".into()));
+        config.python_environment.site_package_path = Some(vec![root.join("site_packages")]);
+        config.configure();
+
+        let result = find_import_filtered(
+            &config,
+            ModuleName::from_str("requests"),
+            None,
+            None,
+            &DirEntryCache::new(true),
+            None,
+        );
+
+        if let FindingOrError::Finding(finding) = result {
+            assert!(
+                matches!(
+                    finding.finding.details(),
+                    ModulePathDetails::BundledTypeshedThirdParty(_)
+                ),
+                "Expected typeshed stub for requests, got: {:?}",
+                finding.finding.details()
+            );
+            assert!(
+                finding.error.is_none(),
+                "Expected no untyped import error, got: {:?}",
+                finding.error
+            );
+        } else {
+            panic!("Expected to find requests, got: {:?}", result);
         }
     }
 
