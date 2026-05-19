@@ -996,6 +996,24 @@ os.jongleur()  # missing-attribute
 
 Note that objects with type `Any` will never raise this error.
 
+## missing-ignore-code
+
+A `# pyrefly: ignore` suppression comment should include at least one error code.
+
+```python
+def f() -> str:
+  return 1  # pyrefly: ignore
+```
+
+Prefer a targeted suppression:
+
+```python
+def f() -> str:
+  return 1  # pyrefly: ignore[bad-return]
+```
+
+The default severity of this diagnostic is `ignore`.
+
 ## missing-import
 
 A module could not be found.

@@ -97,6 +97,11 @@ impl SerializedError {
         self.name == ErrorKind::UnusedIgnore.to_name()
     }
 
+    /// Returns true if this error is generated for a suppression comment.
+    pub fn is_suppression_comment_error(&self) -> bool {
+        self.is_unused_ignore() || self.name == ErrorKind::MissingIgnoreCode.to_name()
+    }
+
     /// Returns true if this error is a directive (e.g. reveal_type) that
     /// should never be suppressed.
     pub fn is_directive(&self) -> bool {

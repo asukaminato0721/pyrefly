@@ -420,10 +420,11 @@ impl Playground {
         for (filename, handle) in &self.handles {
             let errors = transaction.get_errors([handle]);
             let collected = errors.collect_errors();
-            let unused = errors.collect_unused_ignore_errors_for_display(&collected);
+            let suppression_comment_errors =
+                errors.collect_suppression_comment_errors_for_display(&collected);
             let mut output_errors = collected.ordinary;
             output_errors.extend(collected.directives);
-            output_errors.extend(unused.ordinary);
+            output_errors.extend(suppression_comment_errors.ordinary);
             let file_errors = output_errors.into_map(|e| {
                 let range = e.display_range();
                 Diagnostic {

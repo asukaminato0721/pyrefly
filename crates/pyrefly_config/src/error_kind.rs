@@ -240,6 +240,8 @@ pub enum ErrorKind {
     MissingArgument,
     /// Attempting to access an attribute that does not exist.
     MissingAttribute,
+    /// A `# pyrefly: ignore` suppression comment does not specify an error code.
+    MissingIgnoreCode,
     /// Failed to import a module.
     MissingImport,
     /// Accessing an attribute that does not exist on a module.
@@ -427,6 +429,7 @@ impl ErrorKind {
             ErrorKind::ImplicitImport => Severity::Warn,
             ErrorKind::ImplicitlyDefinedAttribute => Severity::Ignore,
             ErrorKind::InvalidDecorator => Severity::Warn,
+            ErrorKind::MissingIgnoreCode => Severity::Ignore,
             ErrorKind::MissingOverrideDecorator => Severity::Ignore,
             ErrorKind::MissingSource => Severity::Ignore,
             ErrorKind::NameMismatch => Severity::Warn,

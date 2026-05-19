@@ -86,12 +86,12 @@ impl SuppressArgs {
         } else {
             // Add suppressions mode (existing behavior)
             let serialized_errors: Vec<SerializedError> = if let Some(json_path) = &self.json {
-                // Parse errors from JSON file, filtering out directives and UnusedIgnore errors
+                // Parse errors from JSON file, filtering out directives and suppression-comment errors
                 let json_content = std::fs::read_to_string(json_path)?;
                 let errors: Vec<SerializedError> = serde_json::from_str(&json_content)?;
                 errors
                     .into_iter()
-                    .filter(|e| !e.is_directive() && !e.is_unused_ignore())
+                    .filter(|e| !e.is_directive() && !e.is_suppression_comment_error())
                     .collect()
             } else {
                 // Run type checking to collect errors
@@ -106,12 +106,12 @@ impl SuppressArgs {
                     check_args.run_once(files_to_check, config_finder, upsell, thread_count)?;
 
                 // Convert to SerializedErrors for all user-visible errors,
-                // excluding directives (e.g. reveal_type) and UnusedIgnore
+                // excluding directives (e.g. reveal_type) and suppression-comment errors
                 errors
                     .into_iter()
                     .filter(|e| !e.error_kind().is_directive())
                     .filter_map(|e| SerializedError::from_error(&e))
-                    .filter(|e| !e.is_unused_ignore())
+                    .filter(|e| !e.is_suppression_comment_error())
                     .collect()
             };
 

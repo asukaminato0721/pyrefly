@@ -256,9 +256,10 @@ impl Errors {
 
     pub fn collect_display_errors_with_unused_ignores(&self) -> Vec<Error> {
         let collected = self.collect_errors();
-        let unused = self.collect_unused_ignore_errors_for_display(&collected);
+        let suppression_comment_errors =
+            self.collect_suppression_comment_errors_for_display(&collected);
         let mut ordinary = collected.ordinary;
-        ordinary.extend(unused.ordinary);
+        ordinary.extend(suppression_comment_errors.ordinary);
         Self::merge_display_errors(ordinary, collected.directives)
     }
 
@@ -467,15 +468,54 @@ impl Errors {
         unused_errors
     }
 
-    /// Collects unused ignore errors for display, respecting severity configuration.
-    /// Unlike `collect_unused_ignore_errors()`, this applies severity filtering so
-    /// errors with `Severity::Ignore` are not included in the ordinary results.
-    /// Accepts pre-collected errors to avoid redundant error collection.
-    pub fn collect_unused_ignore_errors_for_display(
+    /// Collects errors for `# pyrefly: ignore` comments that do not specify an error code.
+    pub fn collect_missing_ignore_code_errors(&self) -> Vec<Error> {
+        let mut errors = Vec::new();
+        for (load, config) in &self.loads {
+            let module = &load.module_info;
+            let module_path = module.path();
+            if !config
+                .enabled_ignores(module_path.as_path())
+                .contains(&Tool::Pyrefly)
+            {
+                continue;
+            }
+            for suppressions in module.ignore().iter().map(|(_, suppressions)| suppressions) {
+                for supp in suppressions {
+                    if supp.tool() != Tool::Pyrefly {
+                        continue;
+                    }
+                    if !supp
+                        .error_codes()
+                        .iter()
+                        .any(|code| !code.trim().is_empty())
+                    {
+                        let comment_line = supp.comment_line();
+                        let line_start = module.lined_buffer().line_start(comment_line);
+                        let range = TextRange::new(line_start, line_start + TextSize::new(1));
+                        errors.push(Error::new(
+                            module.dupe(),
+                            range,
+                            "`# pyrefly: ignore` must specify an error code".to_owned(),
+                            Vec::new(),
+                            ErrorKind::MissingIgnoreCode,
+                        ));
+                    }
+                }
+            }
+        }
+        errors
+    }
+
+    /// Collects suppression-comment diagnostics for display, respecting severity configuration.
+    /// This applies severity filtering so errors with `Severity::Ignore` are not included in
+    /// the ordinary results. Accepts pre-collected errors to avoid redundant error collection.
+    pub fn collect_suppression_comment_errors_for_display(
         &self,
         collected: &CollectedErrors,
     ) -> CollectedErrors {
-        let unused_errors = self.collect_unused_ignore_errors(collected);
+        let mut suppression_errors = self.collect_unused_ignore_errors(collected);
+        suppression_errors.extend(self.collect_missing_ignore_code_errors());
         let mut result = CollectedErrors::default();
 
         // Build a path-to-config map for O(1) lookup instead of O(loads) per error.
@@ -485,12 +525,10 @@ impl Errors {
             .map(|(load, config)| (load.module_info.path(), config))
             .collect();
 
-        for error in unused_errors {
+        for error in suppression_errors {
             if let Some(config) = config_by_path.get(&error.path()) {
                 let error_config = config.get_error_config(error.path().as_path());
-                let severity = error_config
-                    .display_config
-                    .severity(ErrorKind::UnusedIgnore);
+                let severity = error_config.display_config.severity(error.error_kind());
                 match severity {
                     Severity::Error => result.ordinary.push(error.with_severity(Severity::Error)),
                     Severity::Warn => result.ordinary.push(error.with_severity(Severity::Warn)),
@@ -527,11 +565,15 @@ impl Errors {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use dupe::Dupe;
     use pyrefly_build::handle::Handle;
+    use pyrefly_config::error::ErrorDisplayConfig;
+    use pyrefly_config::error_kind::ErrorKind;
+    use pyrefly_config::error_kind::Severity;
     use pyrefly_python::module_name::ModuleName;
     use pyrefly_python::module_path::ModulePath;
     use pyrefly_python::sys_info::SysInfo;
@@ -575,10 +617,20 @@ mod tests {
     }
 
     fn get_errors(contents: &str) -> (Errors, TempDir) {
+        get_errors_with_config(contents, None)
+    }
+
+    fn get_errors_with_config(
+        contents: &str,
+        error_override: Option<(ErrorKind, Severity)>,
+    ) -> (Errors, TempDir) {
         let tdir = tempfile::tempdir().unwrap();
 
         let mut config = ConfigFile::default();
         config.python_environment.set_empty_to_default();
+        if let Some((kind, severity)) = error_override {
+            config.root.errors = Some(ErrorDisplayConfig::new(HashMap::from([(kind, severity)])));
+        }
         let name = "test";
         fs_anyhow::write(&get_path(&tdir), contents).unwrap();
         config.configure();
@@ -598,6 +650,91 @@ mod tests {
         )]);
         transaction.run(&[handle.dupe()], Require::Everything, None);
         (transaction.get_errors([handle.clone()].iter()), tdir)
+    }
+
+    #[test]
+    fn test_missing_ignore_code_for_used_blanket_ignore() {
+        let contents = r#"
+def f() -> str:
+    # pyrefly: ignore
+    return 1
+"#;
+        let (errors, _tdir) = get_errors(contents);
+        let missing_code = errors.collect_missing_ignore_code_errors();
+        assert_eq!(missing_code.len(), 1);
+        assert_eq!(missing_code[0].error_kind(), ErrorKind::MissingIgnoreCode);
+    }
+
+    #[test]
+    fn test_missing_ignore_code_default_severity() {
+        let contents = r#"
+def f() -> str:
+    # pyrefly: ignore
+    return 1
+"#;
+        let (errors, _tdir) = get_errors(contents);
+        let collected = errors.collect_errors();
+        let suppression_errors = errors.collect_suppression_comment_errors_for_display(&collected);
+        assert!(suppression_errors.ordinary.is_empty());
+        assert_eq!(suppression_errors.disabled.len(), 1);
+        assert_eq!(
+            suppression_errors.disabled[0].error_kind(),
+            ErrorKind::MissingIgnoreCode
+        );
+    }
+
+    #[test]
+    fn test_missing_ignore_code_enabled() {
+        let contents = r#"
+def f() -> str:
+    # pyrefly: ignore
+    return 1
+"#;
+        let (errors, _tdir) = get_errors_with_config(
+            contents,
+            Some((ErrorKind::MissingIgnoreCode, Severity::Error)),
+        );
+        let collected = errors.collect_errors();
+        let suppression_errors = errors.collect_suppression_comment_errors_for_display(&collected);
+        assert_eq!(suppression_errors.ordinary.len(), 1);
+        assert_eq!(
+            suppression_errors.ordinary[0].error_kind(),
+            ErrorKind::MissingIgnoreCode
+        );
+    }
+
+    #[test]
+    fn test_missing_ignore_code_allows_specific_code() {
+        let contents = r#"
+def f() -> str:
+    # pyrefly: ignore[bad-return]
+    return 1
+"#;
+        let (errors, _tdir) = get_errors_with_config(
+            contents,
+            Some((ErrorKind::MissingIgnoreCode, Severity::Error)),
+        );
+        assert!(errors.collect_missing_ignore_code_errors().is_empty());
+    }
+
+    #[test]
+    fn test_missing_ignore_code_empty_brackets() {
+        let contents = r#"
+def f() -> str:
+    # pyrefly: ignore[]
+    return 1
+"#;
+        let (errors, _tdir) = get_errors_with_config(
+            contents,
+            Some((ErrorKind::MissingIgnoreCode, Severity::Error)),
+        );
+        let collected = errors.collect_errors();
+        let suppression_errors = errors.collect_suppression_comment_errors_for_display(&collected);
+        assert_eq!(suppression_errors.ordinary.len(), 1);
+        assert_eq!(
+            suppression_errors.ordinary[0].error_kind(),
+            ErrorKind::MissingIgnoreCode
+        );
     }
 
     #[test]

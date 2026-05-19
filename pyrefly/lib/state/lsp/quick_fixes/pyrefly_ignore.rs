@@ -65,6 +65,7 @@ fn should_offer_pyrefly_ignore(module_info: &ModuleInfo, error: &Error) -> bool 
     !module_info.is_notebook()
         && !module_info.is_generated()
         && error.error_kind() != ErrorKind::UnusedIgnore
+        && error.error_kind() != ErrorKind::MissingIgnoreCode
 }
 
 fn get_line_text_and_range(
