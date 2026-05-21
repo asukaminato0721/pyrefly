@@ -1315,6 +1315,27 @@ impl<'a> BindingsBuilder<'a> {
         self.bind_name(&name.id, idx, FlowStyle::Other);
     }
 
+    fn is_capture_safe_narrow(&self, idx: Idx<Key>, gas: &mut Gas) -> bool {
+        if gas.stop() {
+            return false;
+        }
+        match self.idx_to_binding(idx) {
+            Some(Binding::Narrow(..)) => true,
+            Some(
+                Binding::Forward(inner)
+                | Binding::PromoteForward(inner)
+                | Binding::ForwardToFirstUse(inner),
+            ) => self.is_capture_safe_narrow(*inner, gas),
+            Some(Binding::Phi(JoinStyle::NarrowOf(_), branches)) => {
+                !branches.is_empty()
+                    && branches
+                        .iter()
+                        .all(|branch| self.is_capture_safe_narrow(branch.value_key, gas))
+            }
+            _ => false,
+        }
+    }
+
     /// For names that are read but not locally-defined (implicit captures),
     /// this method creates flow entries pointing to the outer scope's binding.
     ///
@@ -1346,7 +1367,7 @@ impl<'a> BindingsBuilder<'a> {
                     // etc.), not assignment narrows from subscript/attribute writes.
                     // Assignment narrows track mutations and should not leak into
                     // nested scopes.
-                    if matches!(self.idx_to_binding(narrow_idx), Some(Binding::Narrow(..))) {
+                    if self.is_capture_safe_narrow(narrow_idx, &mut Gas::new(100)) {
                         self.scopes.narrow_in_current_flow(hashed_name, narrow_idx);
                     }
                 }

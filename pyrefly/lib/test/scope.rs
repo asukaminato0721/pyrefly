@@ -1059,6 +1059,23 @@ def test():
 );
 
 testcase!(
+    test_captured_var_narrow_after_inner_branch,
+    r#"
+from typing import assert_type
+def f() -> int | None:
+    return 1
+def test() -> None:
+    val = f()
+    if val is not None:
+        if val:
+            assert_type(val, int)
+        assert_type(val, int)
+        def inner() -> None:
+            assert_type(val, int)
+"#,
+);
+
+testcase!(
     test_no_capture_class_var,
     r#"
 # We should not capture variables from the class body
