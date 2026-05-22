@@ -124,6 +124,22 @@ Model(x=5)
 );
 
 pydantic_testcase!(
+    test_protected_attribute_not_init_field,
+    r#"
+from pydantic import BaseModel
+
+class Foo(BaseModel):
+    a: int
+    _a: int
+
+    def initialize(self):
+        self._a = 1
+
+Foo(a=1)
+"#,
+);
+
+pydantic_testcase!(
     test_field_ge,
     r#"
 from pydantic import BaseModel, Field

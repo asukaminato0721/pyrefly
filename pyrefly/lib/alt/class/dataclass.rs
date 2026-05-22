@@ -62,16 +62,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         &self,
         cls: &Class,
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
+        exclude_protected_fields: bool,
     ) -> SmallSet<Name> {
         let mut all_fields = SmallSet::new();
         for (_, metadata) in bases_with_metadata.iter().rev() {
             if let Some(dataclass) = metadata.dataclass_metadata() {
-                all_fields.extend(dataclass.fields.clone());
+                all_fields.extend(
+                    dataclass
+                        .fields
+                        .iter()
+                        .filter(|name| !exclude_protected_fields || !name.as_str().starts_with('_'))
+                        .cloned(),
+                );
             }
         }
         if let Some(class_fields) = self.get_class_fields(cls) {
             for name in class_fields.class_body_fields() {
-                if class_fields.is_field_annotated(name) {
+                if class_fields.is_field_annotated(name)
+                    && (!exclude_protected_fields || !name.as_str().starts_with('_'))
+                {
                     all_fields.insert(name.clone());
                 }
             }

@@ -54,6 +54,7 @@ use crate::alt::types::class_metadata::TotalOrderingMetadata;
 use crate::alt::types::class_metadata::TypedDictMetadata;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::pydantic::PydanticConfig;
+use crate::alt::types::pydantic::PydanticModelKind;
 use crate::binding::base_class::BaseClass;
 use crate::binding::base_class::BaseClassExpr;
 use crate::binding::base_class::BaseClassGeneric;
@@ -1006,6 +1007,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             })
             .unwrap_or_default();
         let default_can_be_positional = pydantic_config.is_some() || is_attrs_class;
+        let exclude_pydantic_protected_fields = pydantic_config.is_some_and(|pydantic| {
+            !matches!(&pydantic.pydantic_model_kind, PydanticModelKind::DataClass)
+        });
 
         let mut alias_keyword = DataclassFieldKeywords::ALIAS;
         if pydantic_config.is_some() {
@@ -1017,7 +1021,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // `@dataclass`
                 Some(CalleeKind::Function(FunctionKind::Dataclass)) => {
                     has_dataclass_decorator = true;
-                    let dataclass_fields = self.get_dataclass_fields(cls, bases_with_metadata);
+                    let dataclass_fields = self.get_dataclass_fields(
+                        cls,
+                        bases_with_metadata,
+                        exclude_pydantic_protected_fields,
+                    );
                     dataclass_metadata = Some(DataclassMetadata {
                         fields: dataclass_fields,
                         kws: DataclassKeywords::new(),
@@ -1036,7 +1044,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     && call.has_function_kind(FunctionKind::Dataclass) =>
                 {
                     has_dataclass_decorator = true;
-                    let dataclass_fields = self.get_dataclass_fields(cls, bases_with_metadata);
+                    let dataclass_fields = self.get_dataclass_fields(
+                        cls,
+                        bases_with_metadata,
+                        exclude_pydantic_protected_fields,
+                    );
                     dataclass_metadata = Some(DataclassMetadata {
                         fields: dataclass_fields,
                         kws: DataclassKeywords::from_type_map(
@@ -1102,7 +1114,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             inherited_before_validator_fields
                 .extend(pydantic_before_validator_fields.iter().cloned());
             dataclass_metadata = Some(DataclassMetadata {
-                fields: self.get_dataclass_fields(cls, bases_with_metadata),
+                fields: self.get_dataclass_fields(
+                    cls,
+                    bases_with_metadata,
+                    exclude_pydantic_protected_fields,
+                ),
                 kws,
                 field_specifiers,
                 alias_keyword,
