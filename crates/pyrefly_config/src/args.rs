@@ -16,6 +16,8 @@ use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::display;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::base::InferReturnTypes;
 use crate::base::Preset;
@@ -39,7 +41,7 @@ fn absolute_path_parser(s: &str) -> Result<PathBuf, String> {
 
 /// config overrides
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Parser, Clone, Default)]
+#[derive(Debug, Parser, Clone, Default, Deserialize, Serialize)]
 pub struct ConfigOverrideArgs {
     /// A named collection of error severities and behavior settings that serves as the base configuration.
     /// Any explicit settings you specify override the preset.

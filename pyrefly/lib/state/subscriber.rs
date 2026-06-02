@@ -15,6 +15,8 @@ use indicatif::ProgressStyle;
 use pyrefly_build::handle::Handle;
 use pyrefly_util::lock::Mutex;
 use pyrefly_util::panic::has_panicked;
+use serde::Deserialize;
+use serde::Serialize;
 use starlark_map::small_map::Entry;
 use starlark_map::small_map::SmallMap;
 
@@ -23,7 +25,16 @@ use crate::state::state::Transaction;
 use crate::state::steps::Step;
 
 /// Controls which progress bar style to use during type checking.
-#[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Debug,
+    ValueEnum,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize
+)]
 pub enum ProgressBarStyle {
     /// Show an interactive progress bar (default).
     #[default]

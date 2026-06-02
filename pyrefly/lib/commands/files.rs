@@ -20,6 +20,8 @@ use pyrefly_util::globs::FilteredGlobs;
 use pyrefly_util::globs::Globs;
 use pyrefly_util::globs::HiddenDirFilter;
 use pyrefly_util::includes::Includes;
+use serde::Deserialize;
+use serde::Serialize;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -58,7 +60,7 @@ pub enum UpsellDecision {
 
 /// Arguments regarding which files to pick.
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Parser, Deserialize, Serialize)]
 pub struct FilesArgs {
     /// Files to check (glob supported).
     /// If no file is specified, switch to project-checking mode where the files to

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Display;
@@ -17,6 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use anstream::eprintln;
 use anstream::stdout;
@@ -39,6 +41,7 @@ use pyrefly_config::migration::run::MigratedFromKind;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::args::clap_env;
 use pyrefly_util::demand_tree::DemandCollector;
@@ -54,6 +57,8 @@ use pyrefly_util::memory::MemoryUsageTrace;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::watcher::Watcher;
 use ruff_text_size::Ranged;
+use serde::Deserialize;
+use serde::Serialize;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use tracing::debug;
@@ -64,6 +69,7 @@ use crate::commands::files::FilesArgs;
 use crate::commands::files::UpsellDecision;
 use crate::commands::files::get_config_finder_for_snippet;
 use crate::commands::util::CommandExitStatus;
+use crate::config::config::ConfigSource;
 use crate::config::error_kind::Severity;
 use crate::config::finder::ConfigFinder;
 use crate::error::error::Error;
@@ -87,6 +93,7 @@ use crate::state::subscriber::ProgressBarStyle;
 use crate::state::subscriber::TestSubscriber;
 
 /// Result data from a non-watch check run, used for telemetry logging.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CheckResult {
     /// CLI-visible diagnostics in the legacy JSON format, suitable for serialization.
     pub legacy_errors: Vec<LegacyError>,
@@ -109,7 +116,7 @@ impl CheckResult {
 
 /// Check the given files.
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Parser, Deserialize, Serialize)]
 pub struct FullCheckArgs {
     /// Which files to check.
     #[command(flatten)]
@@ -119,6 +126,14 @@ pub struct FullCheckArgs {
     /// (Warning: This mode is highly experimental!)
     #[arg(long, conflicts_with = "check_all")]
     watch: bool,
+
+    /// Connect to a running Pyrefly daemon and reuse its incremental state.
+    #[arg(long, conflicts_with = "watch")]
+    daemon: bool,
+
+    /// Address of the Pyrefly daemon used by `--daemon`.
+    #[arg(long, default_value = crate::commands::daemon::DEFAULT_DAEMON_ADDRESS)]
+    daemon_address: String,
 
     /// Type checking arguments and configuration
     #[command(flatten)]
@@ -130,11 +145,70 @@ pub struct FullCheckArgs {
 }
 
 impl FullCheckArgs {
+    fn prepare_for_daemon_server(&mut self) {
+        self.daemon = false;
+        self.args.output.output = None;
+        self.args.output.output_format = Some(OutputFormat::OmitErrors);
+        self.args.output.summary = Summary::None;
+        self.args.output.progress_bar = Some(ProgressBarStyle::No);
+        self.args.output.no_progress_bar = true;
+    }
+
+    fn daemon_cache_key(&self) -> anyhow::Result<String> {
+        let mut cache_args = self.clone();
+        cache_args.daemon = false;
+        cache_args.daemon_address.clear();
+        cache_args.args.output.output = None;
+        cache_args.args.output.output_format = None;
+        cache_args.args.output.debug_info = None;
+        cache_args.args.output.report_binding_memory = None;
+        cache_args.args.output.report_trace = None;
+        cache_args.args.output.dependency_graph = None;
+        cache_args.args.output.report_timings = None;
+        cache_args.args.output.report_glean = None;
+        cache_args.args.output.report_pysa = None;
+        cache_args.args.output.report_cinderx = None;
+        cache_args.args.output.summary = Summary::None;
+        cache_args.args.output.no_progress_bar = true;
+        cache_args.args.output.progress_bar = Some(ProgressBarStyle::No);
+        cache_args.args.output.relative_to = None;
+        serde_json::to_string(&cache_args).context("while computing daemon check cache key")
+    }
+
+    pub fn daemon_address(&self) -> &str {
+        &self.daemon_address
+    }
+
+    pub fn write_daemon_response(&self, response: &DaemonCheckResponse) -> anyhow::Result<()> {
+        let errors = LegacyErrors {
+            errors: response.result.legacy_errors.clone(),
+        };
+        if let Some(path) = &self.args.output.output {
+            let file = File::create(path)?;
+            self.args.output.write_legacy(file, &errors)?;
+        } else {
+            self.args.output.write_legacy(stdout(), &errors)?;
+        }
+        if self.args.output.summary != Summary::None {
+            let label =
+                if self.args.output.min_severity.unwrap_or(Severity::Error) < Severity::Error {
+                    "diagnostic"
+                } else {
+                    "error"
+                };
+            info!("{}", count(errors.errors.len(), label));
+        }
+        Ok(())
+    }
+
     pub async fn run(
         self,
         wrapper: Option<ConfigConfigurerWrapper>,
         thread_count: ThreadCount,
     ) -> anyhow::Result<(CommandExitStatus, Option<CheckResult>)> {
+        if self.daemon {
+            return crate::commands::daemon::run_check_client(self);
+        }
         self.config_override.validate()?;
         let (files_to_check, config_finder, upsell) =
             self.files.resolve(self.config_override, wrapper)?;
@@ -183,9 +257,167 @@ async fn run_check(
     }
 }
 
+/// One successful daemon check response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DaemonCheckResponse {
+    pub status: CommandExitStatus,
+    pub result: CheckResult,
+}
+
+/// Long-lived state for a daemon-compatible check shape.
+struct DaemonCheckSession {
+    cache_key: String,
+    state: State,
+    known_files: HashMap<PathBuf, Option<SystemTime>>,
+}
+
+/// Runs daemon check requests, preserving committed type-checker state between
+/// compatible requests.
+pub struct DaemonCheckRunner {
+    session: Option<DaemonCheckSession>,
+    thread_count: ThreadCount,
+}
+
+impl DaemonCheckRunner {
+    pub fn new(thread_count: ThreadCount) -> Self {
+        Self {
+            session: None,
+            thread_count,
+        }
+    }
+
+    pub fn run(&mut self, mut args: FullCheckArgs) -> anyhow::Result<DaemonCheckResponse> {
+        args.config_override.validate()?;
+        let cache_key = args.daemon_cache_key()?;
+        args.prepare_for_daemon_server();
+        let (files_to_check, config_finder, upsell) =
+            args.files.resolve(args.config_override, None)?;
+        let expanded_file_list = config_finder.checkpoint(files_to_check.files())?;
+        if expanded_file_list.is_empty() {
+            return Ok(DaemonCheckResponse {
+                status: CommandExitStatus::Success,
+                result: CheckResult {
+                    legacy_errors: Vec::new(),
+                    checked_file_count: 0,
+                },
+            });
+        }
+
+        let reset_session = self
+            .session
+            .as_ref()
+            .is_none_or(|session| session.cache_key != cache_key);
+        if reset_session {
+            self.session = Some(DaemonCheckSession {
+                cache_key,
+                state: State::new(config_finder, self.thread_count),
+                known_files: HashMap::new(),
+            });
+        }
+        let session = self
+            .session
+            .as_mut()
+            .expect("daemon session should have been initialized");
+        let changed_files = Self::changed_known_files(&session.known_files);
+        let state = &session.state;
+        let handles = Handles::new(expanded_file_list);
+        let require_levels = args.args.get_required_levels();
+        let mut transaction = state.new_committable_transaction(require_levels.default, None);
+        let mut_transaction = transaction.as_mut();
+        if !changed_files.is_empty() {
+            mut_transaction.invalidate_disk(&changed_files);
+            if changed_files.iter().any(|path| {
+                path.file_name()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| ConfigFile::CONFIG_FILE_NAMES.contains(&x))
+            }) {
+                mut_transaction.invalidate_config();
+            }
+        }
+        let (loaded_handles, reloaded_configs, sourcedb_errors) =
+            handles.all(state.config_finder());
+        mut_transaction.invalidate_find_for_configs(reloaded_configs);
+
+        if (args.args.output.baseline.is_none()
+            || args.args.output.output_format.is_none()
+            || args.args.output.min_severity.is_none())
+            && let Some(handle) = loaded_handles.first()
+        {
+            let config = state.config_finder().python_file(
+                ModuleNameWithKind::guaranteed(handle.module()),
+                handle.path(),
+            );
+            args.args.output.inherit_defaults_from_config(&config);
+        }
+
+        let checked_file_count = loaded_handles.len();
+        let relative_to = resolve_relative_to(args.args.output.relative_to.as_ref());
+        let (status, errors) = args.args.run_inner(
+            Timings::new(),
+            mut_transaction,
+            &loaded_handles,
+            sourcedb_errors,
+            require_levels.specified,
+            upsell,
+        )?;
+        let result = CheckResult::from_errors(&errors, &relative_to, checked_file_count);
+        state.commit_transaction(transaction, None);
+        session.known_files = Self::known_files(state);
+        Ok(DaemonCheckResponse { status, result })
+    }
+
+    fn changed_known_files(known_files: &HashMap<PathBuf, Option<SystemTime>>) -> Vec<PathBuf> {
+        known_files
+            .iter()
+            .filter_map(|(path, old)| {
+                let new = Self::modified_time(path);
+                if &new == old {
+                    None
+                } else {
+                    Some(path.clone())
+                }
+            })
+            .collect()
+    }
+
+    fn known_files(state: &State) -> HashMap<PathBuf, Option<SystemTime>> {
+        let transaction = state.transaction();
+        let mut files = HashSet::new();
+        for handle in transaction.handles() {
+            if let ModulePathDetails::FileSystem(_) = handle.path().details() {
+                files.insert(handle.path().as_path().to_path_buf());
+            }
+            if let Some(config) = transaction.get_config(&handle) {
+                match &config.source {
+                    ConfigSource::File(path)
+                    | ConfigSource::FailedParse(path)
+                    | ConfigSource::PythonToolMarker(path)
+                    | ConfigSource::Marker(path) => {
+                        files.insert(path.clone());
+                    }
+                    ConfigSource::Synthetic => {}
+                }
+            }
+        }
+        files
+            .into_iter()
+            .map(|path| {
+                let modified = Self::modified_time(&path);
+                (path, modified)
+            })
+            .collect()
+    }
+
+    fn modified_time(path: &Path) -> Option<SystemTime> {
+        std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    }
+}
+
 /// Main arguments for Pyrefly type checker
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Parser, Clone, Deserialize, Serialize)]
 pub struct CheckArgs {
     /// Output related configuration options
     #[command(flatten, next_help_heading = "Output")]
@@ -197,7 +429,7 @@ pub struct CheckArgs {
 
 /// Arguments for snippet checking (excludes behavior args that don't apply to snippets)
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Parser, Clone, Deserialize, Serialize)]
 pub struct SnippetCheckArgs {
     /// Python code to type check
     code: String,
@@ -241,7 +473,7 @@ impl SnippetCheckArgs {
 
 /// how/what should Pyrefly output
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Parser, Clone, Deserialize, Serialize)]
 struct OutputArgs {
     /// Write the errors to a file, instead of printing them.
     #[arg(long, short = 'o', value_name = "OUTPUT_FILE")]
@@ -392,9 +624,47 @@ impl OutputArgs {
             ProgressBarStyle::Interactive
         }
     }
+
+    fn write_legacy(&self, mut writer: impl Write, errors: &LegacyErrors) -> anyhow::Result<()> {
+        match self.output_format() {
+            OutputFormat::Json => {
+                serde_json::to_writer_pretty(&mut writer, errors)?;
+                writeln!(writer)?;
+            }
+            OutputFormat::Github => {
+                for error in &errors.errors {
+                    if let Some(command) = legacy_github_actions_command(error) {
+                        writeln!(writer, "{command}")?;
+                    }
+                }
+            }
+            OutputFormat::OmitErrors => {}
+            OutputFormat::MinText | OutputFormat::FullText => {
+                for error in &errors.errors {
+                    writeln!(
+                        writer,
+                        "{}:{}:{}: {} [{}]",
+                        error.path, error.line, error.column, error.description, error.name
+                    )?;
+                }
+            }
+        }
+        writer.flush()?;
+        Ok(())
+    }
 }
 
-#[derive(Clone, Debug, ValueEnum, Default, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    ValueEnum,
+    Default,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize
+)]
 enum Summary {
     None,
     #[default]
@@ -404,7 +674,7 @@ enum Summary {
 
 /// non-config type checker behavior
 #[deny(clippy::missing_docs_in_private_items)]
-#[derive(Debug, Parser, Clone)]
+#[derive(Debug, Parser, Clone, Deserialize, Serialize)]
 struct BehaviorArgs {
     /// Check all reachable modules, not just the ones that are passed in explicitly on CLI positional arguments.
     #[arg(long, short = 'a')]
@@ -562,6 +832,27 @@ fn github_actions_command(error: &Error) -> Option<String> {
         escape_workflow_property(&format!("Pyrefly {}", error.error_kind().to_name())),
     );
     let message = escape_workflow_data(&error.msg());
+    Some(format!("::{command} {params}::{message}"))
+}
+
+fn legacy_github_actions_command(error: &LegacyError) -> Option<String> {
+    let command = match error.severity.as_str() {
+        "ignore" => None,
+        "warn" => Some("warning"),
+        "info" => Some("notice"),
+        "error" => Some("error"),
+        _ => None,
+    }?;
+    let params = format!(
+        "file={},line={},col={},endLine={},endColumn={},title={}",
+        escape_workflow_property(&error.path),
+        error.line,
+        error.column,
+        error.stop_line,
+        error.stop_column,
+        escape_workflow_property(&format!("Pyrefly {}", error.name)),
+    );
+    let message = escape_workflow_data(&error.description);
     Some(format!("::{command} {params}::{message}"))
 }
 
@@ -1368,6 +1659,7 @@ impl CheckArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1472,6 +1764,61 @@ mod tests {
         output.inherit_defaults_from_config(&config);
 
         assert_eq!(output.output_format(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn daemon_cache_key_ignores_output_only_args() {
+        let json = FullCheckArgs::parse_from([
+            "check",
+            "--daemon",
+            "--output-format",
+            "json",
+            "--relative-to",
+            "/repo",
+            "foo.py",
+        ]);
+        let text = FullCheckArgs::parse_from([
+            "check",
+            "--daemon",
+            "--output-format",
+            "min-text",
+            "--relative-to",
+            "/other",
+            "foo.py",
+        ]);
+
+        assert_eq!(
+            json.daemon_cache_key().unwrap(),
+            text.daemon_cache_key().unwrap()
+        );
+    }
+
+    #[test]
+    fn daemon_response_writes_json_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("errors.json");
+        let args = FullCheckArgs::parse_from([
+            "check",
+            "--daemon",
+            "--output-format",
+            "json",
+            "--summary",
+            "none",
+            "--output",
+            output.to_str().unwrap(),
+            "foo.py",
+        ]);
+        let error = sample_error("bad".into());
+        let response = DaemonCheckResponse {
+            status: CommandExitStatus::UserError,
+            result: CheckResult::from_errors(&[error], Path::new("/repo"), 1),
+        };
+
+        args.write_daemon_response(&response).unwrap();
+
+        let written = std::fs::read_to_string(output).unwrap();
+        assert!(written.contains("\"errors\""), "{written}");
+        assert!(written.contains("\"bad-assignment\""), "{written}");
     }
 
     fn upsell_string(reason: SynthesizedPresetReason) -> String {

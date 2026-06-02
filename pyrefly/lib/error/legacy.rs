@@ -32,25 +32,25 @@ fn default_severity() -> String {
 /// <https://www.internalfb.com/code/fbsource/fbcode/tools/pyre/facebook/arc/lib/error.rs>
 ///
 /// Used to serialize errors in a Pyre1-compatible format.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct LegacyError {
-    line: usize,
+    pub line: usize,
     pub column: usize,
-    stop_line: usize,
-    stop_column: usize,
+    pub stop_line: usize,
+    pub stop_column: usize,
     pub path: String,
     /// This field is no longer used in Pyrefly. It is kept here for Pyre1 backward compatibility.
-    code: i32,
+    pub code: i32,
     /// The kebab-case name of the error kind.
     pub name: String,
-    description: String,
-    concise_description: String,
+    pub description: String,
+    pub concise_description: String,
     /// This field is not part of Pyre1 error format. But it's useful for Pyrefly clients
     #[serde(default = "default_severity")]
-    severity: String,
+    pub severity: String,
     /// Optional notebook cell number for errors in notebook files
     #[serde(skip_serializing_if = "Option::is_none")]
-    cell: Option<usize>,
+    pub cell: Option<usize>,
 }
 
 impl LegacyError {

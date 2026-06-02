@@ -12,6 +12,8 @@ use clap::Parser;
 use pyrefly_util::args::clap_env;
 use pyrefly_util::thread_pool::ThreadCount;
 use pyrefly_util::trace::init_tracing;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Arguments shared between all commands.
 #[deny(clippy::missing_docs_in_private_items)]
@@ -61,7 +63,7 @@ impl CommonGlobalArgs {
 }
 
 /// Exit status of a command, if the run is completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash, Serialize)]
 pub enum CommandExitStatus {
     /// The command completed without an issue.
     Success,

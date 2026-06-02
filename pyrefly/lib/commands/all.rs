@@ -16,6 +16,7 @@ use crate::commands::check::CheckResult;
 use crate::commands::check::FullCheckArgs;
 use crate::commands::check::SnippetCheckArgs;
 use crate::commands::config_finder::ConfigConfigurerWrapper;
+use crate::commands::daemon::DaemonArgs;
 use crate::commands::dump_config::DumpConfigArgs;
 use crate::commands::infer::InferArgs;
 use crate::commands::init::InitArgs;
@@ -57,6 +58,9 @@ pub enum Command {
 
     /// Start an LSP server
     Lsp(LspArgs),
+
+    /// Start a local daemon for incremental CLI checks.
+    Daemon(DaemonArgs),
 
     /// Start a TSP server
     Tsp(TspArgs),
@@ -101,6 +105,7 @@ impl Command {
                 )?,
                 None,
             )),
+            Command::Daemon(args) => Ok((args.run(thread_count).await?, None)),
             Command::Tsp(args) => Ok((
                 args.run(telemetry, config_configurer_wrapper, thread_count)?,
                 None,

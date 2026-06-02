@@ -46,6 +46,7 @@ use pyrefly_util::fs_anyhow;
 use pyrefly_util::interned_path::InternedPath;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
+use serde::Deserialize;
 use serde::Serialize;
 
 use crate::error::error::Error as TypeError;
@@ -89,7 +90,7 @@ use crate::report::pysa::type_of_expression::export_type_of_expressions;
 use crate::report::pysa::types::PysaType;
 use crate::state::state::Transaction;
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Deserialize, Serialize)]
 pub enum PysaFormat {
     Capnp,
     Json,
