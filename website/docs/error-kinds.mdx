@@ -641,6 +641,23 @@ class C:
         self.y = 0  # error, `y` may be undefined if `f` does not execute
 ```
 
+## import-cycle
+
+Default severity: `ignore`
+
+This error is emitted when a module is part of a circular import dependency.
+Circular imports make module initialization order harder to reason about, and
+the same project-structure issue can exist even when the imports only appear
+inside `if TYPE_CHECKING:` blocks.
+
+```python
+# a.py
+from b import B  # import-cycle
+
+# b.py
+from a import A  # import-cycle
+```
+
 ## incompatible-comparison
 
 Default severity: `ignore`

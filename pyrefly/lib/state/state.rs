@@ -51,6 +51,7 @@ use pyrefly_util::lock::RwLock;
 use pyrefly_util::locked_map::LockedMap;
 use pyrefly_util::no_hash::BuildNoHash;
 use pyrefly_util::prelude::VecExt;
+use pyrefly_util::tarjan::Tarjan;
 use pyrefly_util::task_heap::CancellationHandle;
 use pyrefly_util::task_heap::Cancelled;
 use pyrefly_util::task_heap::TaskHeap;
@@ -2073,7 +2074,70 @@ impl<'a> Transaction<'a> {
         require: Require,
         custom_thread_pool: Option<&ThreadPool>,
     ) {
-        let _ = self.run_internal(handles, require, custom_thread_pool);
+        if self
+            .run_internal(handles, require, custom_thread_pool)
+            .is_ok()
+        {
+            self.report_import_cycles(handles);
+        }
+    }
+
+    fn report_import_cycles(&self, handles: &[Handle]) {
+        let included: HashSet<Handle> = handles.iter().cloned().collect();
+        let mut graph = HashMap::with_capacity(handles.len());
+        for handle in handles {
+            let deps = self
+                .get_module(handle)
+                .deps
+                .read()
+                .keys()
+                .filter(|dep| included.contains(*dep))
+                .cloned()
+                .collect::<Vec<_>>();
+            graph.insert(handle.dupe(), deps);
+        }
+
+        let mut tarjan = Tarjan::new();
+        let mut reported = HashSet::new();
+        for handle in handles {
+            let scc = tarjan.root(handle.dupe(), &|node, edge| {
+                if let Some(deps) = graph.get(node) {
+                    for dep in deps {
+                        edge(dep.dupe());
+                    }
+                }
+            });
+            let mut modules = tarjan.iter_scc(scc).cloned().collect::<Vec<_>>();
+            let has_cycle = modules.len() > 1
+                || modules.iter().any(|module| {
+                    graph
+                        .get(module)
+                        .is_some_and(|deps| deps.iter().any(|dep| dep == module))
+                });
+            if !has_cycle {
+                continue;
+            }
+            modules.sort_by(|left, right| {
+                left.module()
+                    .as_str()
+                    .cmp(right.module().as_str())
+                    .then_with(|| left.path().as_path().cmp(right.path().as_path()))
+            });
+            let module_names = modules
+                .iter()
+                .map(|module| module.module().as_str().to_owned())
+                .join(", ");
+            for module in modules {
+                if reported.insert(module.dupe()) {
+                    self.add_error(
+                        self.get_module(&module),
+                        TextRange::default(),
+                        format!("Import cycle detected among modules: {module_names}"),
+                        ErrorKind::ImportCycle,
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) fn ad_hoc_solve<R: Sized, F: FnOnce(AnswersSolver<TransactionHandle>) -> R>(
@@ -3115,7 +3179,9 @@ impl CancellableTransaction<'_> {
         require: Require,
         custom_thread_pool: Option<&ThreadPool>,
     ) -> Result<(), Cancelled> {
-        self.0.run_internal(handles, require, custom_thread_pool)
+        self.0.run_internal(handles, require, custom_thread_pool)?;
+        self.0.report_import_cycles(handles);
+        Ok(())
     }
 
     pub fn get_cancellation_handle(&self) -> CancellationHandle {

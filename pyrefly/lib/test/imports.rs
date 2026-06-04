@@ -111,6 +111,60 @@ assert_type(y, foo.bar.X)
 "#,
 );
 
+fn env_import_cycle() -> TestEnv {
+    let mut env = TestEnv::new().enable_import_cycle_error();
+    env.add(
+        "a",
+        r#"from b import B  # E: Import cycle detected among modules: a, b
+class A: ...
+"#,
+    );
+    env.add(
+        "b",
+        r#"from a import A  # E: Import cycle detected among modules: a, b
+class B: ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_import_cycle,
+    env_import_cycle(),
+    r#"
+import a
+"#,
+);
+
+fn env_type_checking_import_cycle() -> TestEnv {
+    let mut env = TestEnv::new().enable_import_cycle_error();
+    env.add(
+        "a",
+        r#"from typing import TYPE_CHECKING  # E: Import cycle detected among modules: a, b
+if TYPE_CHECKING:
+    from b import B
+class A: ...
+"#,
+    );
+    env.add(
+        "b",
+        r#"from typing import TYPE_CHECKING  # E: Import cycle detected among modules: a, b
+if TYPE_CHECKING:
+    from a import A
+class B: ...
+"#,
+    );
+    env
+}
+
+testcase!(
+    test_type_checking_import_cycle,
+    env_type_checking_import_cycle(),
+    r#"
+import a
+"#,
+);
+
 testcase!(
     test_import_overwrite,
     env_class_x(),
