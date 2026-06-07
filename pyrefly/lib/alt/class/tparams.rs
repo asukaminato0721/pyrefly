@@ -25,7 +25,6 @@ use crate::binding::binding::KeyLegacyTypeParam;
 use crate::binding::binding::KeyTParams;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::types::class::Class;
 use crate::types::types::TParams;
 use crate::types::types::TParamsSource;
@@ -59,7 +58,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .collect::<SmallSet<_>>();
         let legacy_map = legacy_tparams
             .iter()
-            .map(|p| (p.quantified.clone(), p))
+            .map(|p| (p.clone(), p))
             .collect::<SmallMap<_, _>>();
         let lookup_tparam = |t: &Type| {
             let (q, kind) = match t {
@@ -70,7 +69,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     name.range,
-                    ErrorInfo::Kind(ErrorKind::InvalidTypeVar),
+                    ErrorKind::InvalidTypeVar,
                     format!("Expected a {kind}, got `{}`", self.for_display(t.clone())),
                 );
             }
@@ -80,7 +79,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     self.error(
                         errors,
                         name.range,
-                        ErrorInfo::Kind(ErrorKind::InvalidTypeVar),
+                        ErrorKind::InvalidTypeVar,
                         "Redundant type parameter declaration".to_owned(),
                     );
                 }
@@ -105,7 +104,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             x.range(),
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             format!(
                                 "Duplicated type parameter declaration `{}`",
                                 self.module().display(x)
@@ -119,7 +118,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 name.range,
-                ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                ErrorKind::InvalidInheritance,
                 format!(
                     "Class `{}` specifies type parameters in both `Generic` and `Protocol` bases",
                     name.id,
@@ -139,7 +138,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if !implicit_tparams_okay {
                     self.error(errors,
                         name.range,
-                        ErrorInfo::Kind(ErrorKind::InvalidTypeVar),
+                        ErrorKind::InvalidTypeVar,
                         format!(
                             "Class `{}` uses type variables not specified in `Generic` or `Protocol` base",
                             name.id,
@@ -150,7 +149,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         }
 
-        // Convert our set of `TParam`s into a `TParams` object, which will also perform
+        // Convert our set of `Quantified`s into a `TParams` object, which will also perform
         // some additional validation that isn't specific to classes.
         self.validated_tparams(
             name.range,

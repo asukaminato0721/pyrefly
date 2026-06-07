@@ -10,7 +10,7 @@ from collections.abc import Callable
 from threading import Thread
 from types import TracebackType
 from typing import Any, Final, NoReturn, final, overload
-from typing_extensions import TypeVarTuple, Unpack, disjoint_base
+from typing_extensions import TypeVarTuple, Unpack, deprecated, disjoint_base
 
 _Ts = TypeVarTuple("_Ts")
 
@@ -29,6 +29,7 @@ def _count() -> int:
     In most applications `threading.enumerate()` should be used instead.
     """
     ...
+
 @final
 class RLock:
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
@@ -93,14 +94,18 @@ if sys.version_info >= (3, 13):
     def start_joinable_thread(
         function: Callable[[], object], handle: _ThreadHandle | None = None, daemon: bool = True
     ) -> _ThreadHandle: ...
+
     @final
     class lock:
         def acquire(self, blocking: bool = True, timeout: float = -1) -> bool: ...
         def release(self) -> None: ...
         def locked(self) -> bool: ...
-        def acquire_lock(self, blocking: bool = True, timeout: float = -1) -> bool: ...
-        def release_lock(self) -> None: ...
-        def locked_lock(self) -> bool: ...
+        @deprecated("Obsolete synonym. Use `acquire()` instead.")
+        def acquire_lock(self, blocking: bool = True, timeout: float = -1) -> bool: ...  # undocumented
+        @deprecated("Obsolete synonym. Use `release()` instead.")
+        def release_lock(self) -> None: ...  # undocumented
+        @deprecated("Obsolete synonym. Use `locked()` instead.")
+        def locked_lock(self) -> bool: ...  # undocumented
         def __enter__(self) -> bool: ...
         def __exit__(
             self, type: type[BaseException] | None, value: BaseException | None, traceback: TracebackType | None
@@ -153,6 +158,7 @@ else:
             Return whether the lock is in the locked state.
             """
             ...
+        @deprecated("Obsolete synonym. Use `acquire()` instead.")
         def acquire_lock(self, blocking: bool = True, timeout: float = -1) -> bool:
             """
             acquire(blocking=True, timeout=-1) -> bool
@@ -166,6 +172,7 @@ else:
             The blocking operation is interruptible.
             """
             ...
+        @deprecated("Obsolete synonym. Use `release()` instead.")
         def release_lock(self) -> None:
             """
             release()
@@ -176,6 +183,7 @@ else:
             but it needn't be locked by the same thread that unlocks it.
             """
             ...
+        @deprecated("Obsolete synonym. Use `locked()` instead.")
         def locked_lock(self) -> bool:
             """
             locked() -> bool
@@ -239,8 +247,8 @@ def start_new_thread(function: Callable[..., object], args: tuple[Any, ...], kwa
     """
     ...
 
-# Obsolete synonym for start_new_thread()
 @overload
+@deprecated("Obsolete synonym. Use `start_new_thread()` instead.")
 def start_new(function: Callable[[Unpack[_Ts]], object], args: tuple[Unpack[_Ts]], /) -> int:
     """
     start_new_thread(function, args[, kwargs])
@@ -255,6 +263,7 @@ def start_new(function: Callable[[Unpack[_Ts]], object], args: tuple[Unpack[_Ts]
     """
     ...
 @overload
+@deprecated("Obsolete synonym. Use `start_new_thread()` instead.")
 def start_new(function: Callable[..., object], args: tuple[Any, ...], kwargs: dict[str, Any], /) -> int:
     """
     start_new_thread(function, args[, kwargs])
@@ -269,23 +278,18 @@ def start_new(function: Callable[..., object], args: tuple[Any, ...], kwargs: di
     """
     ...
 
-if sys.version_info >= (3, 10):
-    def interrupt_main(signum: signal.Signals = signal.SIGINT, /) -> None:
-        """
-        interrupt_main(signum=signal.SIGINT, /)
+def interrupt_main(signum: signal.Signals = signal.SIGINT, /) -> None:
+    """
+    interrupt_main(signum=signal.SIGINT, /)
 
-        Simulate the arrival of the given signal in the main thread,
-        where the corresponding signal handler will be executed.
-        If *signum* is omitted, SIGINT is assumed.
-        A subthread can use this function to interrupt the main thread.
+    Simulate the arrival of the given signal in the main thread,
+    where the corresponding signal handler will be executed.
+    If *signum* is omitted, SIGINT is assumed.
+    A subthread can use this function to interrupt the main thread.
 
-        Note: the default signal handler for SIGINT raises ``KeyboardInterrupt``.
-        """
-        ...
-
-else:
-    def interrupt_main() -> None: ...
-
+    Note: the default signal handler for SIGINT raises ``KeyboardInterrupt``.
+    """
+    ...
 def exit() -> NoReturn:
     """
     exit()
@@ -295,6 +299,7 @@ def exit() -> NoReturn:
     thread to exit silently unless the exception is caught.
     """
     ...
+@deprecated("Obsolete synonym. Use `exit()` instead.")
 def exit_thread() -> NoReturn:
     """
     exit()
@@ -313,6 +318,7 @@ def allocate_lock() -> LockType:
     information about locks.
     """
     ...
+@deprecated("Obsolete synonym. Use `allocate_lock()` instead.")
 def allocate() -> LockType:
     """
     allocate_lock() -> lock object
@@ -369,6 +375,7 @@ def get_native_id() -> int:
     particular thread within a system.
     """
     ...
+
 @final
 class _ExceptHookArgs(structseq[Any], tuple[type[BaseException], BaseException | None, TracebackType | None, Thread | None]):
     """
@@ -376,8 +383,7 @@ class _ExceptHookArgs(structseq[Any], tuple[type[BaseException], BaseException |
 
     Type used to pass arguments to threading.excepthook.
     """
-    if sys.version_info >= (3, 10):
-        __match_args__: Final = ("exc_type", "exc_value", "exc_traceback", "thread")
+    __match_args__: Final = ("exc_type", "exc_value", "exc_traceback", "thread")
 
     @property
     def exc_type(self) -> type[BaseException]:

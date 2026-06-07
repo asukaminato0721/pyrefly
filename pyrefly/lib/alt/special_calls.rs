@@ -12,7 +12,6 @@
  */
 
 use pyrefly_types::callable::FuncMetadata;
-use pyrefly_types::types::Union;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Expr;
@@ -20,7 +19,6 @@ use ruff_python_ast::Keyword;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
-use vec1::vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
@@ -31,15 +29,12 @@ use crate::alt::types::decorated_function::Decorator;
 use crate::alt::unwrap::HintRef;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
 use crate::types::callable::FunctionKind;
 use crate::types::callable::unexpected_keyword;
 use crate::types::class::Class;
-use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
-use crate::types::types::AnyStyle;
 use crate::types::types::Type;
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
@@ -54,36 +49,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let ret = if args.len() == 2 {
             let expr_a = &args[0];
             let expr_b = &args[1];
-            let a = self.expr_infer_with_hint(expr_a, hint, errors);
-            let b = self.expr_untype(expr_b, TypeFormContext::FunctionArgument, errors);
-            let self_form = Type::SpecialForm(SpecialForm::SelfType);
-            let normalize_type = |ty: Type, expr: &Expr| {
-                let mut ty = self
-                    .canonicalize_all_class_types(
-                        self.solver().deep_force(ty),
-                        expr.range(),
-                        errors,
-                    )
-                    .promote_typevar_values(self.stdlib)
-                    .explicit_any()
-                    .explicit_literals()
-                    .noreturn_to_never()
-                    .anon_callables()
-                    .anon_typed_dicts(self.stdlib)
-                    .distribute_type_over_union();
-                // Make assert_type(Self@SomeClass, typing.Self) work.
-                ty.subst_self_type_mut(&self_form);
-                // Re-sort unions & drop any display names.
-                // Make sure to keep this as the final step before comparison.
-                ty.sort_unions_and_drop_names()
-            };
-            let a = normalize_type(a, expr_a);
-            let b = normalize_type(b, expr_b);
-            if a != b {
+            let a = self
+                .solver()
+                .force(self.expr_infer_with_hint(expr_a, hint, errors));
+            let b = self.solver().force(self.expr_untype(
+                expr_b,
+                TypeFormContext::FunctionArgument,
+                errors,
+            ));
+            if !self.is_equivalent(&a, &b) {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::AssertType),
+                    ErrorKind::AssertType,
                     format!(
                         "assert_type({}, {}) failed",
                         self.for_display(a.clone()),
@@ -96,23 +74,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::BadArgumentCount),
+                ErrorKind::BadArgumentCount,
                 format!(
-                    "assert_type needs 2 positional arguments, got {:#?}",
+                    "assert_type needs 2 positional arguments, got {}",
                     args.len()
                 ),
             );
-            Type::any_error()
+            self.heap.mk_any_error()
         };
         for keyword in keywords {
             unexpected_keyword(
                 &|msg| {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorInfo::Kind(ErrorKind::UnexpectedKeyword),
-                        msg,
-                    );
+                    self.error(errors, range, ErrorKind::UnexpectedKeyword, msg);
                 },
                 "assert_type",
                 keyword,
@@ -138,7 +111,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::RevealType),
+                ErrorKind::RevealType,
                 format!("revealed type: {type_info}"),
             );
             ret
@@ -146,29 +119,61 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::BadArgumentCount),
+                ErrorKind::BadArgumentCount,
                 format!(
                     "reveal_type needs 1 positional argument, got {}",
                     args.len()
                 ),
             );
-            Type::any_error()
+            self.heap.mk_any_error()
         };
         for keyword in keywords {
             unexpected_keyword(
                 &|msg| {
-                    self.error(
-                        errors,
-                        range,
-                        ErrorInfo::Kind(ErrorKind::UnexpectedKeyword),
-                        msg,
-                    );
+                    self.error(errors, range, ErrorKind::UnexpectedKeyword, msg);
                 },
                 "reveal_type",
                 keyword,
             );
         }
         ret
+    }
+
+    /// Handle `TypeForm(expr)` — validates the argument is a valid type expression
+    /// and returns `TypeForm[T]` where `T` is the resolved type.
+    pub fn call_typeform(
+        &self,
+        args: &[Expr],
+        keywords: &[Keyword],
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Type {
+        if !keywords.is_empty() {
+            return self.error(
+                errors,
+                range,
+                ErrorKind::UnexpectedKeyword,
+                "`TypeForm` does not accept keyword arguments".to_owned(),
+            );
+        }
+        if args.len() != 1 {
+            return self.error(
+                errors,
+                range,
+                ErrorKind::BadArgumentCount,
+                format!(
+                    "`TypeForm` expected 1 positional argument, got {}",
+                    args.len()
+                ),
+            );
+        }
+        // Validate that the argument has valid type annotation syntax (e.g., reject
+        // call expressions like `type(1)` which are not valid type forms).
+        if !self.has_valid_annotation_syntax(&args[0], errors) {
+            return Type::TypeForm(Box::new(self.heap.mk_any_error()));
+        }
+        let inner = self.expr_untype(&args[0], TypeFormContext::TypeArgument, errors);
+        Type::TypeForm(Box::new(inner))
     }
 
     /// Simulates a call to `typing.cast`, whose signature is
@@ -204,7 +209,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "`typing.cast` got multiple values for argument `typ`".to_owned(),
                         );
                     }
@@ -215,7 +220,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "`typing.cast` got multiple values for argument `val`".to_owned(),
                         );
                     }
@@ -230,7 +235,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::BadArgumentCount),
+                ErrorKind::BadArgumentCount,
                 format!("`typing.cast` expected 2 arguments, got {}", extra + 2),
             );
         }
@@ -240,7 +245,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 None => self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::BadArgumentType),
+                    ErrorKind::BadArgumentType,
                     "First argument to `typing.cast` must be a type".to_owned(),
                 ),
             }
@@ -248,7 +253,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::MissingArgument),
+                ErrorKind::MissingArgument,
                 "`typing.cast` missing required argument `typ`".to_owned(),
             )
         };
@@ -256,7 +261,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 range,
-                ErrorInfo::Kind(ErrorKind::MissingArgument),
+                ErrorKind::MissingArgument,
                 "`typing.cast` missing required argument `val`".to_owned(),
             );
         }
@@ -266,7 +271,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::RedundantCast),
+                    ErrorKind::RedundantCast,
                     format!(
                         "Redundant cast: `{}` is the same type as `{}`",
                         val_type.deterministic_printing(),
@@ -285,7 +290,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         self.check_arg_is_class_object(obj, class_or_tuple, &FunctionKind::IsInstance, errors);
-        self.stdlib.bool().clone().to_type()
+        self.heap.mk_class_type(self.stdlib.bool().clone())
     }
 
     pub fn call_issubclass(
@@ -295,72 +300,78 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         self.check_arg_is_class_object(cls, class_or_tuple, &FunctionKind::IsSubclass, errors);
-        self.stdlib.bool().clone().to_type()
+        self.heap.mk_class_type(self.stdlib.bool().clone())
     }
 
+    // isinstance(object, class_info) / issubclass(class, class_info)
     pub(crate) fn check_type_is_class_object(
         &self,
-        ty: Type,
-        object_type: Option<Type>,
+        object_or_class: Option<Type>,
+        class_info: Type,
         contains_subscript: bool,
         range: TextRange,
         func_kind: &FunctionKind,
         errors: &ErrorCollector,
         error_kind: ErrorKind,
     ) {
-        for ty in self.as_class_info(ty) {
-            if let Type::ClassDef(cls) = &ty {
-                if cls.has_toplevel_qname("typing", "Any") {
+        // Decompose class_info, which could be a union or tuple
+        for class_info_ty in self.as_class_info(class_info) {
+            if let Type::ClassDef(class_info_cls) = &class_info_ty {
+                if class_info_cls.has_toplevel_qname("typing", "Any") {
                     self.error(
                         errors,
                         range,
-                        ErrorInfo::Kind(error_kind),
+                        error_kind,
                         "Expected class object, got `Any`".to_owned(),
                     );
                 }
-                let metadata = self.get_metadata_for_class(cls);
+                let class_info_metadata = self.get_metadata_for_class(class_info_cls);
                 let func_display = || format!("{}()", func_kind.format(self.module().name()));
-                if metadata.is_new_type() {
+                if class_info_metadata.is_new_type() {
                     self.error(
                         errors,
                         range,
-                        ErrorInfo::Kind(error_kind),
-                        format!("NewType `{}` not allowed in {}", cls.name(), func_display(),),
+                        error_kind,
+                        format!(
+                            "NewType `{}` not allowed in {}",
+                            class_info_cls.name(),
+                            func_display(),
+                        ),
                     );
                 }
                 // Check if this is a TypedDict
-                if metadata.is_typed_dict() {
+                if class_info_metadata.is_typed_dict() {
                     self.error(
                         errors,
                         range,
-                        ErrorInfo::Kind(error_kind),
+                        error_kind,
                         format!(
                             "TypedDict `{}` not allowed as second argument to {}",
-                            cls.name(),
+                            class_info_cls.name(),
                             func_display()
                         ),
                     );
                 }
                 // Check if this is a protocol that needs @runtime_checkable
-                if metadata.is_protocol() && !metadata.is_typed_dict() {
-                    if !metadata.is_runtime_checkable_protocol() {
+                if class_info_metadata.is_protocol() && !class_info_metadata.is_typed_dict() {
+                    if !class_info_metadata.is_runtime_checkable_protocol() {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(error_kind),
-                            format!("Protocol `{}` is not decorated with @runtime_checkable and cannot be used with {}", cls.name(), func_display()),
+                            error_kind,
+                            format!("Protocol `{}` is not decorated with @runtime_checkable and cannot be used with {}", class_info_cls.name(), func_display()),
                         );
                     } else {
                         // Additional validation for runtime checkable protocols:
                         // issubclass() can only be used with non-data protocols
                         if *func_kind == FunctionKind::IsSubclass
-                            && self.is_data_protocol(cls, range)
+                            && self.is_data_protocol(class_info_cls, range)
                         {
                             self.error(
                                 errors,
                                 range,
-                                ErrorInfo::Kind(error_kind),
-                                format!("Protocol `{}` has non-method members and cannot be used with issubclass()", cls.name()),
+                                error_kind,
+                                format!("Protocol `{}` has non-method members and cannot be used with issubclass()", class_info_cls.name()),
                             );
                         }
                         // Check for unsafe overlap:
@@ -370,17 +381,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         //
                         // Type arguments for the protocol are not provided, so we'll use
                         // fresh vars and solve them during the `is_subset_eq` check below.
-                        let protocol_metadata = metadata.protocol_metadata().unwrap();
-                        if let Some(object_type) = &object_type
+                        let class_info_protocol = class_info_metadata.protocol_metadata().unwrap();
+                        if let Some(object_type) = &object_or_class
                             && let (vs, Type::ClassType(protocol_class_type)) =
-                                self.instantiate_fresh_class(cls)
+                                self.instantiate_fresh_class(class_info_cls)
                         {
+                            let mut all_members_present = true;
                             let mut unsafe_overlap_errors = vec![];
-                            for field_name in &protocol_metadata.members {
+                            for field_name in &class_info_protocol.members {
                                 if !self.has_attr(object_type, field_name) {
-                                    // It's okay if the field is missing, since
-                                    // we only care about unsafe overlaps
-                                    continue;
+                                    all_members_present = false;
+                                    break;
                                 }
                                 if let Err(subset_err) = self.is_protocol_subset_at_attr(
                                     object_type,
@@ -398,31 +409,27 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                     ));
                                 }
                             }
-                            if let Err(specialization_errors) =
-                                self.solver().finish_quantified(vs, false)
-                            {
+                            if let Err(specialization_errors) = self.finish_quantified(vs, false) {
                                 for e in specialization_errors {
                                     unsafe_overlap_errors.push(e.to_error_msg(self))
                                 }
                             }
-                            if !unsafe_overlap_errors.is_empty() {
-                                let mut full_msg = vec1![format!(
-                                    "Runtime checkable protocol `{}` has an unsafe overlap with type `{}`",
-                                    cls.name(),
-                                    self.for_display(object_type.clone())
-                                )];
-                                full_msg.extend(unsafe_overlap_errors);
-                                errors.add(
+                            if all_members_present && !unsafe_overlap_errors.is_empty() {
+                                errors.error_builder(
                                     range,
-                                    ErrorInfo::Kind(ErrorKind::UnsafeOverlap),
-                                    full_msg,
-                                );
+                                    ErrorKind::UnsafeOverlap,
+                                    format!(
+                                        "Runtime checkable protocol `{}` has an unsafe overlap with type `{}`",
+                                        class_info_cls.name(),
+                                        self.for_display(object_type.clone())
+                                    ),
+                                ).with_details(unsafe_overlap_errors).emit();
                             }
                         }
                     }
                 }
             } else if contains_subscript
-                && matches!(&ty, Type::Type(box Type::ClassType(cls)) if !cls.targs().is_empty())
+                && matches!(&class_info_ty, Type::Type(f) if matches!(&**f, Type::ClassType(cls) if !cls.targs().is_empty()))
             {
                 // If the raw expression contains something that structurally looks like `A[T]` and
                 // part of the expression resolves to a parameterized class type, then we likely have a
@@ -430,32 +437,37 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(error_kind),
+                    error_kind,
                     format!(
                         "Expected class object, got parameterized generic type: `{}`",
-                        self.for_display(ty)
+                        self.for_display(class_info_ty)
                     ),
                 );
-            } else if let Type::Type(box Type::SpecialForm(special_form)) = &ty {
+            } else if let Type::Type(f) = &class_info_ty
+                && let Type::SpecialForm(special_form) = &**f
+            {
                 if !special_form.isinstance_safe() {
                     self.error(
                         errors,
                         range,
-                        ErrorInfo::Kind(error_kind),
+                        error_kind,
                         format!("Expected class object, got special form `{}`", special_form),
                     );
                 }
-            } else if self.unwrap_class_object_silently(&ty).is_none() {
+            } else if self.unwrap_class_object_silently(&class_info_ty).is_none() {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(error_kind),
-                    format!("Expected class object, got `{}`", self.for_display(ty)),
+                    error_kind,
+                    format!(
+                        "Expected class object, got `{}`",
+                        self.for_display(class_info_ty)
+                    ),
                 );
             } else {
                 self.check_type(
-                    &ty,
-                    &self.stdlib.builtins_type().clone().to_type(),
+                    &class_info_ty,
+                    &self.heap.mk_class_type(self.stdlib.builtins_type().clone()),
                     range,
                     errors,
                     &|| {
@@ -479,7 +491,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Use the class type to access the field
                 let class_type = self.as_class_type_unchecked(cls);
                 let ty = self.type_of_attr_get(
-                    &class_type.to_type(),
+                    &self.heap.mk_class_type(class_type),
                     field_name,
                     range,
                     &self.error_swallower(),
@@ -519,7 +531,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // Verify that the `cls` argument has type `type`.
             self.check_type(
                 &ty,
-                &self.stdlib.builtins_type().clone().to_type(),
+                &self.heap.mk_class_type(self.stdlib.builtins_type().clone()),
                 object_or_class_expr.range(),
                 errors,
                 &|| {
@@ -536,8 +548,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
 
         self.check_type_is_class_object(
-            classinfo_type,
             object_type,
+            classinfo_type,
             contains_subscript,
             classinfo_expr.range(),
             func_kind,
@@ -561,15 +573,21 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
                 Type::ClassType(ref c) if Some(c) == me.stdlib.union_type() => {
                     // Could be anything inside here, so add in Any.
-                    res.push(Type::Any(AnyStyle::Implicit));
+                    res.push(me.heap.mk_any_implicit());
                 }
-                Type::Tuple(Tuple::Concrete(ts)) | Type::Union(box Union { members: ts, .. }) => {
+                Type::Tuple(Tuple::Concrete(ts)) => {
                     for t in ts {
                         f(me, t, res)
                     }
                 }
-                Type::Tuple(Tuple::Unbounded(box t)) => f(me, t, res),
-                Type::Tuple(Tuple::Unpacked(box (pre, mid, post))) => {
+                Type::Union(u) => {
+                    for t in u.members {
+                        f(me, t, res)
+                    }
+                }
+                Type::Tuple(Tuple::Unbounded(t)) => f(me, *t, res),
+                Type::Tuple(Tuple::Unpacked(unpacked)) => {
+                    let (pre, mid, post) = *unpacked;
                     for t in pre {
                         f(me, t, res)
                     }
@@ -578,12 +596,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         f(me, t, res)
                     }
                 }
-                Type::Type(box Type::Union(box Union { members: ts, .. })) => {
-                    for t in ts {
-                        f(me, Type::type_form(t), res)
+                Type::Type(inner) if matches!(&*inner, Type::Union(_)) => {
+                    // Repeated match because pattern guards cannot move out of bindings.
+                    let Type::Union(u) = *inner else {
+                        unreachable!("guarded by matches! above")
+                    };
+                    for t in u.members {
+                        f(me, me.heap.mk_type_of(t), res)
                     }
                 }
-                Type::TypeAlias(ta) => f(me, ta.as_value(me.stdlib), res),
+                Type::TypeAlias(ta) => f(me, me.get_type_alias(&ta).as_value(me.stdlib), res),
                 _ => res.push(t),
             }
         }

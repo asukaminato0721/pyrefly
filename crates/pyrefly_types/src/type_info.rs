@@ -22,6 +22,7 @@ use starlark_map::smallmap;
 use vec1::Vec1;
 
 use crate::facet::FacetKind;
+use crate::type_var::TypeVar;
 use crate::types::AnyStyle;
 use crate::types::Type;
 
@@ -137,9 +138,6 @@ impl TypeInfo {
     }
 
     pub fn with_narrow(&self, facets: &Vec1<FacetKind>, ty: Type) -> Self {
-        if ty.is_error() {
-            return self.clone();
-        }
         let mut type_info = self.clone();
         type_info.add_narrow(facets, ty);
         type_info
@@ -304,6 +302,11 @@ impl TypeInfo {
         }
     }
 
+    /// Returns true if this TypeInfo has any facet narrows.
+    pub fn has_facets(&self) -> bool {
+        self.facets.is_some()
+    }
+
     pub fn ty(&self) -> &Type {
         &self.ty
     }
@@ -332,7 +335,9 @@ impl TypeInfo {
 impl Display for TypeInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.ty().fmt(f)?;
-        if let Some(facets) = &self.facets {
+        if let Some(facets) = &self.facets
+            && facets.has_displayable_content()
+        {
             write!(f, " ({facets})")?;
         }
         Ok(())
@@ -364,6 +369,15 @@ impl NarrowedFacets {
         if self.0.len() < NARROWED_FACETS_LIMIT || self.0.contains_key(&facet) {
             self.0.insert(facet, value);
         }
+    }
+
+    /// Returns true if this facets structure has any content that would be displayed.
+    /// Empty `WithoutRoot` entries don't contribute to display output.
+    fn has_displayable_content(&self) -> bool {
+        self.0.iter().any(|(_, value)| match value {
+            NarrowedFacet::Leaf(_) | NarrowedFacet::WithRoot(_, _) => true,
+            NarrowedFacet::WithoutRoot { facets, .. } => facets.has_displayable_content(),
+        })
     }
 
     fn add_narrow(&mut self, facet: &FacetKind, more_facets: &[FacetKind], ty: Type) {
@@ -512,6 +526,11 @@ impl NarrowedFacets {
     ) -> fmt::Result {
         let mut first = true;
         for (facet, value) in self.0.iter() {
+            // Skip WithoutRoot entries with no displayable content
+            if matches!(value, NarrowedFacet::WithoutRoot { facets, .. } if !facets.has_displayable_content())
+            {
+                continue;
+            }
             if first {
                 first = false
             } else {
@@ -521,8 +540,11 @@ impl NarrowedFacets {
                 NarrowedFacet::Leaf(ty) => Self::fmt_type_with_label(prefix, facet, ty, f),
                 NarrowedFacet::WithRoot(ty, facets) => {
                     Self::fmt_type_with_label(prefix, facet, ty, f)?;
-                    write!(f, ", ")?;
-                    facets.fmt_with_prefix_and_facet(prefix, facet, f)
+                    if facets.has_displayable_content() {
+                        write!(f, ", ")?;
+                        facets.fmt_with_prefix_and_facet(prefix, facet, f)?;
+                    }
+                    Ok(())
                 }
                 NarrowedFacet::WithoutRoot { facets, .. } => {
                     facets.fmt_with_prefix_and_facet(prefix, facet, f)
@@ -763,7 +785,7 @@ fn join_types(
     join_style: JoinStyle<Type>,
 ) -> Type {
     match join_style {
-        JoinStyle::SimpleMerge => union_types(types),
+        JoinStyle::SimpleMerge => union_types(dedup_compatible_type_vars(types)),
         JoinStyle::NarrowOf(base_ty) => {
             join_types_impl(types, base_ty, true, union_types, is_subset_eq)
         }
@@ -811,8 +833,29 @@ fn join_types_impl(
             }
         }
     } else {
-        union_types(types)
+        union_types(dedup_compatible_type_vars(types))
     }
+}
+
+/// Deduplicate TypeVars that have the same short name, restriction, variance, and default.
+/// When duplicates are found, the first TypeVar encountered is kept.
+fn dedup_compatible_type_vars(mut types: Vec<Type>) -> Vec<Type> {
+    let mut seen_type_vars: Vec<TypeVar> = Vec::new();
+    types.retain(|ty| {
+        if let Type::TypeVar(tv) = ty {
+            if seen_type_vars.iter().any(|seen| {
+                seen.qname().id() == tv.qname().id()
+                    && seen.restriction() == tv.restriction()
+                    && seen.variance() == tv.variance()
+                    && seen.default() == tv.default()
+            }) {
+                return false;
+            }
+            seen_type_vars.push(tv.clone());
+        }
+        true
+    });
+    types
 }
 
 #[cfg(test)]
@@ -972,7 +1015,7 @@ mod tests {
         );
         // this clears the narrowing for both x.y[0] and x.y[1], but not x.y
         type_info.invalidate_all_indexes_for_assignment(&[x(), y()]);
-        assert_eq!(type_info.to_string(), "Foo (_.x.y: Bar, )");
+        assert_eq!(type_info.to_string(), "Foo (_.x.y: Bar)");
     }
 
     #[test]

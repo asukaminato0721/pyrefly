@@ -54,8 +54,8 @@ class C:
     def foo(cls) -> int:
         return 42
 def f(c: C):
-    reveal_type(C.foo)  # E: revealed type: BoundMethod[type[C], (cls: type[C]) -> int]
-    reveal_type(c.foo)  # E: revealed type: BoundMethod[type[C], (cls: type[C]) -> int]
+    reveal_type(C.foo)  # E: revealed type: (cls: type[C]) -> int
+    reveal_type(c.foo)  # E: revealed type: (cls: type[C]) -> int
     "#,
 );
 
@@ -177,6 +177,40 @@ def f(c: C) -> None:
     "#,
 );
 
+testcase!(
+    test_property_decorated_with_lru_cache,
+    r#"
+import functools
+
+class Foo:
+    @property
+    @functools.lru_cache
+    def foo(self) -> dict[str, str]:
+        return {"a": "b"}
+
+def main() -> None:
+    Foo.foo.get("a")
+    Foo().foo.get("a")
+    "#,
+);
+
+testcase!(
+    bug = "cached_property's __name__ should not exist and attrname should be a str",
+    test_cached_property_attrname,
+    r#"
+from functools import cached_property
+from typing import reveal_type
+
+class C:
+    @cached_property
+    def foo(self) -> int:
+        return 42
+
+reveal_type(C.foo.__name__)  # E: revealed type: str
+reveal_type(C.foo.attrname)  # E: revealed type: Any
+    "#,
+);
+
 // Make sure we don't crash.
 testcase!(
     test_staticmethod_class,
@@ -202,11 +236,57 @@ C().d = 42  # E:  Attribute `d` of class `C` is a read-only descriptor with no `
     "#,
 );
 
-// Test that instance-only attributes with descriptor types are not treated as descriptors.
-// Descriptor protocol only applies to class-body initialized attributes; both annotation-only
-// and method-initialized attributes should allow assignment.
 testcase!(
-    test_instance_only_attribute_does_not_have_descriptor_semantics,
+    test_descriptor_dunder_call,
+    r#"
+from typing import assert_type
+class SomeCallable:
+    def __call__(self, x: int) -> str:
+        return "a"
+class Descriptor:
+    def __get__(self, instance: object, owner: type | None = None) -> SomeCallable:
+        return SomeCallable()
+class B:
+    __call__: Descriptor = Descriptor()
+b_instance = B()
+assert_type(b_instance(1), str)
+    "#,
+);
+
+// Test that a descriptor-based __call__ returning the same class doesn't cause
+// infinite recursion when called through a type variable bound. The circular
+// __call__ resolution is a type error because it would cause infinite recursion at runtime.
+testcase!(
+    test_descriptor_dunder_call_self_referencing_via_typevar,
+    r#"
+from typing import TypeVar
+class SelfDescriptor:
+    def __get__(self, instance: object, owner: type | None = None) -> "SelfCallable":
+        return SelfCallable()
+class SelfCallable:
+    __call__: SelfDescriptor = SelfDescriptor()
+T = TypeVar("T", bound=SelfCallable)
+def f(x: T) -> None:
+    x()  # E: `__call__` on `T` resolves back to the same type, creating infinite recursion at runtime
+    "#,
+);
+
+// Test descriptor semantics for class-level annotation-only fields vs. method-initialized
+// instance attributes. Annotation-only fields in the class body are treated as descriptors
+//
+// (so reads invoke `__get__` and writes without `__set__` are rejected); method-initialized
+// attributes are plain instance attributes and bypass the descriptor protocol.
+//
+// The behavior of annotation-only attributes is ambiguous, since if they are actually assigned
+// to instances then the runtime behavior is *not* descriptor-based. But in practice it's not
+// unusual for metaclass logic to be involved, and in addition parts of the ecosystem assume
+// this behavior because mypy and pyright chose it.
+//
+// TODO(stroxler): Consider whether we could implement a false-positive-resistant approach
+// for ambiguous cases someday. This would probably require something like an intersection;
+// the same kind of ambiguity also pops up with Callables and callback protocols.
+testcase!(
+    test_annotation_only_attribute_has_descriptor_semantics,
     r#"
 from typing import assert_type
 
@@ -217,16 +297,17 @@ class AnnotationOnly:
     device: Device
 
 class MethodInitialized:
-    device: Device
     def __init__(self) -> None:
         self.device = Device()
 
 def f(a: AnnotationOnly, m: MethodInitialized) -> None:
-    # Writes should be allowed (not treated as read-only descriptor)
-    a.device = Device()  # OK: annotation-only, not a descriptor
-    m.device = Device()  # OK: method-initialized, not a descriptor
-    # Reads should return Device, not int (descriptor __get__ not invoked)
-    assert_type(a.device, Device)
+    # Annotation-only descriptor: writes are rejected (no `__set__`).
+    a.device = Device()  # E: Attribute `device` of class `AnnotationOnly` is a read-only descriptor with no `__set__` and cannot be set
+    # Method-initialized: plain instance attribute, write allowed.
+    m.device = Device()
+    # Annotation-only descriptor: read invokes `__get__` and returns int.
+    assert_type(a.device, int)
+    # Method-initialized: read returns the attribute itself.
     assert_type(m.device, Device)
     "#,
 );
@@ -274,6 +355,34 @@ def f(c: Child) -> None:
     "#,
 );
 
+// Test asymmetric generic descriptors with annotation-only fields (issue #3405).
+testcase!(
+    test_annotation_only_asymmetric_generic_descriptor,
+    r#"
+from typing import Any, Generic, TypeVar, assert_type
+
+T = TypeVar("T")
+U = TypeVar("U")
+
+class InstantiatingAttr(Generic[T, U]):
+    def __set__(self, instance: Any, value: U | None) -> None: ...
+    def __get__(self, instance: Any, owner: Any = None) -> T | None: ...
+
+class Pistol:
+    barrelLength: int
+    def __init__(self, barrelLength: int, /) -> None: ...
+
+class Cowboy:
+    holster: InstantiatingAttr[Pistol, tuple[int]]
+
+c = Cowboy()
+c.holster = (6,)
+assert c.holster is not None
+assert_type(c.holster, Pistol)
+print(c.holster.barrelLength)
+    "#,
+);
+
 testcase!(
     test_simple_user_defined_set_descriptor,
     r#"
@@ -312,7 +421,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-
 class CachedMethod:
     def __init__(self, fn: Callable[[Constraint], int]) -> None:
         self._fn = fn
@@ -325,10 +433,8 @@ class CachedMethod:
 
     def clear_cache(self, obj: Constraint) -> None: ...
 
-
 def cache_on_self(fn: Callable[[Constraint], int]) -> CachedMethod:
     return CachedMethod(fn)
-
 
 class Constraint:
     @cache_on_self
@@ -581,6 +687,33 @@ from .decl_api import DeclarativeBase as DeclarativeBase
     env
 }
 
+fn stub_descriptor_env() -> TestEnv {
+    let mut env = TestEnv::new();
+    env.add_with_path(
+        "pkg.styleable",
+        "pkg/styleable.pyi",
+        r#"
+class Descriptor:
+    def __get__(self, obj: object, owner: object) -> str: ...
+    def __set__(self, obj: object, value: str) -> None: ...
+
+class StyleableObject:
+    style: Descriptor
+    "#,
+    );
+    env.add_with_path(
+        "pkg.cell",
+        "pkg/cell.pyi",
+        r#"
+from .styleable import StyleableObject
+
+class Cell(StyleableObject): ...
+    "#,
+    );
+    env.add_with_path("pkg", "pkg/__init__.pyi", "");
+    env
+}
+
 testcase!(
     test_sqlalchemy_mapped_is_always_descriptor,
     sqlalchemy_mapped_env(),
@@ -592,5 +725,190 @@ class User(Base):
     name: Mapped[str]
     def __init__(self, name: str):
         self.name = name
+    "#,
+);
+
+testcase!(
+    test_stub_annotation_only_descriptor_has_descriptor_semantics,
+    stub_descriptor_env(),
+    r#"
+from typing import assert_type
+
+from pkg.cell import Cell
+from pkg.styleable import StyleableObject
+
+c = Cell()
+s = StyleableObject()
+
+assert_type(c.style, str)
+assert_type(s.style, str)
+    "#,
+);
+
+testcase!(
+    test_overloaded_descriptor_get_with_bounded_typevar,
+    r#"
+from typing import Callable, overload
+
+class MyDescriptor[_ModelT, _RT]:
+    def __init__(self, fget: Callable[[type[_ModelT]], _RT], /) -> None:
+        self.fget = fget
+
+    @overload
+    def __get__(self, instance: None, objtype: type[_ModelT]) -> _RT: ...
+    @overload
+    def __get__(self, instance: _ModelT, objtype: type[_ModelT]) -> _RT: ...
+    def __get__(self, instance: _ModelT | None, objtype: type[_ModelT]) -> _RT:
+        return self.fget.__get__(instance, objtype)()
+
+class A:
+    @MyDescriptor
+    @classmethod
+    def x(cls) -> dict[str, int]:
+        return {"x": 0}
+
+class B[T: A]:
+    def __init__(self, a: type[T]):
+        self.a = a
+
+    def f(self):
+        for k in self.a.x:
+            print(k)
+    "#,
+);
+
+testcase!(
+    test_property_constructor_non_callable_arg,
+    r#"
+from typing import Any, assert_type
+class C:
+    p = property(42)  # E: `Literal[42]` is not assignable to parameter `fget`
+def f(c: C):
+    assert_type(c.p, Any)
+    "#,
+);
+
+testcase!(
+    test_property_constructor_with_none_setter,
+    r#"
+from typing import assert_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    foo = property(_get_foo, None)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = 42  # E: Attribute `foo` of class `C` is a read-only property and cannot be set
+    "#,
+);
+
+testcase!(
+    test_property_constructor_read_only,
+    r#"
+from typing import assert_type, reveal_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    foo = property(_get_foo)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = 42  # E: Attribute `foo` of class `C` is a read-only property and cannot be set
+    reveal_type(C.foo)  # E: revealed type: (self: C) -> int
+    "#,
+);
+
+testcase!(
+    test_property_constructor_with_setter,
+    r#"
+from typing import assert_type, reveal_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    def _set_foo(self, value: str) -> None:
+        pass
+    foo = property(_get_foo, _set_foo)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = "42"
+    c.foo = 42  # E: `Literal[42]` is not assignable to parameter `value` with type `str`
+    reveal_type(C.foo)  # E: revealed type: (self: C, value: str)
+    "#,
+);
+
+testcase!(
+    test_property_constructor_with_deleter,
+    r#"
+from typing import assert_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    def _set_foo(self, value: int) -> None:
+        pass
+    def _del_foo(self) -> None:
+        pass
+    foo = property(_get_foo, _set_foo, _del_foo)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = 1
+    del c.foo
+    "#,
+);
+
+testcase!(
+    test_property_constructor_keyword_args,
+    r#"
+from typing import assert_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    def _set_foo(self, value: str) -> None:
+        pass
+    foo = property(fget=_get_foo, fset=_set_foo)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = "42"
+    c.foo = 42  # E: `Literal[42]` is not assignable to parameter `value` with type `str`
+    "#,
+);
+
+testcase!(
+    test_property_constructor_mixed_args,
+    r#"
+from typing import assert_type
+class C:
+    def _get_foo(self) -> int:
+        return 42
+    def _set_foo(self, value: str) -> None:
+        pass
+    foo = property(_get_foo, fset=_set_foo)
+def f(c: C):
+    assert_type(c.foo, int)
+    c.foo = "42"
+    c.foo = 42  # E: `Literal[42]` is not assignable to parameter `value` with type `str`
+    "#,
+);
+
+testcase!(
+    test_property_constructor_lambda,
+    r#"
+from typing import assert_type, Literal
+class C:
+    foo = property(lambda self: 42)
+def f(c: C):
+    assert_type(c.foo, Literal[42])
+    c.foo = 42  # E: Attribute `foo` of class `C` is a read-only property and cannot be set
+    "#,
+);
+
+testcase!(
+    test_property_constructor_nullable_getter,
+    r#"
+from typing import assert_type
+class C:
+    def _get_x(self) -> str | None:
+        return None
+    x = property(_get_x)
+def f(c: C):
+    assert_type(c.x, str | None)
     "#,
 );

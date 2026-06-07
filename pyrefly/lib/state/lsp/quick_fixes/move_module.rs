@@ -5,30 +5,40 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use dupe::Dupe;
 use lsp_types::CodeActionKind;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModulePathDetails;
 use ruff_python_ast::Decorator;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::StmtFunctionDef;
-use ruff_python_ast::helpers::is_docstring_stmt;
+use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::visitor::walk_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use vec1::Vec1;
 
 use super::extract_shared::decorator_matches_name;
+use super::extract_shared::has_existing_from_import;
 use super::extract_shared::line_end_position;
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::member_name_from_stmt;
+use super::extract_shared::needs_pass_after_removal;
 use super::extract_shared::prepare_insertion_text;
-use super::extract_shared::reindent_block;
+use super::extract_shared::reindent_statement;
 use super::extract_shared::selection_anchor;
+use super::extract_shared::statement_removal_range;
+use super::extract_shared::statement_removal_range_from_range;
 use super::types::LocalRefactorCodeAction;
 use crate::state::ide::insert_import_edit;
 use crate::state::lsp::ImportFormat;
@@ -36,6 +46,15 @@ use crate::state::lsp::Transaction;
 
 fn move_kind() -> CodeActionKind {
     CodeActionKind::new("refactor.move")
+}
+
+#[derive(Clone)]
+pub(crate) struct MoveModuleMemberContext {
+    pub module_info: Module,
+    pub ast: Arc<ModModule>,
+    pub member_name: String,
+    pub member_text: String,
+    pub removal_range: TextRange,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -66,42 +85,32 @@ pub(crate) fn move_module_member_code_actions(
     selection: TextRange,
     import_format: ImportFormat,
 ) -> Option<Vec<LocalRefactorCodeAction>> {
-    let module_info = transaction.get_module_info(handle)?;
-    let ast = transaction.get_ast(handle)?;
-    let source = module_info.contents();
-    let selection_point = selection_anchor(source, selection);
-    let member_stmt = find_module_member(ast.as_ref(), selection_point)?;
-    let member_name = member_name_from_stmt(member_stmt)?;
-    let (from_indent, _) = line_indent_and_start(source, member_stmt.range().start())?;
-    let member_text = reindent_statement(source, member_stmt.range(), &from_indent, "");
-
-    let removal_range = statement_removal_range(source, member_stmt)?;
+    let context = module_member_move_context(transaction, handle, selection)?;
     let mut actions = Vec::new();
     for (target_handle, target_info, target_ast) in
-        sibling_module_targets(transaction, handle, &module_info)?
+        sibling_module_targets(transaction, handle, &context.module_info)?
     {
-        if target_info.path() == module_info.path() {
+        if target_info.path() == context.module_info.path() {
             continue;
         }
-        let insert_edit =
-            build_module_insertion_edit(&target_info, target_ast.as_ref(), &member_text, None)?;
-        let (removal_edit, import_edit) = build_removal_and_import_edits(
+        let insert_edit = build_module_insertion_edit(
+            &target_info,
+            target_ast.as_ref(),
+            &context.member_text,
+            None,
+        )?;
+        let mut edits = vec![insert_edit];
+        edits.extend(build_module_member_move_edits(
             transaction,
             handle,
-            &module_info,
-            ast.as_ref(),
-            &member_name,
+            &context,
             &target_handle,
             import_format,
-            removal_range,
-        )?;
-        let mut edits = vec![insert_edit, removal_edit];
-        if let Some(import_edit) = import_edit {
-            edits.push(import_edit);
-        }
+        )?);
         actions.push(LocalRefactorCodeAction {
             title: format!(
-                "Move `{member_name}` to `{}`",
+                "Move `{}` to `{}`",
+                context.member_name,
                 target_handle.module().as_str()
             ),
             edits,
@@ -114,6 +123,177 @@ pub(crate) fn move_module_member_code_actions(
         actions.sort_by(|a, b| a.title.cmp(&b.title));
         Some(actions)
     }
+}
+
+pub(crate) fn module_member_move_context(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    selection: TextRange,
+) -> Option<MoveModuleMemberContext> {
+    let module_info = transaction.get_module_info(handle)?;
+    let ast = transaction.get_ast(handle)?;
+    let source = module_info.contents();
+    let selection_point = selection_anchor(source, selection);
+    let member_stmt = find_module_member(ast.as_ref(), selection_point)?;
+    let member_name = member_name_from_stmt(member_stmt)?;
+    let (from_indent, _) = line_indent_and_start(source, member_stmt.range().start())?;
+    let member_text = reindent_statement(source, member_stmt.range(), &from_indent, "");
+    let removal_range = statement_removal_range(source, member_stmt)?;
+    Some(MoveModuleMemberContext {
+        module_info,
+        ast,
+        member_name,
+        member_text,
+        removal_range,
+    })
+}
+
+/// Builds text edits for moving a top-level module member to `target_handle`:
+/// removing it from the source, leaving a re-export import in the source, and
+/// rewriting reverse-dependency consumer imports (`from source import foo` ->
+/// `from target import foo`) so callers keep resolving the symbol after the move.
+///
+/// Each edit is `(module, range, replacement)`, meaning replace `range` in
+/// `module` with `replacement`.
+pub(crate) fn build_module_member_move_edits(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    context: &MoveModuleMemberContext,
+    target_handle: &Handle,
+    import_format: ImportFormat,
+) -> Option<Vec1<(Module, TextRange, String)>> {
+    let (removal_edit, import_edit) = build_removal_and_import_edits(
+        transaction,
+        handle,
+        &context.module_info,
+        context.ast.as_ref(),
+        &context.member_name,
+        target_handle,
+        import_format,
+        context.removal_range,
+    )?;
+    let mut edits = Vec1::new(removal_edit);
+    if let Some(import_edit) = import_edit {
+        edits.push(import_edit);
+    }
+    edits.extend(build_module_member_consumer_import_updates(
+        transaction,
+        handle,
+        &context.module_info,
+        &context.member_name,
+        target_handle,
+        import_format,
+    ));
+    Some(edits)
+}
+
+/// Builds best-effort edits for consumers that directly import the moved member
+/// from the source module.
+///
+/// Consumers that cannot be inspected are skipped; the source module's re-export
+/// keeps those imports working.
+///
+/// Each edit is `(module, range, replacement)`, meaning replace `range` in
+/// `module` with `replacement`.
+fn build_module_member_consumer_import_updates(
+    transaction: &Transaction<'_>,
+    source_handle: &Handle,
+    source_module_info: &Module,
+    member_name: &str,
+    target_handle: &Handle,
+    import_format: ImportFormat,
+) -> Vec<(Module, TextRange, String)> {
+    let old_module_name = source_handle.module();
+    let rdep_root = match source_handle.path().details() {
+        ModulePathDetails::Memory(path) => Handle::new(
+            source_handle.module(),
+            ModulePath::filesystem((**path).clone()),
+            source_handle.sys_info().dupe(),
+        ),
+        _ => source_handle.dupe(),
+    };
+    let rdeps = transaction.get_transitive_rdeps(rdep_root);
+    let unique_rdeps: Vec<_> = {
+        let mut seen = HashSet::new();
+        rdeps
+            .into_iter()
+            .filter(|handle| seen.insert(handle.path().as_path().to_owned()))
+            .collect()
+    };
+
+    let mut edits = Vec::new();
+    for rdep_handle in unique_rdeps {
+        if rdep_handle.path() == source_module_info.path() {
+            continue;
+        }
+        let Some(module_info) = transaction.get_module_info(&rdep_handle) else {
+            continue;
+        };
+        let Some(ast) = transaction.get_ast(&rdep_handle) else {
+            continue;
+        };
+        let (_, _, new_module_text) = insert_import_edit(
+            ast.as_ref(),
+            transaction.config_finder(),
+            rdep_handle.dupe(),
+            target_handle.dupe(),
+            member_name,
+            import_format,
+        );
+        let mut import_collector = ImportFromCollector::default();
+        import_collector.visit_body(&ast.body);
+        for import_from in import_collector.imports {
+            let Some(module) = &import_from.module else {
+                continue;
+            };
+            if import_from.level != 0 || ModuleName::from_name(&module.id) != old_module_name {
+                continue;
+            }
+
+            let mut moved_aliases = Vec::new();
+            let mut remaining_aliases = Vec::new();
+            for alias in &import_from.names {
+                let rendered = render_import_alias(alias);
+                if alias.name.id.as_str() == member_name {
+                    moved_aliases.push(rendered);
+                } else {
+                    remaining_aliases.push(rendered);
+                }
+            }
+            if moved_aliases.is_empty() {
+                continue;
+            }
+
+            let Some((indent, _)) =
+                line_indent_and_start(module_info.contents(), import_from.range().start())
+            else {
+                continue;
+            };
+
+            let mut replacement_lines = Vec::new();
+            if !remaining_aliases.is_empty() {
+                replacement_lines.push(format!(
+                    "from {} import {}",
+                    module.id.as_str(),
+                    remaining_aliases.join(", ")
+                ));
+            }
+            if !has_existing_from_import(ast.as_ref(), target_handle.module().as_str(), member_name)
+            {
+                replacement_lines.push(format!(
+                    "from {new_module_text} import {}",
+                    moved_aliases.join(", ")
+                ));
+            }
+            let replacement = if replacement_lines.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", replacement_lines.join(&format!("\n{indent}")))
+            };
+            edits.push((module_info.dupe(), import_from.range(), replacement));
+        }
+    }
+    edits
 }
 
 /// Builds make-local-function/method-top-level code actions.
@@ -377,7 +557,7 @@ fn build_import_edit(
     target_handle: &Handle,
     import_format: ImportFormat,
 ) -> Option<(Module, TextRange, String)> {
-    if has_existing_import(ast, target_handle.module(), member_name) {
+    if has_existing_from_import(ast, target_handle.module().as_str(), member_name) {
         return None;
     }
     let (position, insert_text, _) = insert_import_edit(
@@ -392,27 +572,33 @@ fn build_import_edit(
     Some((module_info.dupe(), range, insert_text))
 }
 
-fn has_existing_import(ast: &ModModule, module_name: ModuleName, name: &str) -> bool {
-    ast.body.iter().any(|stmt| match stmt {
-        Stmt::ImportFrom(import_from) => {
-            if let Some(module) = &import_from.module
-                && ModuleName::from_name(&module.id) == module_name
-            {
-                import_from.names.iter().any(|alias| {
-                    if alias.name.id.as_str() != name {
-                        return false;
-                    }
-                    match &alias.asname {
-                        None => true,
-                        Some(asname) => asname.id.as_str() == name,
-                    }
-                })
-            } else {
-                false
-            }
+#[derive(Default)]
+struct ImportFromCollector<'a> {
+    imports: Vec<&'a StmtImportFrom>,
+}
+
+impl<'a> ImportFromCollector<'a> {
+    fn visit_body(&mut self, body: &'a [Stmt]) {
+        for stmt in body {
+            self.visit_stmt(stmt);
         }
-        _ => false,
-    })
+    }
+}
+
+impl<'a> Visitor<'a> for ImportFromCollector<'a> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        match stmt {
+            Stmt::ImportFrom(import_from) => self.imports.push(import_from),
+            _ => walk_stmt(self, stmt),
+        }
+    }
+}
+
+fn render_import_alias(alias: &ruff_python_ast::Alias) -> String {
+    match &alias.asname {
+        Some(asname) => format!("{} as {}", alias.name.id, asname.id),
+        None => alias.name.id.to_string(),
+    }
 }
 
 fn build_module_insertion_edit(
@@ -667,36 +853,4 @@ fn sibling_module_targets(
         targets.sort_by(|a, b| a.0.module().as_str().cmp(b.0.module().as_str()));
         Some(targets)
     }
-}
-
-fn statement_removal_range(source: &str, stmt: &Stmt) -> Option<TextRange> {
-    statement_removal_range_from_range(source, stmt.range())
-}
-
-fn statement_removal_range_from_range(source: &str, range: TextRange) -> Option<TextRange> {
-    let (_, line_start) = line_indent_and_start(source, range.start())?;
-    let line_end = line_end_position(source, range.end());
-    Some(TextRange::new(line_start, line_end))
-}
-
-fn needs_pass_after_removal(body: &[Stmt], removed_range: TextRange) -> bool {
-    let mut non_docstring = body.iter().filter(|stmt| !is_docstring_stmt(stmt));
-    let only_stmt = non_docstring.next();
-    non_docstring.next().is_none() && only_stmt.is_some_and(|stmt| stmt.range() == removed_range)
-}
-
-fn reindent_statement(
-    source: &str,
-    range: TextRange,
-    from_indent: &str,
-    to_indent: &str,
-) -> String {
-    let start = range.start().to_usize().min(source.len());
-    let end = range.end().to_usize().min(source.len());
-    let raw = if start < end { &source[start..end] } else { "" };
-    let mut text = reindent_block(raw, from_indent, to_indent);
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text
 }

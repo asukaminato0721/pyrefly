@@ -5,10 +5,14 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::sync::Arc;
+
+use dupe::Dupe;
 use num_traits::ToPrimitive;
 use pyrefly_config::error_kind::ErrorKind;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
+use pyrefly_python::dunder;
 use pyrefly_types::class::Class;
 use pyrefly_types::display::TypeDisplayContext;
 use pyrefly_types::facet::FacetChain;
@@ -16,27 +20,32 @@ use pyrefly_types::facet::FacetKind;
 use pyrefly_types::facet::UnresolvedFacetChain;
 use pyrefly_types::facet::UnresolvedFacetKind;
 use pyrefly_types::simplify::intersect;
+use pyrefly_types::simplify::simplify_tuples;
 use pyrefly_types::type_info::JoinStyle;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprNumberLiteral;
+use ruff_python_ast::ExprUnaryOp;
 use ruff_python_ast::Int;
 use ruff_python_ast::Number;
+use ruff_python_ast::Operator;
+use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use vec1::Vec1;
-use vec1::vec1;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::call::CallTargetLookup;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
+use crate::alt::types::instance::Instance;
 use crate::binding::binding::Key;
 use crate::binding::narrow::AtomicNarrowOp;
 use crate::binding::narrow::FacetOrigin;
@@ -45,17 +54,42 @@ use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::NarrowSource;
 use crate::binding::narrow::NarrowingSubject;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::error::style::ErrorStyle;
 use crate::types::callable::FunctionKind;
 use crate::types::class::ClassType;
 use crate::types::lit_int::LitInt;
 use crate::types::literal::Lit;
-use crate::types::literal::Literal;
 use crate::types::tuple::Tuple;
 use crate::types::type_info::TypeInfo;
+use crate::types::type_var::Restriction;
 use crate::types::types::CalleeKind;
+use crate::types::types::TParams;
 use crate::types::types::Type;
+
+/// Synthesize an `Expr` for an integer index, producing a `NumberLiteral` for
+/// non-negative values and `UnaryOp(USub, NumberLiteral)` for negative values.
+fn synthesize_int_slice(idx: i64) -> Expr {
+    let fake_range = TextRange::empty(TextSize::from(0));
+    let node_index = AtomicNodeIndex::default();
+    if idx >= 0 {
+        Expr::NumberLiteral(ExprNumberLiteral {
+            node_index,
+            range: fake_range,
+            value: Number::Int(Int::from(idx as u64)),
+        })
+    } else {
+        Expr::UnaryOp(ExprUnaryOp {
+            node_index,
+            range: fake_range,
+            op: UnaryOp::USub,
+            operand: Box::new(Expr::NumberLiteral(ExprNumberLiteral {
+                node_index: AtomicNodeIndex::default(),
+                range: fake_range,
+                value: Number::Int(Int::from(idx.unsigned_abs())),
+            })),
+        })
+    }
+}
 
 /// Beyond this size, don't try and narrow an enum.
 ///
@@ -66,17 +100,20 @@ const NARROW_ENUM_LIMIT: usize = 100;
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     // Get the union of all members of an enum, minus the specified member
-    fn subtract_enum_member(&self, cls: &ClassType, name: &Name) -> Type {
-        if cls.class_object().fields().len() > NARROW_ENUM_LIMIT {
-            return Type::ClassType(cls.clone());
+    fn subtract_enum_member(&self, instance: Instance, name: &Name) -> Type {
+        if self
+            .get_class_fields(instance.class)
+            .is_some_and(|f| f.len() > NARROW_ENUM_LIMIT)
+        {
+            return instance.to_type(self.heap);
         }
-        let e = self.get_enum_from_class(cls.class_object()).unwrap();
+        let e = self.get_enum_from_class(instance.class).unwrap();
         // Enums derived from enum.Flag cannot be treated as a union of their members
         if e.is_flag {
-            return Type::ClassType(cls.clone());
+            return instance.to_type(self.heap);
         }
         self.unions(
-            self.get_enum_members(cls.class_object())
+            self.get_enum_members(instance.class)
                 .into_iter()
                 .filter_map(|f| {
                     if let Lit::Enum(lit_enum) = &f
@@ -91,18 +128,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         )
     }
 
-    pub fn disjoint_base<'b>(&'b self, t: &'b Type) -> &'b Class {
-        // TODO: Implement the full disjoint base spec: https://peps.python.org/pep-0800/#specification.
+    /// Return the most specific disjoint base for a type per PEP 800.
+    ///
+    /// Uses the cache on `ClassMro`, but checks the class itself first so
+    /// locally decorated classes still work when their MRO is cyclic.
+    /// Falls back to `object` for anything not explicitly disjoint.
+    pub fn disjoint_base(&self, t: &Type) -> Class {
         match t {
-            Type::ClassType(cls)
-                if let cls = cls.class_object()
-                    && self.get_metadata_for_class(cls).is_disjoint_base() =>
-            {
-                cls
+            Type::ClassType(cls) => {
+                let class = cls.class_object();
+                if self.get_metadata_for_class(class).is_disjoint_base() {
+                    return class.dupe();
+                }
+                self.get_mro_for_class(class)
+                    .nearest_disjoint_base()
+                    .map(|class| class.dupe())
+                    .unwrap_or_else(|| self.stdlib.object().class_object().dupe())
             }
-            Type::Tuple(_) => self.stdlib.tuple_object(),
-            _ => self.stdlib.object().class_object(),
+            Type::Tuple(_) => self.stdlib.tuple_object().clone(),
+            _ => self.stdlib.object().class_object().clone(),
         }
+    }
+
+    fn is_final(&self, class: &Class) -> bool {
+        self.get_metadata_for_class(class).is_final()
+            || (self.get_enum_from_class(class).is_some()
+                && !self.get_enum_members(class).is_empty())
     }
 
     fn intersect_impl(&self, left: &Type, right: &Type, fallback: &dyn Fn() -> Type) -> Type {
@@ -124,25 +175,45 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         } else if self.is_subset_eq(left, right) {
             left.clone()
+        } else if let (Type::ClassType(cls), Type::SelfType(self_cls))
+        | (Type::SelfType(self_cls), Type::ClassType(cls)) = (left, right)
+            && self.as_superclass(cls, self_cls.class_object()).as_ref() == Some(self_cls)
+        {
+            // ClassType(C) & SelfType(Parent) simplifies to ClassType(C) when C
+            // is a subclass of Parent with a matching inherited instantiation,
+            // because Self[Parent] represents "Parent or any subclass" and
+            // ClassType(C) is already such a subclass.
+            // Without this, an unsimplified Intersect(ClassType, SelfType) can
+            // leak to downstream consumers that don't handle Intersect types.
+            self.heap.mk_class_type(cls.clone())
         } else if is_literal(left) || is_literal(right) {
             // The only inhabited intersections of literals are things like
             // `Literal[0] & Literal[0]` or `Literal[0] & int` that would have already been
             // intercepted by the is_subset_eq checks above. type(None) cannot be subclassed.
-            Type::never()
+            self.heap.mk_never()
         } else {
             let fallback = fallback();
             if fallback.is_never() {
                 fallback
+            } else if let Type::ClassType(left_cls) = left
+                && let Type::ClassType(right_cls) = right
+                && (self.is_final(left_cls.class_object())
+                    || self.is_final(right_cls.class_object()))
+            {
+                // The only way for `left & right` to exist is if it is an instance of a class that
+                // multiply inherits from both `left` and `right`'s classes. But at least one of
+                // the classes is final, so such a class does not exist.
+                self.heap.mk_never()
             } else {
                 let left_base = self.disjoint_base(left);
                 let right_base = self.disjoint_base(right);
-                if self.has_superclass(left_base, right_base)
-                    || self.has_superclass(right_base, left_base)
+                if self.has_superclass(&left_base, &right_base)
+                    || self.has_superclass(&right_base, &left_base)
                 {
-                    intersect(vec![left.clone(), right.clone()], fallback)
+                    intersect(vec![left.clone(), right.clone()], fallback, self.heap)
                 } else {
                     // A common subclass of these two classes cannot exist.
-                    Type::never()
+                    self.heap.mk_never()
                 }
             }
         }
@@ -164,13 +235,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     fn intersect(&self, left: &Type, right: &Type) -> Type {
-        self.intersect_with_fallback(left, right, &Type::never)
+        self.intersect_with_fallback(left, right, &|| self.heap.mk_never())
     }
 
     /// Calculate the intersection of a number of types
     pub fn intersects(&self, ts: &[Type]) -> Type {
         match ts {
-            [] => Type::ClassType(self.stdlib.object().clone()),
+            [] => self.heap.mk_class_type(self.stdlib.object().clone()),
             [ty] => ty.clone(),
             [ty0, ty1] => self.intersect(ty0, ty1),
             [ty0, ts @ ..] => self.intersect(ty0, &self.intersects(ts)),
@@ -181,10 +252,52 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self.distribute_over_union(left, |left| {
             // Special is_any check because `Any <: int` as a special case, but would mess up this.
             if !left.is_any() && self.is_subset_eq(left, right) {
-                Type::never()
+                self.heap.mk_never()
             } else {
                 left.clone()
             }
+        })
+    }
+
+    fn enum_instance<'b, 'c>(left: &'b Type, right: &'c Type) -> Option<(Instance<'b>, &'c Name)> {
+        let left = match left {
+            Type::ClassType(cls) => Instance::of_class(cls),
+            Type::SelfType(cls) => Instance::of_self_type(cls),
+            _ => return None,
+        };
+        if let Type::Literal(right) = right
+            && let Lit::Enum(right) = &right.value
+            && left.class == right.class.class_object()
+            && left.targs == right.class.targs()
+        {
+            Some((left, &right.member))
+        } else {
+            None
+        }
+    }
+
+    /// Narrow a type by removing values identity-equal to `right` (`is not` semantics).
+    fn narrow_is_not(&self, ty: &Type, right: &Type) -> Type {
+        self.distribute_over_union(ty, |t| match (t, right) {
+            (_, Type::None | Type::Ellipsis) if self.literal_equal(t, right) => {
+                self.heap.mk_never()
+            }
+            (_, Type::Literal(f))
+                if matches!(f.value, Lit::Bool(_) | Lit::Enum(_))
+                    && self.literal_equal(t, right) =>
+            {
+                self.heap.mk_never()
+            }
+            (Type::ClassType(cls), Type::Literal(lit))
+                if cls.is_builtin("bool")
+                    && let Lit::Bool(b) = &lit.value =>
+            {
+                Lit::Bool(!b).to_implicit_type()
+            }
+            (left, right) if let Some((instance, name)) = Self::enum_instance(left, right) => {
+                self.subtract_enum_member(instance, name)
+            }
+            _ => t.clone(),
         })
     }
 
@@ -219,11 +332,115 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    /// Extract element expressions from a literal container (list, tuple, set)
+    /// or a builtin container constructor call wrapping one (list/tuple/set/frozenset).
+    /// Returns `None` if the expression is not a container whose elements can
+    /// be statically enumerated.
+    fn literal_membership_exprs(&self, expr: &Expr, errors: &ErrorCollector) -> Option<Vec<Expr>> {
+        match expr {
+            Expr::List(list) => Some(list.elts.clone()),
+            Expr::Tuple(tuple) => Some(tuple.elts.clone()),
+            Expr::Set(set) => Some(set.elts.clone()),
+            Expr::Call(call) => {
+                const CONTAINER_NAMES: &[&str] = &["list", "tuple", "set", "frozenset"];
+                // Cheap syntactic pre-check: only proceed when the callee looks like
+                // it *could* be a builtin container constructor (bare name or
+                // `builtins.<name>`). This avoids an expensive `expr_infer` call for
+                // the common case of arbitrary function calls.
+                let callee_name = match &*call.func {
+                    Expr::Name(name) => name.id.as_str(),
+                    Expr::Attribute(attr) => attr.attr.as_str(),
+                    _ => return None,
+                };
+                if !CONTAINER_NAMES.contains(&callee_name) {
+                    return None;
+                }
+                if !call.arguments.keywords.is_empty() {
+                    return None;
+                }
+                // Confirm via type inference that it's actually the builtin, to guard
+                // against shadowing or unrelated attributes with the same name.
+                let is_builtin_container = match self.expr_infer(&call.func, errors) {
+                    Type::ClassDef(cls) => CONTAINER_NAMES.iter().any(|n| cls.is_builtin(n)),
+                    _ => false,
+                };
+                if !is_builtin_container {
+                    return None;
+                }
+                match &*call.arguments.args {
+                    [] => Some(Vec::new()),
+                    [expr] => self.literal_membership_exprs(expr, errors),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn tuple_membership_type(
+        &self,
+        tuple: &Tuple,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        let elements = match tuple {
+            Tuple::Concrete(elts) => elts.clone(),
+            Tuple::Unbounded(elt) => vec![(**elt).clone()],
+            Tuple::Unpacked(unpacked) => {
+                let (prefix, middle, suffix) = &**unpacked;
+                let mut elements = prefix.clone();
+                let middle = if let Type::Var(_) = middle {
+                    self.force_for_narrowing(middle, range, errors)
+                } else {
+                    middle.clone()
+                };
+                match middle {
+                    Type::Tuple(tuple) => {
+                        elements.push(self.tuple_membership_type(&tuple, range, errors)?)
+                    }
+                    Type::TypeVarTuple(_) | Type::Quantified(_) | Type::Unpack(_) => return None,
+                    _ => elements.push(middle),
+                }
+                elements.extend(suffix.clone());
+                elements
+            }
+        };
+        if elements.iter().any(|ty| self.behaves_like_any(ty)) {
+            None
+        } else if elements.is_empty() {
+            Some(self.heap.mk_never())
+        } else {
+            Some(self.unions(elements))
+        }
+    }
+
+    /// Unwrap a class object for isinstance narrowing. When the right-hand side is `tuple`
+    /// and the left-hand side is a heterogeneous tuple type, creates a TypeVarTuple for
+    /// precise narrowing. Otherwise falls back to standard class object unwrapping.
+    fn unwrap_isinstance_target(&self, left: &Type, right: &Type) -> Option<(TParams, Type)> {
+        let right_is_tuple = match right {
+            Type::Type(f) if matches!(&**f, Type::Tuple(_)) => true,
+            Type::ClassDef(cls) => cls.is_builtin("tuple"),
+            _ => false,
+        };
+        let narrow_heterogeneous_tuple = right_is_tuple
+            && match left {
+                Type::Tuple(_) => true,
+                Type::ClassType(cls) => self.as_tuple(cls).is_some(),
+                _ => false,
+            };
+        if narrow_heterogeneous_tuple {
+            Some(self.instantiate_type_var_tuple())
+        } else {
+            self.unwrap_class_object_silently(right)
+        }
+    }
+
     fn narrow_isinstance(&self, left: &Type, right: &Type) -> Type {
         let mut res = Vec::new();
         for right in self.as_class_info(right.clone()) {
             res.push(self.distribute_over_union(left, |l| {
-                if let Some((tparams, right)) = self.unwrap_class_object_silently(&right) {
+                if let Some((tparams, right)) = self.unwrap_isinstance_target(l, &right) {
                     let (vs, right) = self
                         .solver()
                         .fresh_quantified(&tparams, right, self.uniques);
@@ -235,7 +452,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         //             reveal_type(x)
                         // We want to narrow x to just `list[int]`, rather than `(int & Iterable[Unknown]) | list[int]`
                         if left.is_union() {
-                            Type::never()
+                            self.heap.mk_never()
                         } else {
                             right.clone()
                         }
@@ -243,7 +460,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     // These are safe to ignore, as the only possible specialization errors are handled elsewhere:
                     // * If `left` is an invalid specialization, the error has already been reported at its definition site.
                     // * Unsafe runtime protocol overlaps are separately checked for in special_calls.rs.
-                    let _specialization_errors = self.solver().finish_quantified(vs, false);
+                    let _specialization_errors = self.finish_quantified(vs, false);
                     result
                 } else {
                     l.clone()
@@ -253,26 +470,125 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self.unions(res)
     }
 
-    fn narrow_is_not_instance(&self, left: &Type, right: &Type) -> Type {
-        let mut res = Vec::new();
-        for right in self.as_class_info(right.clone()) {
-            res.push(self.distribute_over_union(left, |l| {
-                if let Some((tparams, right)) = self.unwrap_class_object_silently(&right) {
+    fn narrow_is_not_instance(
+        &self,
+        left: &Type,
+        right_expr: &Expr,
+        source: NarrowSource,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let force_allow_negative = matches!(source, NarrowSource::Pattern);
+        let class_infos = self.expr_as_class_info(right_expr, errors);
+        // Subtract each class info from each union member of `left` in turn,
+        // rather than computing per-target results and intersecting them.
+        // Intersecting `subtract(L, A)` with `subtract(L, B)` reintroduces
+        // any union member that overlaps with both A and B (e.g. `Iterable[Any]`
+        // overlaps with both `str` and `bytes`), so `isinstance(x, (str, bytes))`
+        // would leave the negative branch unchanged. Sequential per-element
+        // subtraction avoids that.
+        self.distribute_over_union(left, |l| {
+            let mut result = l.clone();
+            for (right, allows_negative_narrow) in &class_infos {
+                let allows_negative_narrow = *allows_negative_narrow || force_allow_negative;
+                if !allows_negative_narrow {
+                    continue;
+                }
+                if let Some((tparams, right)) = self.unwrap_isinstance_target(&result, right) {
                     let (vs, right) = self
                         .solver()
                         .fresh_quantified(&tparams, right, self.uniques);
-                    let result = self.subtract(l, &right);
+                    // For constrained TypeVars, subtract from the concrete constraints
+                    // so that e.g. isinstance(x, (int, float)) with T(int, str, float)
+                    // narrows the else branch to str instead of leaving it as T.
+                    result = if let Type::Quantified(q) = &result
+                        && let Restriction::Constraints(_) = q.restriction()
+                    {
+                        let concrete = q.upper_bound(self.stdlib, self.heap);
+                        self.subtract(&concrete, &right)
+                    } else {
+                        self.subtract(&result, &right)
+                    };
                     // These are safe to ignore, as the only possible specialization errors are handled elsewhere:
                     // * If `left` is an invalid specialization, the error has already been reported at its definition site.
                     // * Unsafe runtime protocol overlaps are separately checked for in special_calls.rs.
-                    let _specialization_errors = self.solver().finish_quantified(vs, false);
+                    let _specialization_errors = self.finish_quantified(vs, false);
+                }
+            }
+            result
+        })
+    }
+
+    /// Narrow `type(X) != Y`. We can only do negative narrowing if Y is final,
+    /// because otherwise X could still be a subclass of Y.
+    fn narrow_type_not_eq(&self, left: &Type, right_expr: &Expr, errors: &ErrorCollector) -> Type {
+        let right = self.expr_infer(right_expr, errors);
+        // Only narrow if the RHS is a final class type (e.g., `type(x) != bool`)
+        if let Type::ClassDef(cls) = &right
+            && self.is_final(cls)
+        {
+            self.distribute_over_union(left, |l| {
+                if let Some((tparams, unwrapped)) = self.unwrap_isinstance_target(l, &right) {
+                    let (vs, unwrapped) =
+                        self.solver()
+                            .fresh_quantified(&tparams, unwrapped, self.uniques);
+                    let result = self.subtract(l, &unwrapped);
+                    let _specialization_errors = self.finish_quantified(vs, false);
                     result
                 } else {
                     l.clone()
                 }
-            }));
+            })
+        } else {
+            left.clone()
         }
-        self.intersects(&res)
+    }
+
+    /// Turn an expression into a list of (type, allows_negative_narrow) pairs.
+    /// allows_negative_narrow means that we can do `not isinstance`/`not issubclass` narrowing
+    /// with the type. We allow negative narrowing as long as it is not definitely unsafe - that
+    /// is, if we're unsure, we allow it.
+    fn expr_as_class_info(&self, e: &Expr, errors: &ErrorCollector) -> Vec<(Type, bool)> {
+        fn f<'a, Ans: LookupAnswer>(
+            me: &AnswersSolver<'a, Ans>,
+            e: &Expr,
+            res: &mut Vec<(Type, bool)>,
+            errors: &ErrorCollector,
+        ) {
+            match e {
+                Expr::BinOp(ExprBinOp {
+                    left,
+                    op: Operator::BitOr,
+                    right,
+                    ..
+                }) => {
+                    f(me, left, res, errors);
+                    f(me, right, res, errors);
+                }
+                Expr::Tuple(tuple) if !tuple.elts.iter().any(|e| matches!(e, Expr::Starred(_))) => {
+                    for e in &tuple.elts {
+                        f(me, e, res, errors);
+                    }
+                }
+                _ => {
+                    let t = me.expr_infer(e, errors);
+                    if let Type::Type(f) = &t
+                        && let Type::ClassType(cls) = &**f
+                    {
+                        // If `C` is not final, `type[C]` may be a subclass of `C`,
+                        // making negative narrowing unsafe.
+                        let allows_negative_narrow = me.is_final(cls.class_object());
+                        res.push((t, allows_negative_narrow));
+                    } else {
+                        for t in me.as_class_info(t) {
+                            res.push((t, true));
+                        }
+                    }
+                }
+            }
+        }
+        let mut res = Vec::new();
+        f(self, e, &mut res, errors);
+        res
     }
 
     fn issubclass_result(&self, instance_result: Type, original: &Type) -> Type {
@@ -282,7 +598,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         {
             original.clone()
         } else {
-            Type::type_form(instance_result)
+            self.heap.mk_type_of(instance_result)
         }
     }
 
@@ -325,13 +641,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 for q in quantifieds {
                     // The only time it's safe to simplify a quantified away is when the entire intersection is Never.
                     let intersection = narrow(
-                        &q.restriction().as_type(self.stdlib),
+                        &q.upper_bound(self.stdlib, self.heap),
                         right_unwrapped.clone(),
                     );
                     res.push(if matches!(&intersection, Type::Type(t) if t.is_never()) {
                         intersection
                     } else {
-                        intersect(vec![q.to_type(), right.clone()], right.clone())
+                        intersect(
+                            vec![q.to_type(self.heap), right.clone()],
+                            right.clone(),
+                            self.heap,
+                        )
                     })
                 }
                 if !nonquantifieds.is_empty() {
@@ -340,7 +660,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // These are safe to ignore, as the only possible specialization errors are handled elsewhere:
                 // * If `left` is an invalid specialization, the error has already been reported at its definition site.
                 // * Unsafe runtime protocol overlaps are separately checked for in special_calls.rs.
-                let _specialization_errors = self.solver().finish_quantified(vs, false);
+                let _specialization_errors = self.finish_quantified(vs, false);
             } else {
                 res.push(left.clone())
             }
@@ -351,13 +671,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     fn narrow_is_not_subclass(
         &self,
         left: &Type,
-        right: &Type,
-        range: TextRange,
+        right_expr: &Expr,
         errors: &ErrorCollector,
     ) -> Type {
         let mut res = Vec::new();
-        for right in self.as_class_info(right.clone()) {
-            if let Some(left_untyped) = self.untype_opt(left.clone(), range, errors)
+        for (right, allows_negative_narrow) in self.expr_as_class_info(right_expr, errors) {
+            if allows_negative_narrow
+                && let Some(left_untyped) =
+                    self.untype_opt(left.clone(), right_expr.range(), errors)
                 && let Some((tparams, right)) = self.unwrap_class_object_silently(&right)
             {
                 let (vs, right) = self
@@ -367,7 +688,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // These are safe to ignore, as the only possible specialization errors are handled elsewhere:
                 // * If `left` is an invalid specialization, the error has already been reported at its definition site.
                 // * Unsafe runtime protocol overlaps are separately checked for in special_calls.rs.
-                let _specialization_errors = self.solver().finish_quantified(vs, false);
+                let _specialization_errors = self.finish_quantified(vs, false);
             } else {
                 res.push(left.clone())
             }
@@ -377,18 +698,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
     fn narrow_length_greater(&self, ty: &Type, len: usize) -> Type {
         self.distribute_over_union(ty, |ty| match ty {
-            Type::Tuple(Tuple::Concrete(elts)) if elts.len() <= len => Type::never(),
+            Type::Tuple(Tuple::Concrete(elts)) if elts.len() <= len => self.heap.mk_never(),
             Type::Literal(lit)
                 if let Lit::Str(x) = &lit.value
                     && x.len() <= len =>
             {
-                Type::never()
+                self.heap.mk_never()
             }
             Type::ClassType(class)
                 if let Some(Tuple::Concrete(elts)) = self.as_tuple(class)
                     && elts.len() <= len =>
             {
-                Type::never()
+                self.heap.mk_never()
             }
             _ => ty.clone(),
         })
@@ -401,20 +722,79 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // this needs to be done in conjunction with https://github.com/facebook/pyrefly/issues/273
         // otherwise the narrowed forms make weird unions when used with control flow
         self.distribute_over_union(ty, |ty| match ty {
-            Type::Tuple(Tuple::Concrete(elts)) if elts.len() >= len => Type::never(),
-            Type::Tuple(Tuple::Unpacked(box (prefix, _, suffix)))
-                if prefix.len() + suffix.len() >= len =>
-            {
-                Type::never()
-            }
+            Type::Tuple(Tuple::Concrete(elts)) if elts.len() >= len => self.heap.mk_never(),
+            Type::Tuple(Tuple::Unpacked(f)) if f.0.len() + f.2.len() >= len => self.heap.mk_never(),
             Type::ClassType(class) if let Some(tuple) = self.as_tuple(class) => match tuple {
-                Tuple::Concrete(elts) if elts.len() >= len => Type::never(),
-                Tuple::Unpacked(box (prefix, _, suffix)) if prefix.len() + suffix.len() >= len => {
-                    Type::never()
-                }
+                Tuple::Concrete(elts) if elts.len() >= len => self.heap.mk_never(),
+                Tuple::Unpacked(f) if f.0.len() + f.2.len() >= len => self.heap.mk_never(),
                 _ => ty.clone(),
             },
             _ => ty.clone(),
+        })
+    }
+
+    /// Narrow a union by keeping only members whose facet is identity-compatible with `right`.
+    fn narrow_facet_is(
+        &self,
+        base: &Type,
+        right: &Type,
+        facet: &FacetKind,
+        range: TextRange,
+    ) -> Type {
+        self.distribute_over_union(base, |t| {
+            let base_info = TypeInfo::of_ty(t.clone());
+            let facet_ty = self.get_facet_chain_type(
+                &base_info,
+                &FacetChain::new(Vec1::new(facet.clone())),
+                range,
+            );
+            match right {
+                Type::None | Type::Ellipsis => {
+                    if self.is_subset_eq(right, &facet_ty) {
+                        t.clone()
+                    } else {
+                        self.heap.mk_never()
+                    }
+                }
+                Type::Literal(f) if matches!(f.value, Lit::Bool(_) | Lit::Enum(_)) => {
+                    if self.is_subset_eq(right, &facet_ty) {
+                        t.clone()
+                    } else {
+                        self.heap.mk_never()
+                    }
+                }
+                _ => t.clone(),
+            }
+        })
+    }
+
+    /// Narrow a union by removing members whose facet is identity-equal to `right`.
+    fn narrow_facet_is_not(
+        &self,
+        base: &Type,
+        right: &Type,
+        facet: &FacetKind,
+        range: TextRange,
+    ) -> Type {
+        self.distribute_over_union(base, |t| {
+            let base_info = TypeInfo::of_ty(t.clone());
+            let facet_ty = self.get_facet_chain_type(
+                &base_info,
+                &FacetChain::new(Vec1::new(facet.clone())),
+                range,
+            );
+            let is_identity_literal = |ty: &Type| {
+                matches!(ty, Type::None | Type::Ellipsis)
+                    || matches!(ty, Type::Literal(f) if matches!(f.value, Lit::Bool(_) | Lit::Enum(_)))
+            };
+            if is_identity_literal(&facet_ty)
+                && is_identity_literal(right)
+                && self.literal_equal(right, &facet_ty)
+            {
+                self.heap.mk_never()
+            } else {
+                t.clone()
+            }
         })
     }
 
@@ -430,57 +810,29 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
+        // We narrow `X.__class__ == Y` the same way as `type(X) == Y`
+        if let FacetKind::Attribute(attr) = facet
+            && *attr == dunder::CLASS
+        {
+            match op {
+                AtomicNarrowOp::Is(v) | AtomicNarrowOp::Eq(v) => {
+                    let right = self.expr_infer(v, errors);
+                    return Some(self.narrow_isinstance(base, &right));
+                }
+                AtomicNarrowOp::IsNot(v) | AtomicNarrowOp::NotEq(v) => {
+                    return Some(self.narrow_type_not_eq(base, v, errors));
+                }
+                _ => {}
+            }
+        }
         match op {
             AtomicNarrowOp::Is(v) => {
                 let right = self.expr_infer(v, errors);
-                Some(self.distribute_over_union(base, |t| {
-                    let base_info = TypeInfo::of_ty(t.clone());
-                    let facet_ty = self.get_facet_chain_type(
-                        &base_info,
-                        &FacetChain::new(Vec1::new(facet.clone())),
-                        range,
-                    );
-                    match right {
-                        Type::None
-                        | Type::Literal(box Literal {
-                            value: Lit::Bool(_) | Lit::Enum(_),
-                            ..
-                        }) => {
-                            if self.is_subset_eq(&right, &facet_ty) {
-                                t.clone()
-                            } else {
-                                Type::never()
-                            }
-                        }
-                        _ => t.clone(),
-                    }
-                }))
+                Some(self.narrow_facet_is(base, &right, facet, range))
             }
             AtomicNarrowOp::IsNot(v) => {
                 let right = self.expr_infer(v, errors);
-                Some(self.distribute_over_union(base, |t| {
-                    let base_info = TypeInfo::of_ty(t.clone());
-                    let facet_ty = self.get_facet_chain_type(
-                        &base_info,
-                        &FacetChain::new(Vec1::new(facet.clone())),
-                        range,
-                    );
-                    match (&facet_ty, &right) {
-                        (
-                            Type::None
-                            | Type::Literal(box Literal {
-                                value: Lit::Bool(_) | Lit::Enum(_),
-                                ..
-                            }),
-                            Type::None
-                            | Type::Literal(box Literal {
-                                value: Lit::Bool(_) | Lit::Enum(_),
-                                ..
-                            }),
-                        ) if self.literal_equal(&right, &facet_ty) => Type::never(),
-                        _ => t.clone(),
-                    }
-                }))
+                Some(self.narrow_facet_is_not(base, &right, facet, range))
             }
             AtomicNarrowOp::Eq(v) => {
                 let right = self.expr_infer(v, errors);
@@ -492,11 +844,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         range,
                     );
                     match right {
-                        Type::None | Type::Literal(_) => {
+                        Type::None | Type::Ellipsis | Type::Literal(_) => {
                             if self.is_subset_eq(&right, &facet_ty) {
                                 t.clone()
                             } else {
-                                Type::never()
+                                self.heap.mk_never()
                             }
                         }
                         _ => t.clone(),
@@ -513,12 +865,29 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         range,
                     );
                     match (&facet_ty, &right) {
-                        (Type::None | Type::Literal(_), Type::None | Type::Literal(_))
-                            if self.literal_equal(&right, &facet_ty) =>
-                        {
-                            Type::never()
-                        }
+                        (
+                            Type::None | Type::Ellipsis | Type::Literal(_),
+                            Type::None | Type::Ellipsis | Type::Literal(_),
+                        ) if self.literal_equal(&right, &facet_ty) => self.heap.mk_never(),
                         _ => t.clone(),
+                    }
+                }))
+            }
+            AtomicNarrowOp::In(v) | AtomicNarrowOp::NotIn(v)
+                if self.literal_membership_exprs(v, errors).is_some() =>
+            {
+                Some(self.distribute_over_union(base, |t| {
+                    let base_info = TypeInfo::of_ty(t.clone());
+                    let facet_ty = self.get_facet_chain_type(
+                        &base_info,
+                        &FacetChain::new(Vec1::new(facet.clone())),
+                        range,
+                    );
+                    let narrowed_facet = self.atomic_narrow(&facet_ty, op, range, errors);
+                    if narrowed_facet.is_never() {
+                        self.heap.mk_never()
+                    } else {
+                        t.clone()
                     }
                 }))
             }
@@ -526,7 +895,71 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
-    fn atomic_narrow(
+    fn tuple_len_eq(
+        &self,
+        tuple: &Tuple,
+        len: usize,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Type {
+        match tuple {
+            Tuple::Concrete(elts) if elts.len() != len => self.heap.mk_never(),
+            Tuple::Unpacked(f) if f.0.len() + f.2.len() > len => self.heap.mk_never(),
+            Tuple::Unpacked(f) if f.0.len() + f.2.len() == len => {
+                let (prefix, _, suffix) = &**f;
+                self.heap
+                    .mk_concrete_tuple(prefix.iter().cloned().chain(suffix.clone()).collect())
+            }
+            Tuple::Unpacked(f)
+                if let Type::Tuple(Tuple::Unbounded(middle)) = &f.1
+                    && f.0.len() + f.2.len() < len =>
+            {
+                let (prefix, _, suffix) = &**f;
+                let middle_elements = vec![(**middle).clone(); len - prefix.len() - suffix.len()];
+                self.heap.mk_concrete_tuple(
+                    prefix
+                        .iter()
+                        .cloned()
+                        .chain(middle_elements)
+                        .chain(suffix.clone())
+                        .collect(),
+                )
+            }
+            Tuple::Unpacked(f) if let Type::Var(_) = &f.1 => {
+                let (prefix, middle_var, suffix) = &**f;
+                let forced_middle = self.force_for_narrowing(middle_var, range, errors);
+                let new_tuple =
+                    Tuple::Unpacked(Box::new((prefix.clone(), forced_middle, suffix.clone())));
+                self.tuple_len_eq(&simplify_tuples(new_tuple, self.heap), len, range, errors)
+            }
+            Tuple::Unbounded(elements) => {
+                self.heap.mk_concrete_tuple(vec![(**elements).clone(); len])
+            }
+            _ => self.heap.mk_tuple(tuple.clone()),
+        }
+    }
+
+    fn tuple_len_not_eq(
+        &self,
+        tuple: &Tuple,
+        len: usize,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> Type {
+        match tuple {
+            Tuple::Concrete(elts) if elts.len() == len => self.heap.mk_never(),
+            Tuple::Unpacked(f) if let Type::Var(_) = &f.1 => {
+                let (prefix, middle_var, suffix) = &**f;
+                let forced_middle = self.force_for_narrowing(middle_var, range, errors);
+                let new_tuple =
+                    Tuple::Unpacked(Box::new((prefix.clone(), forced_middle, suffix.clone())));
+                self.tuple_len_not_eq(&simplify_tuples(new_tuple, self.heap), len, range, errors)
+            }
+            _ => self.heap.mk_tuple(tuple.clone()),
+        }
+    }
+
+    pub(crate) fn atomic_narrow(
         &self,
         ty: &Type,
         op: &AtomicNarrowOp,
@@ -537,86 +970,54 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             AtomicNarrowOp::Placeholder => ty.clone(),
             AtomicNarrowOp::LenEq(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
                     return ty.clone();
                 };
                 self.distribute_over_union(ty, |ty| match ty {
-                    Type::Tuple(Tuple::Concrete(elts)) if elts.len() != len => Type::never(),
-                    Type::Tuple(Tuple::Unpacked(box (prefix, _, suffix)))
-                        if prefix.len() + suffix.len() > len =>
-                    {
-                        Type::never()
-                    }
-                    Type::Tuple(Tuple::Unpacked(box (prefix, _, suffix)))
-                        if prefix.len() + suffix.len() == len =>
-                    {
-                        Type::concrete_tuple(prefix.iter().cloned().chain(suffix.clone()).collect())
-                    }
-                    Type::Tuple(Tuple::Unpacked(box (
-                        prefix,
-                        Type::Tuple(Tuple::Unbounded(middle)),
-                        suffix,
-                    ))) if prefix.len() + suffix.len() < len => {
-                        let middle_elements =
-                            vec![(**middle).clone(); len - prefix.len() - suffix.len()];
-                        Type::concrete_tuple(
-                            prefix
-                                .iter()
-                                .cloned()
-                                .chain(middle_elements)
-                                .chain(suffix.clone())
-                                .collect(),
-                        )
-                    }
-                    Type::Tuple(Tuple::Unbounded(elements)) => {
-                        Type::concrete_tuple(vec![(**elements).clone(); len])
-                    }
                     Type::ClassType(class)
                         if let Some(Tuple::Concrete(elts)) = self.as_tuple(class)
                             && elts.len() != len =>
                     {
-                        Type::never()
+                        self.heap.mk_never()
                     }
+                    Type::Tuple(tuple) => self.tuple_len_eq(tuple, len, range, errors),
                     _ => ty.clone(),
                 })
             }
             AtomicNarrowOp::LenNotEq(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
                     return ty.clone();
                 };
                 self.distribute_over_union(ty, |ty| match ty {
-                    Type::Tuple(Tuple::Concrete(elts)) if elts.len() == len => Type::never(),
                     Type::ClassType(class)
                         if let Some(Tuple::Concrete(elts)) = self.as_tuple(class)
                             && elts.len() == len =>
                     {
-                        Type::never()
+                        self.heap.mk_never()
                     }
+                    Type::Tuple(tuple) => self.tuple_len_not_eq(tuple, len, range, errors),
                     _ => ty.clone(),
                 })
             }
             AtomicNarrowOp::LenGt(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
@@ -626,11 +1027,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             AtomicNarrowOp::LenGte(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
@@ -643,28 +1043,26 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             AtomicNarrowOp::LenLt(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
-                    return Type::never();
+                    return self.heap.mk_never();
                 };
                 if len == 0 {
-                    return Type::never();
+                    return self.heap.mk_never();
                 }
                 self.narrow_length_less_than(ty, len)
             }
             AtomicNarrowOp::LenLte(v) => {
                 let right = self.expr_infer(v, errors);
-                let Type::Literal(box Literal {
-                    value: Lit::Int(lit),
-                    ..
-                }) = &right
-                else {
+                let Type::Literal(f) = &right else {
+                    return ty.clone();
+                };
+                let Lit::Int(lit) = &f.value else {
                     return ty.clone();
                 };
                 let Some(len) = lit.as_i64().and_then(|i| i.to_usize()) else {
@@ -673,39 +1071,30 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.narrow_length_less_than(ty, len + 1)
             }
             AtomicNarrowOp::IsSequence => {
-                // Narrow to only sequence types (for sequence pattern matching)
-                self.distribute_over_union(ty, |t| {
-                    if self.is_sequence_for_pattern(t) {
-                        t.clone()
-                    } else {
-                        Type::never()
-                    }
-                })
+                self.is_type_for_pattern(ty, |t| self.is_sequence_for_pattern(t))
             }
             AtomicNarrowOp::IsNotSequence => {
-                // Narrow to exclude sequence types (negation of sequence pattern)
-                // Note: Any and classes that extend Any must be preserved (not narrowed to Never)
-                // since we can't know at static analysis time whether they're sequences or not
-                self.distribute_over_union(ty, |t| {
-                    if self.behaves_like_any(t) {
-                        t.clone()
-                    } else if self.is_sequence_for_pattern(t) {
-                        Type::never()
-                    } else {
-                        t.clone()
-                    }
-                })
+                self.is_not_type_for_pattern(ty, |t| self.is_sequence_for_pattern(t))
+            }
+            AtomicNarrowOp::IsMapping => {
+                let mapping = self.heap.mk_class_type(
+                    self.stdlib
+                        .mapping(self.heap.mk_any_implicit(), self.heap.mk_any_implicit()),
+                );
+                self.is_type_for_pattern(ty, |t| self.is_subset_eq(t, &mapping))
+            }
+            AtomicNarrowOp::IsNotMapping => {
+                let mapping = self.heap.mk_class_type(
+                    self.stdlib
+                        .mapping(self.heap.mk_any_implicit(), self.heap.mk_any_implicit()),
+                );
+                self.is_not_type_for_pattern(ty, |t| self.is_subset_eq(t, &mapping))
             }
             AtomicNarrowOp::In(v) => {
-                // First, check for List, Tuple, and Set literal expressions (syntactic check,
-                // avoids type inference on the container itself)
-                let exprs = match v {
-                    Expr::List(list) => Some(list.elts.clone()),
-                    Expr::Tuple(tuple) => Some(tuple.elts.clone()),
-                    Expr::Set(set) => Some(set.elts.clone()),
-                    _ => None,
-                };
-                if let Some(exprs) = exprs {
+                // First, check for literal containers. We also unwrap builtin
+                // container constructor calls (list/tuple/set/frozenset) when
+                // their argument is itself a literal container.
+                if let Some(exprs) = self.literal_membership_exprs(v, errors) {
                     // Bail out if any element is a starred expression (e.g., `x in [*y, 1]`).
                     // We can't know all values at compile time when unpacking occurs.
                     if exprs.iter().any(|e| matches!(e, Expr::Starred(_))) {
@@ -714,10 +1103,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     let mut literal_types = Vec::new();
                     for expr in exprs {
                         let expr_ty = self.expr_infer(&expr, errors);
-                        if matches!(expr_ty, Type::Literal(_) | Type::None) {
-                            literal_types.push(expr_ty);
-                        } else {
-                            return ty.clone();
+                        match expr_ty {
+                            Type::Literal(_) | Type::None => {
+                                literal_types.push(expr_ty);
+                            }
+                            // Bare class names (e.g., `int`) infer to ClassDef.
+                            // Convert to type[...] so `x in (int, float)` can
+                            // narrow x to type[int] | type[float].
+                            Type::ClassDef(cls) => {
+                                literal_types.push(Type::type_of(self.promote_silently(&cls)));
+                            }
+                            // Already-wrapped type[X] expressions pass through.
+                            Type::Type(ref f) if matches!(&**f, Type::ClassType(_)) => {
+                                literal_types.push(expr_ty);
+                            }
+                            _ => {
+                                return ty.clone();
+                            }
                         }
                     }
                     return self.intersect(ty, &self.unions(literal_types));
@@ -726,11 +1128,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Check if the right operand is a TypedDict.
                 // If so, we can narrow the left operand to the union of the TypedDict's keys.
                 let right_ty = self.expr_infer(v, errors);
+                if let Type::Tuple(tuple) = &right_ty
+                    && let Some(member_ty) = self.tuple_membership_type(tuple, range, errors)
+                {
+                    return self.intersect(ty, &member_ty);
+                }
                 if let Type::TypedDict(typed_dict) = &right_ty {
                     let fields = self.typed_dict_fields(typed_dict);
                     if fields.is_empty() {
                         // Empty TypedDict - the `in` check is always false
-                        return Type::never();
+                        return self.heap.mk_never();
                     }
                     let key_types: Vec<Type> = fields
                         .keys()
@@ -739,18 +1146,21 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     return self.intersect(ty, &self.unions(key_types));
                 }
 
-                ty.clone()
+                // Check if the right operand is a mapping (e.g. dict[str, int]).
+                // If so, we can narrow the left operand to the mapping's key type.
+                if !self.behaves_like_any(&right_ty)
+                    && let Some((key_ty, _)) = self.unwrap_mapping(&right_ty)
+                {
+                    self.intersect(ty, &key_ty)
+                } else {
+                    ty.clone()
+                }
             }
             AtomicNarrowOp::NotIn(v) => {
-                // First, check for List, Tuple, and Set literal expressions (syntactic check,
-                // avoids type inference on the container itself)
-                let exprs = match v {
-                    Expr::List(list) => Some(list.elts.clone()),
-                    Expr::Tuple(tuple) => Some(tuple.elts.clone()),
-                    Expr::Set(set) => Some(set.elts.clone()),
-                    _ => None,
-                };
-                if let Some(exprs) = exprs {
+                // First, check for literal containers. We also unwrap builtin
+                // container constructor calls (list/tuple/set/frozenset) when
+                // their argument is itself a literal container.
+                if let Some(exprs) = self.literal_membership_exprs(v, errors) {
                     // Bail out if any element is a starred expression (e.g., `x not in [*y, 1]`).
                     // We can't know all values at compile time when unpacking occurs.
                     if exprs.iter().any(|e| matches!(e, Expr::Starred(_))) {
@@ -759,10 +1169,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     let mut literal_types = Vec::new();
                     for expr in exprs {
                         let expr_ty = self.expr_infer(&expr, errors);
-                        if matches!(expr_ty, Type::Literal(_) | Type::None) {
-                            literal_types.push(expr_ty);
-                        } else {
-                            return ty.clone();
+                        match expr_ty {
+                            Type::Literal(_) | Type::None => {
+                                literal_types.push(expr_ty);
+                            }
+                            // Accept class objects so they don't trigger the
+                            // bail-out below — this allows mixed containers
+                            // like `(int, None)` to still narrow the non-class
+                            // elements. Class objects themselves are not
+                            // subtracted in the `not in` case (see comment in
+                            // distribute_over_union below).
+                            Type::ClassDef(cls) => {
+                                literal_types.push(Type::type_of(self.promote_silently(&cls)));
+                            }
+                            Type::Type(ref f) if matches!(&**f, Type::ClassType(_)) => {
+                                literal_types.push(expr_ty);
+                            }
+                            _ => {
+                                return ty.clone();
+                            }
                         }
                     }
                     return self.distribute_over_union(ty, |t| {
@@ -770,19 +1195,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         for right in &literal_types {
                             match (t, right) {
                                 (_, _) if self.literal_equal(t, right) => {
-                                    result = Type::never();
+                                    result = self.heap.mk_never();
                                 }
+                                // We intentionally do NOT subtract class objects
+                                // (type[X]) here. `x not in (int, float)` does
+                                // not imply x is not type[int], because x could
+                                // be type[MyInt] (a subclass of int) which
+                                // satisfies type[int] but is not identity-equal
+                                // to `int` at runtime.
                                 (Type::ClassType(cls), Type::Literal(lit))
                                     if cls.is_builtin("bool")
                                         && let Lit::Bool(b) = &lit.value =>
                                 {
                                     result = Lit::Bool(!b).to_implicit_type();
                                 }
-                                (Type::ClassType(left_cls), Type::Literal(right))
-                                    if let Lit::Enum(right) = &right.value
-                                        && left_cls == &right.class =>
+                                (left, right)
+                                    if let Some((instance, name)) =
+                                        Self::enum_instance(left, right) =>
                                 {
-                                    result = self.subtract_enum_member(left_cls, &right.member);
+                                    result = self.subtract_enum_member(instance, name);
                                 }
                                 _ => {}
                             }
@@ -807,7 +1238,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     return self.distribute_over_union(ty, |t| {
                         for key_type in &key_types {
                             if self.literal_equal(t, key_type) {
-                                return Type::never();
+                                return self.heap.mk_never();
                             }
                         }
                         t.clone()
@@ -823,33 +1254,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             AtomicNarrowOp::IsNot(v) => {
                 let right = self.expr_infer(v, errors);
-                // Get our best approximation of ty - right.
-                self.distribute_over_union(ty, |t| {
-                    // Only certain literal types can be compared by identity.
-                    match (t, &right) {
-                        (
-                            _,
-                            Type::None
-                            | Type::Literal(box Literal {
-                                value: Lit::Bool(_) | Lit::Enum(_),
-                                ..
-                            }),
-                        ) if self.literal_equal(t, &right) => Type::never(),
-                        (Type::ClassType(cls), Type::Literal(lit))
-                            if cls.is_builtin("bool")
-                                && let Lit::Bool(b) = &lit.value =>
-                        {
-                            Lit::Bool(!b).to_implicit_type()
-                        }
-                        (Type::ClassType(left_cls), Type::Literal(right))
-                            if let Lit::Enum(right) = &right.value
-                                && left_cls == &right.class =>
-                        {
-                            self.subtract_enum_member(left_cls, &right.member)
-                        }
-                        _ => t.clone(),
-                    }
-                })
+                self.narrow_is_not(ty, &right)
             }
             AtomicNarrowOp::IsInstance(v, source) => {
                 let right = self.expr_infer(v, errors);
@@ -863,8 +1268,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         }
                     });
                     self.check_type_is_class_object(
-                        right.clone(),
                         Some(ty.clone()),
+                        right.clone(),
                         contains_subscript,
                         v.range(),
                         &FunctionKind::IsInstance,
@@ -874,26 +1279,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
                 self.narrow_isinstance(ty, &right)
             }
-            AtomicNarrowOp::IsNotInstance(v, _source) => {
-                let right = self.expr_infer(v, errors);
-                self.narrow_is_not_instance(ty, &right)
+            AtomicNarrowOp::IsNotInstance(v, source) => {
+                self.narrow_is_not_instance(ty, v, *source, errors)
             }
             AtomicNarrowOp::TypeEq(v) => {
-                // If type(X) == Y then X can't be a subclass of Y
+                // If type(X) == Y then X has to be exactly Y, not a subclass of Y
                 // We can't model that, so we narrow it exactly like isinstance(X, Y)
                 let right = self.expr_infer(v, errors);
                 self.narrow_isinstance(ty, &right)
             }
-            // Even if type(X) != Y, X can still be a subclass of Y so we can't do any negative refinement
-            AtomicNarrowOp::TypeNotEq(_) => ty.clone(),
+            // If type(X) != Y, X can still be a subclass of Y so we can't do negative refinement
+            // unless Y is final, in which case X cannot be a subclass of Y
+            AtomicNarrowOp::TypeNotEq(v) => self.narrow_type_not_eq(ty, v, errors),
             AtomicNarrowOp::IsSubclass(v) => {
                 let right = self.expr_infer(v, errors);
                 self.narrow_issubclass(ty, &right, v.range(), errors)
             }
-            AtomicNarrowOp::IsNotSubclass(v) => {
-                let right = self.expr_infer(v, errors);
-                self.narrow_is_not_subclass(ty, &right, v.range(), errors)
-            }
+            AtomicNarrowOp::IsNotSubclass(v) => self.narrow_is_not_subclass(ty, v, errors),
             // `hasattr` and `getattr` are handled in `narrow`
             AtomicNarrowOp::HasAttr(_) => ty.clone(),
             AtomicNarrowOp::NotHasAttr(_) => ty.clone(),
@@ -905,8 +1307,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
                     let args = arguments.args.map(CallArg::expr_maybe_starred);
                     let kws = arguments.keywords.map(CallKeyword::new);
-                    let ret =
-                        self.call_infer(*call_target, &args, &kws, range, errors, None, None, None);
+                    // This error is raised elsewhere, swallow here to avoid duplicate errors
+                    let swallowed_errors = self.error_swallower();
+                    let ret = self.call_infer(
+                        *call_target,
+                        &args,
+                        &kws,
+                        range,
+                        &swallowed_errors,
+                        None,
+                        None,
+                        None,
+                    );
                     if let Type::TypeGuard(t) = ret {
                         return *t;
                     }
@@ -918,8 +1330,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
                     let args = arguments.args.map(CallArg::expr_maybe_starred);
                     let kws = arguments.keywords.map(CallKeyword::new);
-                    let ret =
-                        self.call_infer(*call_target, &args, &kws, range, errors, None, None, None);
+                    // This error is raised elsewhere, swallow here to avoid duplicate errors
+                    let swallowed_errors = self.error_swallower();
+                    let ret = self.call_infer(
+                        *call_target,
+                        &args,
+                        &kws,
+                        range,
+                        &swallowed_errors,
+                        None,
+                        None,
+                        None,
+                    );
                     if let Type::TypeIs(t) = ret {
                         return self.distribute_over_union(&t, |right| {
                             self.intersect_with_fallback(ty, right, &|| {
@@ -935,7 +1357,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 // being `object | int`. This is a surprising and unhelpful type, so we
                                 // use Never as the fallback for now.
                                 if ty.is_union() {
-                                    Type::never()
+                                    self.heap.mk_never()
                                 } else {
                                     (*t).clone()
                                 }
@@ -949,8 +1371,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if let CallTargetLookup::Ok(call_target) = self.as_call_target(t.clone()) {
                     let args = arguments.args.map(CallArg::expr_maybe_starred);
                     let kws = arguments.keywords.map(CallKeyword::new);
-                    let ret =
-                        self.call_infer(*call_target, &args, &kws, range, errors, None, None, None);
+                    // This error is raised elsewhere, swallow here to avoid duplicate errors
+                    let swallowed_errors = self.error_swallower();
+                    let ret = self.call_infer(
+                        *call_target,
+                        &args,
+                        &kws,
+                        range,
+                        &swallowed_errors,
+                        None,
+                        None,
+                        None,
+                    );
                     if let Type::TypeIs(t) = ret {
                         return self.subtract(ty, &t);
                     }
@@ -968,7 +1400,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         &ErrorCollector::new(errors.module().clone(), ErrorStyle::Never),
                     ) == Some(!boolval)
                     {
-                        return Type::never();
+                        return self.heap.mk_never();
                     } else if let Type::ClassType(cls) = t {
                         if cls.is_builtin("bool") {
                             return Lit::Bool(boolval).to_implicit_type();
@@ -990,7 +1422,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             AtomicNarrowOp::Eq(v) => {
                 let right = self.expr_infer(v, errors);
-                if matches!(right, Type::Literal(_) | Type::None) {
+                if matches!(right, Type::Literal(_) | Type::None | Type::Ellipsis) {
                     self.intersect(ty, &right)
                 } else {
                     ty.clone()
@@ -998,20 +1430,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             AtomicNarrowOp::NotEq(v) => {
                 let right = self.expr_infer(v, errors);
-                if matches!(right, Type::Literal(_) | Type::None) {
+                if matches!(right, Type::Literal(_) | Type::None | Type::Ellipsis) {
                     self.distribute_over_union(ty, |t| match (t, &right) {
-                        (_, _) if self.literal_equal(t, &right) => Type::never(),
+                        (_, _) if self.literal_equal(t, &right) => self.heap.mk_never(),
                         (Type::ClassType(cls), Type::Literal(lit))
                             if cls.is_builtin("bool")
                                 && let Lit::Bool(b) = &lit.value =>
                         {
                             Lit::Bool(!b).to_implicit_type()
                         }
-                        (Type::ClassType(left_cls), Type::Literal(right))
-                            if let Lit::Enum(right) = &right.value
-                                && left_cls == &right.class =>
+                        (left, right)
+                            if let Some((instance, name)) = Self::enum_instance(left, right) =>
                         {
-                            self.subtract_enum_member(left_cls, &right.member)
+                            self.subtract_enum_member(instance, name)
                         }
                         _ => t.clone(),
                     })
@@ -1031,6 +1462,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
             }
         }
+    }
+
+    /// Narrow for pattern matching
+    fn is_type_for_pattern(&self, ty: &Type, is_type: impl Fn(&Type) -> bool) -> Type {
+        self.distribute_over_union(ty, |t| {
+            if is_type(t) {
+                t.clone()
+            } else {
+                self.heap.mk_never()
+            }
+        })
+    }
+
+    /// Narrow to exclude a type for pattern matching
+    fn is_not_type_for_pattern(&self, ty: &Type, is_type: impl Fn(&Type) -> bool) -> Type {
+        // Note: Any and classes that extend Any must be preserved (not narrowed to Never)
+        // since we can't know at static analysis time whether they're the pattern type or not
+        self.distribute_over_union(ty, |t| {
+            if self.behaves_like_any(t) {
+                t.clone()
+            } else if is_type(t) {
+                self.heap.mk_never()
+            } else {
+                t.clone()
+            }
+        })
     }
 
     pub(crate) fn get_facet_chain_type(
@@ -1061,30 +1518,38 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) -> Type {
         match first_facet {
-            FacetKind::Attribute(first_attr_name) => match remaining_facets.split_first() {
-                None => match base.type_at_facet(first_facet) {
-                    Some(ty) => self.force_for_narrowing(ty, range, errors),
-                    None => self.narrowable_for_attr(base.ty(), first_attr_name, range, errors),
-                },
-                Some((next_name, remaining_facets)) => {
-                    let base = self.attr_infer(base, first_attr_name, range, errors, None);
-                    self.narrowable_for_facet_chain(
-                        &base,
-                        next_name,
-                        remaining_facets,
-                        range,
-                        errors,
-                    )
+            FacetKind::Attribute(first_attr_name) => {
+                // Use a synthesized fake range for the attribute lookup itself to avoid
+                // overwriting typing traces (e.g. property getters, overload callees) keyed
+                // on the real `range`, which typically points at unrelated code such as the
+                // RHS of an equality narrow. The real `range` is still threaded through to
+                // recursive facet-chain narrowing so that errors there remain locatable.
+                let fake_range = TextRange::default();
+                match remaining_facets.split_first() {
+                    None => match base.type_at_facet(first_facet) {
+                        Some(ty) => self.force_for_narrowing(ty, range, errors),
+                        None => {
+                            self.narrowable_for_attr(base.ty(), first_attr_name, fake_range, errors)
+                        }
+                    },
+                    Some((next_name, remaining_facets)) => {
+                        let base = self.attr_infer(base, first_attr_name, fake_range, errors, None);
+                        self.narrowable_for_facet_chain(
+                            &base,
+                            next_name,
+                            remaining_facets,
+                            range,
+                            errors,
+                        )
+                    }
                 }
-            },
+            }
             FacetKind::Index(idx) => {
-                // We synthesize a slice expression for the subscript here
-                // Use a synthesized fake range to avoid overwriting typing traces
-                let synthesized_slice = Expr::NumberLiteral(ExprNumberLiteral {
-                    node_index: AtomicNodeIndex::default(),
-                    range: TextRange::empty(TextSize::from(0)),
-                    value: Number::Int(Int::from(*idx as u64)),
-                });
+                // We synthesize a slice expression for the subscript here.
+                // For negative indices, we must produce `UnaryOp(USub, NumberLiteral(abs))`
+                // to match what the parser generates for e.g. `xs[-1]`.
+                // Use a synthesized fake range to avoid overwriting typing traces.
+                let synthesized_slice = synthesize_int_slice(*idx);
                 match remaining_facets.split_first() {
                     None => match base.type_at_facet(first_facet) {
                         Some(ty) => self.force_for_narrowing(ty, range, errors),
@@ -1153,7 +1618,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     (Some(_), None) => return type_info.clone(),
                     (None, _) => self.force_for_narrowing(type_info.ty(), range, errors),
                 };
-                if matches!(base_ty, Type::TypedDict(_)) {
+                if self.is_dict_like(&base_ty) {
                     let key_facet = FacetKind::Key(key.to_string());
                     let facets = match resolved_chain {
                         Some(chain) => {
@@ -1181,7 +1646,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     (Some(_), None) => return type_info.clone(),
                     (None, _) => self.force_for_narrowing(type_info.ty(), range, errors),
                 };
-                if matches!(base_ty, Type::TypedDict(_)) {
+                if self.is_dict_like(&base_ty) {
                     let key_facet = FacetKind::Key(key.to_string());
                     let facets = match resolved_chain {
                         Some(chain) => {
@@ -1208,8 +1673,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     (Some(_), None) => return type_info.clone(),
                     (None, _) => self.force_for_narrowing(type_info.ty(), range, errors),
                 };
-                // We only narrow the attribute to `Any` if the attribute does not exist
-                if !self.has_attr(&base_ty, attr) {
+                // Narrow the attribute facet only if it doesn't exist on all members.
+                // The facet type is the union of attribute types from members that DO
+                // have the attribute, plus `Any` for members that don't. Preserving
+                // specific attribute types (rather than using a blanket `Any`) ensures
+                // fixpoint convergence when `hasattr` is used in loops with reassignment.
+                if let Some(narrow_ty) = self.hasattr_narrow_type(&base_ty, attr, range, errors) {
                     let attr_facet = FacetKind::Attribute(attr.clone());
                     let facets = match resolved_chain {
                         Some(chain) => {
@@ -1219,7 +1688,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         }
                         None => Vec1::new(attr_facet),
                     };
-                    type_info.with_narrow(&facets, Type::any_implicit())
+                    type_info.with_narrow(&facets, narrow_ty)
                 } else {
                     type_info.clone()
                 }
@@ -1227,9 +1696,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             NarrowOp::Atomic(subject, AtomicNarrowOp::GetAttr(attr, default)) => {
                 let suppress_errors =
                     ErrorCollector::new(errors.module().clone(), ErrorStyle::Never);
-                let default_ty = default
-                    .as_ref()
-                    .map_or(Type::None, |v| self.expr_infer(v, &suppress_errors));
+                let default_ty = default.as_ref().map_or_else(
+                    || self.heap.mk_none(),
+                    |v| self.expr_infer(v, &suppress_errors),
+                );
                 // We can't narrow the type if the specified default is not falsy
                 if self.as_bool(&default_ty, range, &suppress_errors) != Some(false) {
                     return type_info.clone();
@@ -1256,8 +1726,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Given that the default is falsy:
                 // If the attribute does not exist we narrow to `Any`
                 // If the attribute exists we narrow it to be truthy
-                if attr_ty == Type::any_error() {
-                    type_info.with_narrow(&facets, Type::any_implicit())
+                if attr_ty.is_error() {
+                    type_info.with_narrow(&facets, self.heap.mk_any_implicit())
                 } else {
                     let narrowed_ty = self.atomic_narrow(
                         &attr_ty,
@@ -1403,21 +1873,30 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self.is_dict_like(&base_ty)
     }
 
-    fn is_non_flag_enum(&self, cls: &ClassType) -> bool {
+    fn is_flag_enum(&self, cls: &ClassType) -> bool {
         self.get_metadata_for_class(cls.class_object())
             .enum_metadata()
-            .is_some_and(|meta| !meta.is_flag)
+            .is_some_and(|meta| meta.is_flag)
+    }
+
+    pub(crate) fn with_type_for_exhaustiveness_check(&self, info: Arc<TypeInfo>) -> TypeInfo {
+        info.arc_clone().map_ty(|mut ty| {
+            self.expand_mut(&mut ty);
+            match ty {
+                Type::SelfType(cls) => Type::ClassType(cls),
+                ty => ty,
+            }
+        })
     }
 
     /// Determines if a type should be checked for match exhaustiveness.
     /// We check exhaustiveness when the type has a finite, known set of possible values.
-    pub(crate) fn should_check_exhaustiveness(&self, ty: &Type) -> bool {
+    fn should_check_exhaustiveness(&self, ty: &Type) -> bool {
         match ty {
-            // Enums have a fixed set of members
-            Type::ClassType(cls) | Type::SelfType(cls) => {
-                self.is_non_flag_enum(cls)
-                    // Final classes can't have subclasses, so they are exhaustible
-                    || self.get_metadata_for_class(cls.class_object()).is_final()
+            Type::ClassType(cls) => {
+                // Final classes can't have subclasses, so they are exhaustible, with the exception
+                // of Flag enums, whose members can be combined into new members via bitwise ops
+                !self.is_flag_enum(cls) && self.is_final(cls.class_object())
                     // bool is effectively Literal[True] | Literal[False]
                     || cls.is_builtin("bool")
             }
@@ -1448,7 +1927,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             Type::Literal(lit) => Some(format!("{}", lit.value)),
             Type::None => Some("None".to_owned()),
             Type::ClassType(cls) => {
-                let display = self.for_display(Type::ClassType(cls.clone()));
+                let display = self.for_display(self.heap.mk_class_type(cls.clone()));
                 Some(format!("{}", display))
             }
             Type::Union(union) => {
@@ -1472,11 +1951,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) {
         let (op, narrow_range) = narrow_ops_for_fall_through;
-        let subject_info = self.get_idx(*subject_idx);
-        let mut subject_ty = subject_info.ty().clone();
-        self.expand_vars_mut(&mut subject_ty);
+        let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
         // We only check match exhaustiveness if the subject is an enum or a union of enum literals
-        if !self.should_check_exhaustiveness(&subject_ty) {
+        if !self.should_check_exhaustiveness(subject_info.ty()) {
             return;
         }
         let ignore_errors = self.error_swallower();
@@ -1492,9 +1969,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 };
                 // If the narrowing subject is the facet of some variable like `x.foo`,
                 // We need to make a `TypeInfo` rooted at `x` using the type of `x.foo`
-                let type_info = TypeInfo::of_ty(Type::any_implicit());
+                let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
                 let narrowing_subject_info =
-                    type_info.with_narrow(resolved_chain.facets(), subject_ty.clone());
+                    type_info.with_narrow(resolved_chain.facets(), subject_info.ty().clone());
                 let narrowed = self.narrow(
                     &narrowing_subject_info,
                     op.as_ref(),
@@ -1504,26 +1981,164 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.get_facet_chain_type(&narrowed, &resolved_chain, *subject_range)
             }
         };
-        self.expand_vars_mut(&mut remaining_ty);
+        self.expand_mut(&mut remaining_ty);
         // If the result is `Never` then the cases were exhaustive
         if remaining_ty.is_never() || remaining_ty.is_any() {
             return;
         }
-        let subject_display = self.for_display(subject_ty);
+        let subject_display = self.for_display(subject_info.into_ty());
         let remaining_display = self.for_display(remaining_ty.clone());
         let ctx = TypeDisplayContext::new(&[&subject_display, &remaining_display]);
-        let mut msg = vec1![format!(
-            "Match on `{}` is not exhaustive",
-            ctx.display(&subject_display)
-        )];
-        if let Some(missing_cases) = self.format_missing_cases(&remaining_ty) {
-            msg.push(format!("Missing cases: {}", missing_cases));
-        }
-        errors.add(
+        let mut builder = errors.error_builder(
             *subject_range,
-            ErrorInfo::Kind(ErrorKind::NonExhaustiveMatch),
-            msg,
+            ErrorKind::NonExhaustiveMatch,
+            format!(
+                "Match on `{}` is not exhaustive",
+                ctx.display(&subject_display)
+            ),
         );
+        if let Some(missing_cases) = self.format_missing_cases(&remaining_ty) {
+            builder = builder.with_detail(format!("Missing cases: {}", missing_cases));
+        }
+        builder.emit();
+    }
+
+    pub fn check_match_case_reachability(
+        &self,
+        subject_idx: &Idx<Key>,
+        narrowing_subject: &NarrowingSubject,
+        narrow_ops_for_case: &(Box<NarrowOp>, TextRange),
+        case_range: &TextRange,
+        errors: &ErrorCollector,
+    ) {
+        let (op, narrow_range) = narrow_ops_for_case;
+        if !Self::is_match_case_reachability_op(op) {
+            return;
+        }
+        let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
+        let subject_ty = subject_info.ty().clone();
+        if subject_ty.is_any()
+            || matches!(&subject_ty, Type::ClassType(cls) if cls.is_builtin("object"))
+        {
+            return;
+        }
+        let ignore_errors = self.error_swallower();
+        let (mut narrowed_ty, has_never_trigger_facet) = match narrowing_subject {
+            NarrowingSubject::Name(_) => {
+                let narrowed =
+                    self.narrow(&subject_info, op.as_ref(), *narrow_range, &ignore_errors);
+                let has_never_trigger_facet =
+                    self.has_never_match_trigger_facet(&narrowed, op, *case_range);
+                (narrowed.ty().clone(), has_never_trigger_facet)
+            }
+            NarrowingSubject::Facets(_, facets) => {
+                let Some(resolved_chain) = self.resolve_facet_chain(facets.chain.clone()) else {
+                    return;
+                };
+                let type_info = TypeInfo::of_ty(self.heap.mk_any_implicit());
+                let narrowing_subject_info =
+                    type_info.with_narrow(resolved_chain.facets(), subject_ty.clone());
+                let narrowed = self.narrow(
+                    &narrowing_subject_info,
+                    op.as_ref(),
+                    *narrow_range,
+                    &ignore_errors,
+                );
+                // No sub-facet check needed: the narrowed type already represents
+                // the facet's type directly, so `is_never()` below is sufficient.
+                (
+                    self.get_facet_chain_type(&narrowed, &resolved_chain, *case_range),
+                    false,
+                )
+            }
+        };
+        self.expand_mut(&mut narrowed_ty);
+        if !narrowed_ty.is_never() && !has_never_trigger_facet {
+            return;
+        }
+        let subject_display = self.for_display(subject_ty);
+        self.error(
+            errors,
+            *case_range,
+            ErrorKind::UnreachableMatchCase,
+            format!("Case pattern can never match subject of type `{subject_display}`"),
+        );
+    }
+
+    /// Check whether we can reliably determine reachability for this op.
+    ///
+    /// Returns `true` only when we understand all sub-ops AND at least one
+    /// constrains a value or class tightly enough to produce `Never`
+    /// (a "trigger", e.g. `Eq`, `Is`, or `IsInstance`).
+    ///
+    /// Structural ops like `IsSequence`/`LenEq` are checkable but aren't
+    /// triggers on their own.
+    fn is_match_case_reachability_op(op: &NarrowOp) -> bool {
+        // Classifies as (can_check, has_trigger). The two dimensions can't be
+        // collapsed into a single bool because And/Or need to distinguish
+        // "structural but checkable" from "unknown and uncheckable" in sub-ops.
+        fn classify(op: &NarrowOp) -> (bool, bool) {
+            match op {
+                NarrowOp::Atomic(_, AtomicNarrowOp::Eq(_) | AtomicNarrowOp::Is(_)) => (true, true),
+                NarrowOp::Atomic(_, AtomicNarrowOp::IsInstance(_, NarrowSource::Pattern)) => {
+                    (true, true)
+                }
+                NarrowOp::Atomic(
+                    _,
+                    AtomicNarrowOp::IsSequence
+                    | AtomicNarrowOp::IsMapping
+                    | AtomicNarrowOp::LenEq(_)
+                    | AtomicNarrowOp::LenGte(_),
+                ) => (true, false),
+                NarrowOp::And(ops) | NarrowOp::Or(ops) => {
+                    let mut has_trigger = false;
+                    for op in ops {
+                        let (can_check, op_has_trigger) = classify(op);
+                        if !can_check {
+                            return (false, false);
+                        }
+                        has_trigger |= op_has_trigger;
+                    }
+                    (true, has_trigger)
+                }
+                _ => (false, false),
+            }
+        }
+        let (can_check, has_trigger) = classify(op);
+        can_check && has_trigger
+    }
+
+    fn has_never_match_trigger_facet(
+        &self,
+        type_info: &TypeInfo,
+        op: &NarrowOp,
+        range: TextRange,
+    ) -> bool {
+        match op {
+            NarrowOp::Atomic(
+                Some(facet),
+                AtomicNarrowOp::Eq(_)
+                | AtomicNarrowOp::Is(_)
+                | AtomicNarrowOp::IsInstance(_, NarrowSource::Pattern),
+            ) => {
+                let Some(resolved_chain) = self.resolve_facet_chain(facet.chain.clone()) else {
+                    return false;
+                };
+                let mut facet_ty = self.get_facet_chain_type(type_info, &resolved_chain, range);
+                self.expand_mut(&mut facet_ty);
+                facet_ty.is_never()
+            }
+            NarrowOp::And(ops) => ops
+                .iter()
+                .any(|op| self.has_never_match_trigger_facet(type_info, op, range)),
+            NarrowOp::Or(ops) => {
+                !ops.is_empty()
+                    && ops
+                        .iter()
+                        .all(|op| self.has_never_match_trigger_facet(type_info, op, range))
+            }
+            _ => false,
+        }
     }
 
     pub fn resolve_facet_chain(&self, unresolved: UnresolvedFacetChain) -> Option<FacetChain> {
@@ -1544,10 +2159,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let suppress_errors = self.error_swallower();
                 let ty = self.expr_infer(&Expr::Name(expr_name), &suppress_errors);
                 match &ty {
-                    Type::Literal(lit) if let Lit::Int(lit_int) = &lit.value => lit_int
-                        .as_i64()
-                        .and_then(|i| i.to_usize())
-                        .map(FacetKind::Index),
+                    Type::Literal(lit) if let Lit::Int(lit_int) = &lit.value => {
+                        lit_int.as_i64().map(FacetKind::Index)
+                    }
                     Type::Literal(lit) if let Lit::Str(s) = &lit.value => {
                         Some(FacetKind::Key(s.to_string()))
                     }
@@ -1560,6 +2174,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     fn literal_equal(&self, left: &Type, right: &Type) -> bool {
         match (left, right) {
             (Type::None, Type::None) => true,
+            (Type::Ellipsis, Type::Ellipsis) => true,
             (Type::Literal(left), Type::Literal(right)) => left.value == right.value,
             _ => false,
         }

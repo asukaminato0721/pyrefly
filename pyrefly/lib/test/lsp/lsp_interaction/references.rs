@@ -6,12 +6,12 @@
  */
 
 use lsp_types::Url;
+use pyrefly::commands::lsp::IndexingMode;
 use serde_json::json;
 
-use crate::commands::lsp::IndexingMode;
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
-use crate::test::lsp::lsp_interaction::util::get_test_files_root;
+use crate::object_model::InitializeSettings;
+use crate::object_model::LspInteraction;
+use crate::util::get_test_files_root;
 
 #[test]
 fn test_references_for_usage_with_config() {
@@ -243,6 +243,64 @@ fn test_references_cross_file_no_config() {
             {
                 "range": {"start":{"line":6,"character":6},"end":{"character":9,"line":6}},
                 "uri": Url::from_file_path(bar.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":10,"character":0},"end":{"character":3,"line":10}},
+                "uri": Url::from_file_path(bar.clone()).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+#[test]
+fn test_include_declaration_respects_false() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("basic");
+    let scope_uri = Url::from_file_path(&root_path).unwrap();
+    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    interaction.set_root(root_path.clone());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let bar = root_path.join("bar.py");
+    let foo = root_path.join("foo.py");
+    let foo_relative = root_path.join("foo_relative.py");
+
+    interaction.client.did_open("bar.py");
+
+    interaction
+        .client
+        .references("bar.py", 10, 1, false)
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":6,"character":16},"end":{"character":19,"line":6}},
+                "uri": Url::from_file_path(foo.clone()).unwrap().to_string()
+            },
+            {
+                "range":{"end":{"character":3,"line":8},"start":{"character":0,"line":8}},
+                "uri": Url::from_file_path(foo.clone()).unwrap().to_string()
+            },
+            {
+                "range":{"end":{"character":7,"line":9},"start":{"character":4,"line":9}},
+                "uri": Url::from_file_path(foo.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":6,"character":17},"end":{"character":20,"line":6}},
+                "uri": Url::from_file_path(foo_relative.clone()).unwrap().to_string()
+            },
+            {
+                "range":{"end":{"character":3,"line":8},"start":{"character":0,"line":8}},
+                "uri": Url::from_file_path(foo_relative.clone()).unwrap().to_string()
+            },
+            {
+                "range":{"end":{"character":7,"line":9},"start":{"character":4,"line":9}},
+                "uri": Url::from_file_path(foo_relative.clone()).unwrap().to_string()
             },
             {
                 "range": {"start":{"line":10,"character":0},"end":{"character":3,"line":10}},
@@ -852,6 +910,102 @@ fn test_references_for_metaclass_call_priority() {
             {
                 "range": {"start":{"line":8,"character":5},"end":{"line":8,"character":14}},
                 "uri": Url::from_file_path(usage_py.clone()).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
+
+/// Regression test for https://github.com/facebook/pyrefly/issues/3237:
+/// `textDocument/references` should find cross-file references even when the
+/// target module starts with a docstring and the on-disk files use CRLF line
+/// endings while the editor sends LF-normalized content via `did_open`.
+#[test]
+fn test_references_cross_file_with_module_docstring() {
+    let root = get_test_files_root();
+    let root_path = root.path().join("references_docstring");
+    let scope_uri = Url::from_file_path(&root_path).unwrap();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root_path.clone());
+    interaction
+        .initialize(InitializeSettings {
+            workspace_folders: Some(vec![("test".to_owned(), scope_uri)]),
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    let a = root_path.join("a.py");
+    let b = root_path.join("b.py");
+    let services = root_path.join("services.py");
+
+    // The source fixtures use LF (to satisfy linters). Convert them to CRLF
+    // on disk in the temp directory so we can simulate an editor that
+    // normalizes CRLF→LF when opening files via `did_open`.
+    for path in [&a, &b, &services] {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let lf_content = raw.replace("\r\n", "\n");
+        let crlf_content = lf_content.replace('\n', "\r\n");
+        std::fs::write(path, &crlf_content).unwrap();
+    }
+
+    for (name, path) in [("a.py", &a), ("b.py", &b), ("services.py", &services)] {
+        let on_disk = std::fs::read_to_string(path).unwrap();
+        let normalized = on_disk.replace("\r\n", "\n");
+        let uri = Url::from_file_path(path).unwrap();
+        interaction.client.did_open_uri(&uri, "python", normalized);
+        assert!(
+            on_disk.contains("\r\n"),
+            "{name} should have CRLF line endings on disk"
+        );
+    }
+
+    // Class A defined in a.py (which starts with a docstring) should find
+    // cross-file references from services.py just like B.
+    interaction
+        .client
+        .references("a.py", 8, 6, true)
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":8,"character":6},"end":{"line":8,"character":7}},
+                "uri": Url::from_file_path(a.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":5,"character":14},"end":{"line":5,"character":15}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":9,"character":13},"end":{"line":9,"character":14}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":9,"character":19},"end":{"line":9,"character":20}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
+            },
+        ]))
+        .unwrap();
+
+    // Class B should also find cross-file refs.
+    interaction
+        .client
+        .references("b.py", 6, 6, true)
+        .expect_response(json!([
+            {
+                "range": {"start":{"line":6,"character":6},"end":{"line":6,"character":7}},
+                "uri": Url::from_file_path(b.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":6,"character":14},"end":{"line":6,"character":15}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":13,"character":13},"end":{"line":13,"character":14}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
+            },
+            {
+                "range": {"start":{"line":13,"character":19},"end":{"line":13,"character":20}},
+                "uri": Url::from_file_path(services.clone()).unwrap().to_string()
             },
         ]))
         .unwrap();

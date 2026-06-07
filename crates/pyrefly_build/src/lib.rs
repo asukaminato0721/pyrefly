@@ -22,15 +22,15 @@
 #![deny(clippy::inefficient_to_string)]
 #![deny(clippy::str_to_string)]
 #![deny(clippy::trivially_copy_pass_by_ref)]
-#![feature(const_type_name)]
-#![feature(if_let_guard)]
 
+use std::fmt::Display;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
 use dupe::Dupe as _;
+use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::arc_id::WeakArcId;
 use pyrefly_util::lock::Mutex;
@@ -39,9 +39,10 @@ use serde::Serialize;
 
 pub mod handle;
 pub mod source_db;
-pub use source_db::SourceDatabase;
+use source_db::SourceDatabase;
 use starlark_map::small_map::SmallMap;
 mod query;
+use tracing::info;
 #[cfg(not(target_arch = "wasm32"))]
 use which::which;
 
@@ -49,7 +50,8 @@ use crate::query::SourceDbQuerier;
 use crate::query::buck::BxlArgs;
 use crate::query::buck::BxlQuerier;
 use crate::query::custom::CustomQuerier;
-use crate::query::custom::CustomQueryArgs;
+pub use crate::query::custom::CustomQueryArgs;
+use crate::source_db::Target;
 use crate::source_db::query_source_db::QuerySourceDatabase;
 
 /// A cache of previously loaded build systems, keyed on their project root
@@ -57,7 +59,7 @@ use crate::source_db::query_source_db::QuerySourceDatabase;
 static BUILD_SYSTEM_CACHE: LazyLock<
     Mutex<
         SmallMap<
-            (PathBuf, BuildSystemArgs),
+            (PathBuf, BuildSystemArgs, Vec<Target>, bool),
             WeakArcId<Box<dyn source_db::SourceDatabase + 'static>>,
         >,
     >,
@@ -92,17 +94,35 @@ impl BuildSystemArgs {
     }
 }
 
+impl Display for BuildSystemArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Buck(args) => write!(f, "Buck({})", args),
+            Self::Custom(args) => write!(f, "Custom({})", args),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub struct BuildSystem {
     #[serde(flatten)]
-    args: BuildSystemArgs,
+    pub args: BuildSystemArgs,
     #[serde(default)]
-    ignore_if_build_system_missing: bool,
+    pub ignore_if_build_system_missing: bool,
     // TODO(connernilsen): remove once internal stubs are deprecated
     /// Are there any sources we should use before looking at the build system (like stubs)?
     #[serde(default)]
     pub search_path_prefix: Vec<PathBuf>,
+    // TODO(connernilsen): pull this out into per-config lookup, so build systme can be shared with
+    // different settings.
+    /// Are there any targets that should be included as a catch-all if the standard
+    /// search strategy fails?
+    #[serde(default)]
+    pub catch_all_targets: Vec<Target>,
+    /// Should we only use the catch_all_targets?
+    #[serde(default)]
+    pub catch_all_targets_only: bool,
 }
 
 impl BuildSystem {
@@ -111,12 +131,16 @@ impl BuildSystem {
         extras: Option<Vec<String>>,
         ignore_if_build_system_missing: bool,
         search_path_prefix: Vec<PathBuf>,
+        catch_all_targets: Vec<Target>,
+        catch_all_targets_only: bool,
     ) -> Self {
         let args = BuildSystemArgs::Buck(BxlArgs::new(isolation_dir, extras));
         Self {
             args,
             ignore_if_build_system_missing,
             search_path_prefix,
+            catch_all_targets,
+            catch_all_targets_only,
         }
     }
 
@@ -139,27 +163,126 @@ impl BuildSystem {
             Err(e) => return Some(Err(e)),
             Ok(path) => path,
         };
+
+        for path in &mut self.search_path_prefix {
+            *path = config_root.join(&path).absolutize();
+        }
+
         let mut cache = BUILD_SYSTEM_CACHE.lock();
-        let key = (repo_root.clone(), self.args.clone());
+        let key = (
+            repo_root.clone(),
+            self.args.clone(),
+            self.catch_all_targets.clone(),
+            self.catch_all_targets_only,
+        );
         if let Some(maybe_result) = cache.get(&key)
             && let Some(result) = maybe_result.upgrade()
         {
             return Some(Ok(result.dupe()));
         }
 
-        for path in &mut self.search_path_prefix {
-            *path = config_root.join(&path);
-        }
+        info!(
+            "Loading new build system at {}: {}",
+            config_root.display(),
+            &self.args
+        );
 
         let querier: Arc<dyn SourceDbQuerier> = match &self.args {
             BuildSystemArgs::Buck(args) => Arc::new(BxlQuerier::new(args.clone())),
             BuildSystemArgs::Custom(args) => Arc::new(CustomQuerier::new(args.clone())),
         };
         let source_db = ArcId::new(Box::new(QuerySourceDatabase::new(
-            repo_root.to_path_buf(),
+            repo_root,
             querier,
+            self.catch_all_targets.clone(),
+            self.catch_all_targets_only,
         )) as Box<dyn SourceDatabase>);
         cache.insert(key, source_db.downgrade());
         Some(Ok(source_db))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vec1::vec1;
+
+    use super::*;
+
+    #[test]
+    #[cfg_attr(target_os = "windows", ignore)]
+    fn test_get_source_db_always_configures_paths() {
+        let mut bs = BuildSystem {
+            args: BuildSystemArgs::Custom(CustomQueryArgs {
+                command: vec1!["python3".to_owned()],
+                repo_root: None,
+            }),
+            ignore_if_build_system_missing: false,
+            search_path_prefix: vec![
+                PathBuf::from("path/to/project"),
+                PathBuf::from("/absolute/path/to/project"),
+            ],
+            catch_all_targets: vec![],
+            catch_all_targets_only: false,
+        };
+        let mut bs2 = bs.clone();
+
+        let root = Path::new("/root");
+
+        bs.get_source_db(root.to_path_buf()).unwrap().unwrap();
+        assert_eq!(
+            &bs.search_path_prefix,
+            &[
+                root.join("path/to/project"),
+                PathBuf::from("/absolute/path/to/project")
+            ]
+        );
+        bs2.get_source_db(root.to_path_buf()).unwrap().unwrap();
+        assert_eq!(
+            &bs2.search_path_prefix,
+            &[
+                root.join("path/to/project"),
+                PathBuf::from("/absolute/path/to/project")
+            ]
+        );
+
+        // double check that configuring twice doesn't corrupt path, even though it should
+        // never be called twice
+        bs2.get_source_db(root.to_path_buf()).unwrap().unwrap();
+        assert_eq!(
+            &bs2.search_path_prefix,
+            &[
+                root.join("path/to/project"),
+                PathBuf::from("/absolute/path/to/project")
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_system_not_exist() {
+        let mut bs = BuildSystem {
+            args: BuildSystemArgs::Custom(CustomQueryArgs {
+                command: vec1!["this_command_should_not_exist_?/".to_owned()],
+                repo_root: None,
+            }),
+            ignore_if_build_system_missing: false,
+            search_path_prefix: vec![],
+            catch_all_targets: vec![],
+            catch_all_targets_only: false,
+        };
+        let root = Path::new("/root");
+
+        bs.get_source_db(root.to_path_buf()).unwrap().unwrap_err();
+
+        let mut bs = BuildSystem {
+            args: BuildSystemArgs::Custom(CustomQueryArgs {
+                command: vec1!["this_command_should_not_exist_?/".to_owned()],
+                repo_root: None,
+            }),
+            ignore_if_build_system_missing: true,
+            search_path_prefix: vec![],
+            catch_all_targets: vec![],
+            catch_all_targets_only: false,
+        };
+        assert!(bs.get_source_db(root.to_path_buf()).is_none());
     }
 }

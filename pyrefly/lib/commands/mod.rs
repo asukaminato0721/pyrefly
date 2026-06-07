@@ -9,6 +9,8 @@ pub mod all;
 pub mod buck_check;
 pub mod check;
 pub mod config_finder;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod coverage;
 pub mod dump_config;
 pub mod files;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,7 +20,7 @@ pub mod init;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lsp;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod report;
+pub mod stubgen;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod suppress;
 #[cfg(not(target_arch = "wasm32"))]

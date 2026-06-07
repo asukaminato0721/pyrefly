@@ -13,12 +13,14 @@ use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::DictItem;
 use ruff_python_ast::Expr;
+use ruff_python_ast::ExprBinOp;
 use ruff_python_ast::ExprBooleanLiteral;
 use ruff_python_ast::ExprName;
 use ruff_python_ast::ExprNoneLiteral;
 use ruff_python_ast::ExprStringLiteral;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::Operator;
 use ruff_python_ast::Parameter;
 use ruff_python_ast::ParameterWithDefault;
 use ruff_python_ast::Parameters;
@@ -38,12 +40,14 @@ use ruff_python_ast::visitor::source_order::SourceOrderVisitor;
 use ruff_python_ast::visitor::source_order::TraversalSignal;
 use ruff_python_parser::ParseError;
 use ruff_python_parser::ParseOptions;
+use ruff_python_parser::Parsed;
 use ruff_python_parser::UnsupportedSyntaxError;
 use ruff_python_parser::parse_expression_range;
 use ruff_python_parser::parse_unchecked;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use thin_vec::ThinVec;
 
 use crate::sys_info::PythonVersion;
 
@@ -92,14 +96,24 @@ impl Ast {
         contents: &str,
         source_type: PySourceType,
     ) -> (ModModule, Vec<ParseError>, Vec<UnsupportedSyntaxError>) {
-        Ast::parse_with_version(contents, PythonVersion::default(), source_type)
+        let (parsed, parse_errors, unsupported_syntax_errors) =
+            Ast::parse_with_version(contents, PythonVersion::default(), source_type);
+        (
+            parsed.into_syntax(),
+            parse_errors,
+            unsupported_syntax_errors,
+        )
     }
 
     pub fn parse_with_version(
         contents: &str,
         version: PythonVersion,
         source_type: PySourceType,
-    ) -> (ModModule, Vec<ParseError>, Vec<UnsupportedSyntaxError>) {
+    ) -> (
+        Parsed<ModModule>,
+        Vec<ParseError>,
+        Vec<UnsupportedSyntaxError>,
+    ) {
         // PySourceType of Python vs Stub doesn't actually change the parsing
         let options = ParseOptions::from(source_type).with_target_version(RuffPythonVersion {
             major: version.major as u8,
@@ -110,7 +124,7 @@ impl Ast {
             .unwrap();
         let parse_errors = res.errors().to_owned();
         let unsupported_syntax_errors = res.unsupported_syntax_errors().to_owned();
-        (res.into_syntax(), parse_errors, unsupported_syntax_errors)
+        (res, parse_errors, unsupported_syntax_errors)
     }
 
     pub fn parse_expr(contents: &str, pos: TextSize) -> anyhow::Result<Expr> {
@@ -175,7 +189,7 @@ impl Ast {
     /// Like `if_branches`, but returns owned values.
     pub fn if_branches_owned(
         x: StmtIf,
-    ) -> impl Iterator<Item = (TextRange, Option<Expr>, Vec<Stmt>)> {
+    ) -> impl Iterator<Item = (TextRange, Option<Expr>, ThinVec<Stmt>)> {
         let first = iter::once((x.range, Some(*x.test), x.body));
         let elses = x
             .elif_else_clauses
@@ -229,10 +243,8 @@ impl Ast {
     /// Calls a function on all of the names bound by this lvalue expression.
     pub fn expr_lvalue<'a>(x: &'a Expr, f: &mut impl FnMut(&'a ExprName)) {
         match x {
-            Expr::Name(x) => {
-                if !Self::is_synthesized_empty_name(x) {
-                    f(x);
-                }
+            Expr::Name(x) if !Self::is_synthesized_empty_name(x) => {
+                f(x);
             }
             Expr::Tuple(x) => {
                 for x in &x.elts {
@@ -359,7 +371,120 @@ impl Ast {
         found
     }
 
+    /// Check if a body of statements syntactically contains `yield` or `yield from`
+    /// at the current function scope level. Does not descend into nested function
+    /// definitions, class definitions, or lambdas, since yields in those scopes
+    /// belong to those scopes, not the enclosing one.
+    ///
+    /// This is used to detect generators even when the yield is inside a
+    /// statically-dead branch like `if False:`, where the binding phase skips
+    /// traversal but Python still treats the function as a generator.
+    pub fn body_contains_yield(stmts: &[Stmt]) -> bool {
+        use ruff_python_ast::visitor;
+        use ruff_python_ast::visitor::Visitor;
+
+        struct YieldFinder {
+            found: bool,
+        }
+
+        impl<'a> Visitor<'a> for YieldFinder {
+            fn visit_stmt(&mut self, stmt: &'a Stmt) {
+                if self.found {
+                    return;
+                }
+                match stmt {
+                    // Nested function/class definitions create new scopes.
+                    Stmt::FunctionDef(_) | Stmt::ClassDef(_) => {}
+                    _ => visitor::walk_stmt(self, stmt),
+                }
+            }
+
+            fn visit_expr(&mut self, expr: &'a Expr) {
+                if self.found {
+                    return;
+                }
+                match expr {
+                    Expr::Yield(_) | Expr::YieldFrom(_) => self.found = true,
+                    // Lambda creates a new scope.
+                    Expr::Lambda(_) => {}
+                    _ => visitor::walk_expr(self, expr),
+                }
+            }
+        }
+
+        let mut finder = YieldFinder { found: false };
+        for stmt in stmts {
+            finder.visit_stmt(stmt);
+            if finder.found {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn is_mangled_attr(name: &Name) -> bool {
         name.starts_with("__") && !name.ends_with("__")
+    }
+
+    // Parameters and variables that are prefixed (but not suffixed) with a single underscore
+    // are potentially unused, so we should skip some diagnostics/errors.
+    // Examples: `_`, `_x`
+    // Non-examples: `x`, `__x__`, `__x`, `_x_`
+    pub fn is_intentionally_unused(name: &str) -> bool {
+        name.starts_with('_')
+            && !name.starts_with("__")
+            && (name.len() == 1 || !name.ends_with('_'))
+    }
+
+    pub fn is_list_literal_or_comprehension(expr: &Expr) -> bool {
+        matches!(expr, Expr::List(_) | Expr::ListComp(_))
+    }
+
+    /// Returns a description of the syntax problem if `x` is not valid
+    /// annotation syntax, or `None` if valid. This only checks syntax;
+    /// semantic validation (e.g. that `typing.Self` is in a class context)
+    /// is handled elsewhere.
+    /// See https://typing.readthedocs.io/en/latest/spec/annotations.html#type-and-annotation-expressions
+    pub fn annotation_syntax_problem(x: &Expr) -> Option<&'static str> {
+        match x {
+            Expr::Name(..)
+            | Expr::Named(..)
+            | Expr::StringLiteral(..)
+            | Expr::NoneLiteral(..)
+            | Expr::Attribute(..)
+            | Expr::Starred(..) => None,
+            Expr::BinOp(ExprBinOp {
+                op: Operator::BitOr,
+                ..
+            }) => None,
+            Expr::Subscript(s) => match *s.value {
+                Expr::Name(..)
+                | Expr::BinOp(ExprBinOp {
+                    op: Operator::BitOr,
+                    ..
+                })
+                | Expr::Named(..)
+                | Expr::StringLiteral(..)
+                | Expr::NoneLiteral(..)
+                | Expr::Attribute(..) => None,
+                _ => Some("Invalid subscript expression"),
+            },
+            Expr::Call(..) => Some("Function call"),
+            Expr::Lambda(..) => Some("Lambda definition"),
+            Expr::List(..) => Some("List literal"),
+            Expr::NumberLiteral(..) => Some("Number literal"),
+            Expr::Tuple(..) => Some("Tuple literal"),
+            Expr::Dict(..) => Some("Dict literal"),
+            Expr::ListComp(..) => Some("List comprehension"),
+            Expr::If(..) => Some("If expression"),
+            Expr::BooleanLiteral(..) => Some("Bool literal"),
+            Expr::BoolOp(..) => Some("Boolean operation"),
+            Expr::FString(..) => Some("F-string"),
+            Expr::TString(..) => Some("T-string"),
+            Expr::UnaryOp(..) => Some("Unary operation"),
+            // Intentionally omits the specific operator to keep `&'static str`.
+            Expr::BinOp(..) => Some("Binary operation"),
+            _ => Some("Expression"),
+        }
     }
 }

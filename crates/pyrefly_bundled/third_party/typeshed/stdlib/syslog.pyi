@@ -55,12 +55,13 @@ if sys.platform != "win32":
     def closelog() -> None:
         """Reset the syslog module values and call the system library closelog()."""
         ...
-    def openlog(ident: str = ..., logoption: int = ..., facility: int = ...) -> None:
+    def openlog(ident: str = ..., logoption: int = 0, facility: int = ...) -> None:
         """Set logging options of subsequent syslog() calls."""
         ...
     def setlogmask(maskpri: int, /) -> int:
         """Set the priority mask to maskpri and return the previous mask value."""
         ...
+
     @overload
     def syslog(priority: int, message: str) -> None:
         """

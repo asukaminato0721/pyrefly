@@ -16,28 +16,32 @@ use serde_json::Value;
 use serde_repr::*;
 
 use crate::report::glean::schema::*;
+use crate::report::glean::facts::GleanPredicate;
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct XRefsByTarget {
+pub struct XRefDeclarationsByFile {
     pub id: u64,
-    pub key: Box<XRefsByTarget_key>,
+    pub key: Box<XRefDeclarationsByFile_key>,
 }
 
-impl XRefsByTarget {
-    pub fn GLEAN_name() -> String {
-        String::from("python.xrefs.XRefsByTarget.1")
-    }
-
-    pub fn new(target: python::DeclarationLocation, file: src::File, spans: Vec<src::ByteSpan>) -> Self {
-        XRefsByTarget {
+impl XRefDeclarationsByFile {
+    pub fn new(file: src::File, target: python::DeclarationLocation, source: src::ByteSpan) -> Self {
+        XRefDeclarationsByFile {
             id: 0,
-            key: Box::new(XRefsByTarget_key {
-                target,
+            key: Box::new(XRefDeclarationsByFile_key {
                 file,
-                spans
+                target,
+                source
             }),
         }
     }
+}
+
+impl GleanPredicate for XRefDeclarationsByFile {
+    fn GLEAN_name() -> String {
+        String::from("python.xrefs.XRefDeclarationsByFile.1")
+    }
+
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -47,10 +51,6 @@ pub struct XRefsByFile {
 }
 
 impl XRefsByFile {
-    pub fn GLEAN_name() -> String {
-        String::from("python.xrefs.XRefsByFile.1")
-    }
-
     pub fn new(file: src::File, xrefs: Vec<XRef>) -> Self {
         XRefsByFile {
             id: 0,
@@ -62,11 +62,11 @@ impl XRefsByFile {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct XRefsByTarget_key {
-    pub target: python::DeclarationLocation,
-    pub file: src::File,
-    pub spans: Vec<src::ByteSpan>,
+impl GleanPredicate for XRefsByFile {
+    fn GLEAN_name() -> String {
+        String::from("python.xrefs.XRefsByFile.1")
+    }
+
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -74,6 +74,13 @@ pub struct XRefDefinitionLocation {
     pub name: python::Name,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<src::File>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+pub struct XRefDeclarationsByFile_key {
+    pub file: src::File,
+    pub target: python::DeclarationLocation,
+    pub source: src::ByteSpan,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

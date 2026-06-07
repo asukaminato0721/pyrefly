@@ -19,10 +19,10 @@ impl ErrorContext {
             Self::BadContextManager(cm) => {
                 format!("Cannot use `{cm}` as a context manager")
             }
-            Self::UnaryOp(op, target) => {
+            Self::UnaryOp(op, target, _range) => {
                 format!("Unary `{op}` is not supported on `{target}`")
             }
-            Self::BinaryOp(op, left, right) => {
+            Self::BinaryOp(op, left, right, _left_range, _right_range) => {
                 let ctx = TypeDisplayContext::new(&[left, right]);
                 format!(
                     "`{}` is not supported between `{}` and `{}`",
@@ -31,7 +31,7 @@ impl ErrorContext {
                     ctx.display(right)
                 )
             }
-            Self::InplaceBinaryOp(op, left, right) => {
+            Self::InplaceBinaryOp(op, left, right, _left_range, _right_range) => {
                 let ctx = TypeDisplayContext::new(&[left, right]);
                 format!(
                     "`{}=` is not supported between `{}` and `{}`",
@@ -165,16 +165,27 @@ impl TypeCheckKind {
                 param,
                 ctx.display(want),
             ),
-            Self::TypedDictKey(key) => format!(
-                "`{}` is not assignable to TypedDict key{} with type `{}`",
+            Self::OverloadDefault(param) => format!(
+                "Default `{}` from implementation is not assignable to overload parameter `{}` with type `{}`",
                 ctx.display(got),
-                if let Some(key) = key {
+                param,
+                ctx.display(want),
+            ),
+            Self::TypedDictKey(key, is_anonymous) => {
+                let key_str = if let Some(key) = key {
                     format!(" `{key}`")
                 } else {
                     "".to_owned()
-                },
-                ctx.display(want),
-            ),
+                };
+                let kind = if *is_anonymous { "dict" } else { "TypedDict" };
+                format!(
+                    "`{}` is not assignable to {} key{} with type `{}`",
+                    ctx.display(got),
+                    kind,
+                    key_str,
+                    ctx.display(want),
+                )
+            }
             Self::TypedDictUnpacking | Self::TypedDictOpenUnpacking => format!(
                 "Unpacked `{}` is not assignable to `{}`",
                 ctx.display(got),
@@ -207,11 +218,6 @@ impl TypeCheckKind {
             // that information when creating the binding, so we're stuck with just types for now.
             Self::AnnAssign | Self::UnpackedAssign => format!(
                 "`{}` is not assignable to `{}`",
-                ctx.display(got),
-                ctx.display(want)
-            ),
-            Self::CycleBreaking => format!(
-                "`{}` is not assignable to `{}` (caused by inconsistent types when breaking cycles)",
                 ctx.display(got),
                 ctx.display(want)
             ),
@@ -251,11 +257,17 @@ impl TypeCheckKind {
             }
             Self::TypeVarSpecialization(name) => {
                 format!(
-                    "`{got}` is not assignable to upper bound `{want}` of type variable `{name}`"
+                    "`{}` is not assignable to upper bound `{}` of type variable `{name}`",
+                    ctx.display(got),
+                    ctx.display(want)
                 )
             }
             Self::Container => {
-                format!("`{got}` is not assignable to contained type `{want}`")
+                format!(
+                    "`{}` is not assignable to contained type `{}`",
+                    ctx.display(got),
+                    ctx.display(want)
+                )
             }
         }
     }

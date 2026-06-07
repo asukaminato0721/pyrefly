@@ -23,6 +23,9 @@ use ruff_python_ast::Identifier;
 
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
+use crate::heap::TypeHeap;
+use crate::quantified::Quantified;
+use crate::quantified::QuantifiedKind;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
 use crate::types::Type;
@@ -61,12 +64,23 @@ impl Restriction {
         matches!(self, Self::Bound(_) | Self::Constraints(_))
     }
 
-    pub fn as_type(&self, stdlib: &Stdlib) -> Type {
+    fn as_type(&self, stdlib: &Stdlib, heap: &TypeHeap, kind: QuantifiedKind) -> Type {
         match self {
             Self::Bound(t) => t.clone(),
-            Self::Constraints(ts) => unions(ts.clone()),
-            Self::Unrestricted => stdlib.object().clone().to_type(),
+            Self::Constraints(ts) => unions(ts.clone(), heap),
+            Self::Unrestricted => match kind {
+                QuantifiedKind::TypeVar => stdlib.object().clone().to_type(),
+                QuantifiedKind::ParamSpec => Type::Ellipsis,
+                QuantifiedKind::TypeVarTuple => Type::any_tuple(),
+            },
         }
+    }
+}
+
+impl Quantified {
+    /// The upper bound of this type parameter as a type.
+    pub fn upper_bound(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
+        self.restriction.as_type(stdlib, heap, self.kind)
     }
 }
 
@@ -82,10 +96,10 @@ pub enum PreInferenceVariance {
 impl Display for PreInferenceVariance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PreInferenceVariance::Covariant => write!(f, "Covariant"),
-            PreInferenceVariance::Contravariant => write!(f, "Contravariant"),
-            PreInferenceVariance::Invariant => write!(f, "Invariant"),
-            PreInferenceVariance::Undefined => write!(f, "Undefined"),
+            PreInferenceVariance::Covariant => write!(f, "covariant"),
+            PreInferenceVariance::Contravariant => write!(f, "contravariant"),
+            PreInferenceVariance::Invariant => write!(f, "invariant"),
+            PreInferenceVariance::Undefined => write!(f, "undefined"),
         }
     }
 }
@@ -96,7 +110,6 @@ pub enum Variance {
     Covariant,
     Contravariant,
     Invariant,
-    #[allow(dead_code)]
     Bivariant,
 }
 
@@ -185,8 +198,14 @@ impl TypeVar {
         self.0.variance
     }
 
-    pub fn to_type(&self) -> Type {
-        Type::TypeVar(self.dupe())
+    pub fn to_type(&self, heap: &TypeHeap) -> Type {
+        heap.mk_type_var(self.dupe())
+    }
+
+    /// The upper bound of this legacy TypeVar as a type.
+    pub fn upper_bound(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
+        self.restriction()
+            .as_type(stdlib, heap, QuantifiedKind::TypeVar)
     }
 
     pub fn type_eq_inner(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {

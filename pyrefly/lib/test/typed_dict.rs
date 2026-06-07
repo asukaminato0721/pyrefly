@@ -97,6 +97,62 @@ class Coord(TypedDict, object):  # E: Typed dictionary definitions may only exte
 );
 
 testcase!(
+    test_typeddict_dataclass_rejected,
+    r#"
+from dataclasses import dataclass
+import dataclasses
+from typing import TypedDict
+
+class Good(TypedDict):
+    x: int
+
+@dataclass
+class Bad1(TypedDict):  # E: Cannot apply `@dataclass` to TypedDict `Bad1`
+    x: int
+
+@dataclasses.dataclass
+class Bad2(TypedDict):  # E: Cannot apply `@dataclass` to TypedDict `Bad2`
+    x: int
+
+@dataclass()
+class Bad3(TypedDict):  # E: Cannot apply `@dataclass` to TypedDict `Bad3`
+    x: int
+"#,
+);
+
+testcase!(
+    test_typeddict_dataclass_transform_not_rejected,
+    r#"
+from typing import TypedDict, dataclass_transform
+
+@dataclass_transform()
+def my_transform(cls):
+    return cls
+
+@my_transform
+class TD(TypedDict):
+    x: int
+"#,
+);
+
+testcase!(
+    test_typeddict_child_of_rejected_dataclass_base,
+    r#"
+from dataclasses import dataclass
+from typing import TypedDict
+
+@dataclass
+class Bad(TypedDict):  # E: Cannot apply `@dataclass` to TypedDict `Bad`
+    x: int
+
+class Child(Bad):
+    y: int
+
+c: Child = {"x": 1, "y": 2}
+"#,
+);
+
+testcase!(
     test_typed_dict_literal,
     r#"
 from typing import TypedDict, NotRequired
@@ -178,17 +234,6 @@ class B(TypedDict):
 
 def update_a(a: A, b: B) -> None:
     a.update(b)
-    "#,
-);
-
-testcase!(
-    test_update_with_readonly_key,
-    r#"
-from typing import ReadOnly, TypedDict
-class A(TypedDict):
-    x: ReadOnly[int]
-a: A = {'x': 1}
-a.update({'x': 2})  # E: No matching overload found for function `A.update`
     "#,
 );
 
@@ -386,7 +431,7 @@ v5 = td_o.pop("x", "fallback")
 assert_type(v5, int | str)
 
 v6 = td_m.pop("a") # E:
-assert_type(v6, Any)
+assert_type(v6, int)
 
 v7 = td_m.pop("x")
 assert_type(v7, int)
@@ -675,6 +720,36 @@ f1(1, **x)  # E: Multiple values for argument `x`
 );
 
 testcase!(
+    test_typed_dict_kwargs_expansion_not_required_no_duplicate,
+    r#"
+from typing import TypedDict, NotRequired
+
+class Options(TypedDict, total=False):
+    name: str
+    debug: bool
+
+class AllRequired(TypedDict):
+    name: str
+    debug: bool
+
+def f(name: str, **kwargs) -> None: ...
+
+# NotRequired field "name" may be absent at runtime, so the conflict is only
+# potential, not guaranteed. We report PotentialBadKeywordArgument instead of
+# BadKeywordArgument to allow users to opt-in to this stricter check.
+nr: Options = {"debug": True}
+f(name="test", **nr)  # E: Multiple values for argument `name`
+f(**nr, name="test")  # E: Multiple values for argument `name`
+
+# Required field "name" is always present, so this IS a definite conflict
+# regardless of argument order.
+req: AllRequired = {"name": "test", "debug": True}
+f(name="test", **req)  # E: Multiple values for argument `name`
+f(**req, name="test")  # E: Multiple values for argument `name`
+    "#,
+);
+
+testcase!(
     test_typed_dict_kwargs_unpack,
     r#"
 from typing import TypedDict, NotRequired, Unpack, assert_type
@@ -748,7 +823,7 @@ class A(TypedDict):
 class B(A):
     y: str
 B(x=0, y='1')  # OK
-B(x=0, y=1)  # E: No matching overload found for function `B.__init__`
+B(x=0, y=1)  # E: `Literal[1]` is not assignable to parameter `y` with type `str`
     "#,
 );
 
@@ -896,7 +971,7 @@ def f(c1: C, c2: C, c3: dict[str, int], d: D, e: E, f: F):
     c1.update([("x", 1), ("y", 2)])
     c1.update([("z", 3)]) # E: No matching overload found for function `C.update`
     c1.update(x=1, y=2)
-    c1.update(z=1) # E: No matching overload found for function `C.update`
+    c1.update(z=1) # E: Unexpected keyword argument `z`
     "#,
 );
 
@@ -945,9 +1020,9 @@ class C(TypedDict):
     x: int
 def f(c: C, s: str):
     assert_type(c.setdefault("x", 0), int)
-    c.setdefault("x", 0.0)  # E: No matching overload
+    c.setdefault("x", 0.0)  # E: `float` is not assignable to parameter `default` with type `int`
     c.setdefault("x")  # E: No matching overload
-    c.setdefault(s, 0)  # E: No matching overload
+    c.setdefault(s, 0)  # E: `str` is not assignable to parameter `key` with type `Literal['x']`
     "#,
 );
 
@@ -963,7 +1038,7 @@ class D(TypedDict):
 def f(c: C, d: D):
     c.setdefault("x", 0)  # E: `Literal['x']` is not assignable to parameter `k` with type `Never`
     d.setdefault("x", 0)
-    d.setdefault("y", "oops")  # E: No matching overload
+    d.setdefault("y", "oops")  # E: `Literal['y']` is not assignable to parameter `key` with type `Literal['x']`  # E: `Literal['oops']` is not assignable to parameter `default` with type `int`
     "#,
 );
 
@@ -986,7 +1061,7 @@ testcase!(
 from typing import TypedDict
 class C(TypedDict):
     x: int
-C(0)  # E: No matching overload found for function `C.__init__`
+C(0)  # E: `Literal[0]` is not assignable to parameter `__map` with type `C`
     "#,
 );
 
@@ -1258,7 +1333,7 @@ from typing import TypedDict
 class Movie(TypedDict, extra_items=int):
     name: str
 good_movie = Movie(name='Toy Story', year=1995)
-bad_movie = Movie(name='Toy Story', studio='Pixar')  # E: No matching overload found for function `Movie.__init__`
+bad_movie = Movie(name='Toy Story', studio='Pixar')  # E: `Literal['Pixar']` is not assignable to kwargs type `int`
     "#,
 );
 
@@ -1386,7 +1461,6 @@ class GoodChild2(Parent3, extra_items=bool):  # ok because Parent3 has extra ite
 );
 
 testcase!(
-    bug = "You shouldn't be able to add items to a closed TypedDict",
     test_no_add_items_if_closed,
     r#"
 from typing import TypedDict
@@ -1421,7 +1495,7 @@ class Parent(TypedDict, extra_items=int):
 class GoodChild(Parent):
     x: NotRequired[int]
 class BadChild1(Parent):
-    x: Required[int]  # E: cannot be extended with required extra item `x`
+    x: Required[int]  # E: Cannot add required field `x`
 class BadChild2(Parent):
     x: NotRequired[bool]  # E: `bool` is not consistent with `extra_items` type `int`
     "#,
@@ -1541,9 +1615,9 @@ testcase!(
     test_functional_form_unexpected_keyword,
     r#"
 from typing import TypedDict
-X = TypedDict('X', {}, nonsense=True)  # E: Unrecognized argument `nonsense` for typed dictionary definition
+X = TypedDict('X', {}, nonsense=True)  # E: Unrecognized keyword argument `nonsense` in typed dictionary definition
 def f(kwargs):
-    Y = TypedDict('Y', {}, **kwargs)  # E: Unrecognized argument for typed dictionary definition
+    Y = TypedDict('Y', {}, **kwargs)  # E: Unpacking is not supported in typed dictionary definition
     "#,
 );
 
@@ -2067,13 +2141,28 @@ x: str = foo()["a"]
 );
 
 testcase!(
-    test_typed_dict_none_var_pinning,
+    test_anonymous_typed_dict_none_var_pinning,
     r#"
 from typing import assert_type
 x = { "foo": None }
 x["foo"] = 1
 # currently extra_items does not use the var, but we could
-assert_type(x["bar"], None)
+assert_type(x["bar"], int | None)
+"#,
+);
+
+testcase!(
+    test_typed_dict_empty_container_no_implicit_any,
+    TestEnv::new().enable_implicit_any_error(),
+    r#"
+from typing import TypedDict
+
+class ConfigDict(TypedDict):
+    env: dict[str, str]
+
+CONFIG: ConfigDict = {
+    'env': {},
+}
 "#,
 );
 
@@ -2216,4 +2305,346 @@ def test_empty_not_in(e: Empty, k: str):
     else:
         reveal_type(k)  # E: revealed type: Never
 "#,
+);
+
+testcase!(
+    test_illegal_unpacking_in_def,
+    r#"
+from typing import TypedDict
+def f() -> dict: ...
+X = TypedDict("X", {"k1": int, **f()})  # E: Unpacking is not supported
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_missing_required_key,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict):
+    a: int
+    b: bool
+
+def f(td: TD) -> None: ...
+
+td = {"a": 1000}
+f(td=td)  # E: `b` is present in `TD` and absent in `<anonymous>`
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_missing_not_required_key_ok,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict, total=False):
+    a: int
+    b: bool
+
+def f(td: TD) -> None: ...
+
+td = {"a": 1000}
+f(td=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_any_requiredness_ok,
+    r#"
+from typing import NotRequired, Required, TypedDict
+
+class TD1(TypedDict):
+    a: Required[int]
+
+class TD2(TypedDict):
+    a: NotRequired[int]
+
+def f(td1: TD1, td2: TD2) -> None: ...
+
+td = {"a": 1000}
+f(td1=td, td2=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_any_extra_items_ok,
+    r#"
+from typing import ReadOnly, TypedDict
+
+class TD1(TypedDict, closed=True):
+    a: int
+
+class TD2(TypedDict, extra_items=str):
+    a: int
+
+class TD3(TypedDict, extra_items=ReadOnly[str]):
+    a: int
+
+def f(td1: TD1, td2: TD2, td3: TD3) -> None: ...
+
+td = {"a": 1000}
+f(td1=td, td2=td, td3=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_value_subtype,
+    r#"
+from typing import TypedDict
+
+class TD(TypedDict):
+    a: int
+
+def f(td: TD) -> None: ...
+
+td = {"a": True}
+f(td=td)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_check_extra_items,
+    r#"
+from typing import TypedDict
+
+class TD1(TypedDict):
+    a: int
+
+class TD2(TypedDict, extra_items=str):
+    a: int
+
+def f(td1: TD1, td2: TD2) -> None: ...
+
+td = {"a": 0, "b": "hi"}
+f(
+    td1=td,  # E: Field `b` is present in `<anonymous>` and absent in `TD1`
+    td2=td,
+)
+    "#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_spread_unpack,
+    r#"
+from typing import assert_type
+
+# Basic dict unpacking should preserve anonymous typed dict
+defaults = {"host": "localhost", "port": 8080}
+overrides = {"port": 9090}
+config = {**defaults, **overrides}
+port: int = config["port"]
+host: str = config["host"]
+
+# Multiple dict unpacking with different value types
+base = {"name": "test", "count": 0}
+extra = {"count": 5, "active": True}
+combined = {**base, **extra}
+count: int = combined["count"]
+name: str = combined["name"]
+active: bool = combined["active"]
+
+# Passing unpacked dict value to typed function
+def process_port(port: int) -> str:
+    return f":{port}"
+
+merged = {**defaults, **overrides}
+process_port(merged["port"])
+
+# assert_type works on the dict
+assert_type(config["port"], int)
+assert_type(config["host"], str)
+"#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_spread_with_explicit_keys,
+    r#"
+from typing import assert_type
+base = {"x": 1, "y": "hello"}
+extended = {**base, "z": True}
+assert_type(extended["x"], int)
+assert_type(extended["y"], str)
+assert_type(extended["z"], bool)
+assert_type(extended, dict[str, int | str | bool])
+"#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_spread_override,
+    r#"
+from typing import assert_type
+original = {"val": "string"}
+updated = {**original, "val": 42}
+assert_type(updated["val"], int)
+assert_type(updated, dict[str, int])
+"#,
+);
+
+testcase!(
+    test_anonymous_typed_dict_error_messages,
+    r#"
+d = {"a": 42}
+d["a"] = "b"  # E: `Literal['b']` is not assignable to dict key `a` with type `int`
+
+from typing import TypedDict
+
+class MyTD(TypedDict):
+    x: int
+
+td: MyTD = {"x": 1}
+td["x"] = "b"  # E: `Literal['b']` is not assignable to TypedDict key `x` with type `int`
+"#,
+);
+
+testcase!(
+    test_typed_dict_inherited_field_shadows_dict_method,
+    r#"
+from typing import TypedDict, assert_type
+
+class Base(TypedDict):
+    values: list[str]
+    items: list[int]
+    keys: list[float]
+    get: str
+    update: int
+
+class Child(Base):
+    version: int
+
+class Grandchild(Child):
+    extra: bool
+
+def accept_base(x: Base) -> None: ...
+
+def test_one_hop(x: Child) -> None:
+    accept_base(x)
+    assert_type(x["values"], list[str])
+    assert_type(x["items"], list[int])
+    assert_type(x["keys"], list[float])
+    assert_type(x["get"], str)
+    assert_type(x["update"], int)
+
+def test_two_hops(x: Grandchild) -> None:
+    accept_base(x)
+    assert_type(x["values"], list[str])
+    assert_type(x["items"], list[int])
+    assert_type(x["keys"], list[float])
+    assert_type(x["get"], str)
+    assert_type(x["update"], int)
+"#,
+);
+
+testcase!(
+    test_typed_dict_field_shadows_dict_method_attribute_access,
+    r#"
+from typing import TypedDict
+
+class Base(TypedDict):
+    values: list[str]
+    items: list[int]
+    keys: list[float]
+    get: str
+    update: int
+
+class Child(Base):
+    version: int
+
+def test_direct(c: Base) -> None:
+    # TypedDict fields shadow dict methods by name, but attribute access should
+    # still resolve to the dict method (fields are only accessible via subscript).
+    c.values
+    c.items
+    c.keys
+    c.get
+    c.update
+
+def test_inherited(c: Child) -> None:
+    c.values
+    c.items
+    c.keys
+    c.get
+    c.update
+"#,
+);
+
+testcase!(
+    test_construct_generic_typed_dict_with_union_hint,
+    r#"
+from typing import TypedDict, Generic
+from typing_extensions import TypeVar
+
+T = TypeVar('T')
+
+class TD(TypedDict, Generic[T]):
+    value: T
+
+def f(x: str) -> TD[int] | TD[str]:
+    return TD(value=x)
+    "#,
+);
+
+testcase!(
+    test_constrained_type_var_typed_dict_index,
+    r#"
+from typing import Generic, TypedDict, TypeVar, assert_type
+
+class DeviceInfo(TypedDict):
+    name: str
+    address: str
+    rssi: int
+
+class ExtendedDeviceInfo(TypedDict):
+    name: str
+    address: str
+    rssi: int
+    manufacturer: str
+
+NAME = "name"
+ADDRESS = "address"
+
+T = TypeVar("T", DeviceInfo, ExtendedDeviceInfo)
+
+class DeviceIndex(Generic[T]):
+    def __init__(self) -> None:
+        self.by_name: dict[str, list[T]] = {}
+
+    def add(self, device: T) -> None:
+        name = device[NAME]
+        assert_type(name, str)
+        self.by_name.setdefault(name, []).append(device)
+
+    def lookup(self, device: T) -> str:
+        return device[ADDRESS]
+
+T2 = TypeVar("T2", bound=DeviceInfo)
+
+class DeviceIndex2(Generic[T2]):
+    def __init__(self) -> None:
+        self.by_name: dict[str, list[T2]] = {}
+
+    def add(self, device: T2) -> None:
+        name = device[NAME]
+        assert_type(name, str)
+        self.by_name.setdefault(name, []).append(device)
+
+    def lookup(self, device: T2) -> str:
+        return device[ADDRESS]
+"#,
+);
+
+testcase!(
+    test_constrained_type_var_typed_dict_method_call,
+    r#"
+from typing import Generic, TypedDict, TypeVar, assert_type
+
+class DeviceInfo(TypedDict):
+    name: str
+    address: str
+
+T = TypeVar("T", bound=DeviceInfo)
+
+def test(x: T) -> object:
+    # type vars bounded by typed dict get treated as dict[str, T]
+    return x.get("name")
+    "#,
 );

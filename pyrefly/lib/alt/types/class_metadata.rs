@@ -15,6 +15,7 @@ use dupe::Dupe;
 use pyrefly_derive::TypeEq;
 use pyrefly_derive::VisitMut;
 use pyrefly_types::callable::Deprecation;
+use pyrefly_types::quantified::Quantified;
 use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_util::display::commas_iter;
 use pyrefly_util::visit::VisitMut;
@@ -23,13 +24,11 @@ use ruff_text_size::TextRange;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
-use vec1::vec1;
 
 use crate::alt::class::class_field::ClassField;
 use crate::alt::types::pydantic::PydanticModelKind;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::types::class::Class;
 use crate::types::class::ClassType;
 use crate::types::display::ClassDisplayContext;
@@ -38,6 +37,14 @@ use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::stdlib::Stdlib;
 use crate::types::types::CalleeKind;
 use crate::types::types::Type;
+
+/// Slot names declared directly on a class via `__slots__`.
+#[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
+pub struct SlotsInfo {
+    pub names: SmallSet<Name>,
+    /// Whether `__dict__` appears among the slot names, which disables enforcement.
+    pub has_dict: bool,
+}
 
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
 pub struct ClassMetadata {
@@ -61,14 +68,43 @@ pub struct ClassMetadata {
     /// that were passed to the `dataclass_transform` call.
     dataclass_transform_metadata: Option<DataclassTransformMetadata>,
     pydantic_model_kind: Option<PydanticModelKind>,
+    is_attrs_class: bool,
     django_model_metadata: Option<DjangoModelMetadata>,
     is_marshmallow_schema: bool,
+    is_factory_boy_factory: bool,
+    /// Whether this class is a metaclass (i.e., a subclass of `type`).
+    is_metaclass: bool,
+    slots_info: Option<SlotsInfo>,
+    /// `__init__` parameter names to capture for shape inference, extracted from
+    /// `@uses_shape_dsl(..., capture_init=[...])` on a `forward` method.
+    capture_init: Option<Vec<Name>>,
+    shaped_array_shape: Option<Quantified>,
 }
 
 impl VisitMut<Type> for ClassMetadata {
-    fn recurse_mut(&mut self, _: &mut dyn FnMut(&mut Type)) {
-        // TODO: This is definitely wrong. We have types in lots of these places.
-        // Doesn't seem to have gone wrong yet, but it will.
+    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
+        // Class metadata is exported cross-module, so every embedded type position must
+        // be traversed to allow export-time forcing/sanitization.
+        if let Some(metaclass) = self.metaclass.get_mut() {
+            metaclass.visit_mut(f);
+        }
+        for (_name, ty) in &mut self.keywords.0 {
+            ty.visit_mut(f);
+        }
+        if let Some(typed_dict_metadata) = &mut self.typed_dict_metadata
+            && let ExtraItems::Extra(extra_item) = &mut typed_dict_metadata.extra_items
+        {
+            extra_item.ty.visit_mut(f);
+        }
+        if let Some(enum_metadata) = &mut self.enum_metadata {
+            enum_metadata.cls.visit_mut(f);
+        }
+        if let Some(dataclass_transform_metadata) = &mut self.dataclass_transform_metadata {
+            dataclass_transform_metadata.visit_mut(f);
+        }
+        if let Some(shaped_array_shape) = &mut self.shaped_array_shape {
+            shaped_array_shape.visit_mut(f);
+        }
     }
 }
 
@@ -98,8 +134,14 @@ impl ClassMetadata {
         total_ordering_metadata: Option<TotalOrderingMetadata>,
         dataclass_transform_metadata: Option<DataclassTransformMetadata>,
         pydantic_model_kind: Option<PydanticModelKind>,
+        is_attrs_class: bool,
         django_model_metadata: Option<DjangoModelMetadata>,
         is_marshmallow_schema: bool,
+        is_factory_boy_factory: bool,
+        is_metaclass: bool,
+        slots_info: Option<SlotsInfo>,
+        capture_init: Option<Vec<Name>>,
+        shaped_array_shape: Option<Quantified>,
     ) -> ClassMetadata {
         ClassMetadata {
             metaclass,
@@ -120,8 +162,14 @@ impl ClassMetadata {
             total_ordering_metadata,
             dataclass_transform_metadata,
             pydantic_model_kind,
+            is_attrs_class,
             django_model_metadata,
             is_marshmallow_schema,
+            is_factory_boy_factory,
+            is_metaclass,
+            slots_info,
+            capture_init,
+            shaped_array_shape,
         }
     }
 
@@ -145,8 +193,14 @@ impl ClassMetadata {
             total_ordering_metadata: None,
             dataclass_transform_metadata: None,
             pydantic_model_kind: None,
+            is_attrs_class: false,
             django_model_metadata: None,
             is_marshmallow_schema: false,
+            is_factory_boy_factory: false,
+            is_metaclass: false,
+            slots_info: None,
+            capture_init: None,
+            shaped_array_shape: None,
         }
     }
 
@@ -185,6 +239,19 @@ impl ClassMetadata {
 
     pub fn is_marshmallow_schema(&self) -> bool {
         self.is_marshmallow_schema
+    }
+
+    pub fn is_factory_boy_factory(&self) -> bool {
+        self.is_factory_boy_factory
+    }
+
+    /// Whether this class is a metaclass (i.e., a subclass of `type`).
+    pub fn is_metaclass(&self) -> bool {
+        self.is_metaclass
+    }
+
+    pub fn is_attrs_class(&self) -> bool {
+        self.is_attrs_class
     }
 
     pub fn pydantic_model_kind(&self) -> Option<PydanticModelKind> {
@@ -282,12 +349,28 @@ impl ClassMetadata {
         self.dataclass_metadata.as_ref()
     }
 
+    pub fn slots_info(&self) -> Option<&SlotsInfo> {
+        self.slots_info.as_ref()
+    }
+
     pub fn dataclass_transform_metadata(&self) -> Option<&DataclassTransformMetadata> {
         self.dataclass_transform_metadata.as_ref()
     }
 
     pub fn django_model_metadata(&self) -> Option<&DjangoModelMetadata> {
         self.django_model_metadata.as_ref()
+    }
+
+    pub fn capture_init(&self) -> Option<&[Name]> {
+        self.capture_init.as_deref()
+    }
+
+    pub fn is_shaped_array(&self) -> bool {
+        self.shaped_array_shape.is_some()
+    }
+
+    pub fn shaped_array_shape(&self) -> Option<&Quantified> {
+        self.shaped_array_shape.as_ref()
     }
 }
 
@@ -318,6 +401,12 @@ impl ClassSynthesizedField {
     pub fn new(ty: Type) -> Self {
         Self {
             inner: Arc::new(ClassField::new_synthesized(ty)),
+        }
+    }
+
+    pub fn new_classvar(ty: Type) -> Self {
+        Self {
+            inner: Arc::new(ClassField::new_synthesized_classvar(ty)),
         }
     }
 }
@@ -392,6 +481,14 @@ impl Metaclass {
             Self::None => None,
         }
     }
+
+    pub fn get_mut(&mut self) -> Option<&mut ClassType> {
+        match self {
+            Self::Direct(metaclass) => Some(metaclass),
+            Self::Inherited(metaclass) => Some(metaclass),
+            Self::None => None,
+        }
+    }
 }
 
 /// A struct representing the keywords in a class header, e.g. for
@@ -433,6 +530,9 @@ pub struct EnumMetadata {
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
 pub struct NamedTupleMetadata {
     pub elements: SmallSet<Name>,
+    /// If true, the namedtuple fields were dynamically generated (e.g., using a
+    /// generator or variable) and couldn't be statically resolved.
+    pub has_dynamic_fields: bool,
 }
 
 /// Defaults for `init_by_name` and `init_by_default`, per-field flags that control the name of
@@ -462,6 +562,8 @@ pub struct DataclassMetadata {
     pub init_defaults: InitDefaults,
     /// Whether a default can be passed positionally to field specifier calls
     pub default_can_be_positional: bool,
+    /// Fields targeted by `@field_validator(mode='before'|'plain')`, including inherited.
+    pub pydantic_before_validator_fields: SmallSet<Name>,
 }
 
 #[derive(Clone, Debug, TypeEq, PartialEq, Eq)]
@@ -469,8 +571,8 @@ pub struct DjangoModelMetadata {
     /// The name of the field that has primary_key=True, if any.
     /// If None, the model uses the default auto-generated `id` field.
     pub custom_primary_key_field: Option<Name>,
-    /// Names of ForeignKey fields
-    pub foreign_key_fields: Vec<Name>,
+    /// Names of ForeignKey and OneToOneField fields.
+    pub foreign_key_like_fields: Vec<Name>,
     /// Names of fields with choices=...
     pub fields_with_choices: Vec<Name>,
 }
@@ -506,17 +608,23 @@ pub struct TotalOrderingMetadata {
 /// linearizable using C3 linearization), it is possible it appears with
 /// different type arguments. The type arguments computed here will always be
 /// those coming from the instance that was selected during linearization.
+///
+/// We also cache the nearest `@disjoint_base` ancestor (skipping `object`)
+/// so subclasses and narrowing don't re-walk the MRO to find it.
 #[derive(Clone, Debug, VisitMut, TypeEq, PartialEq, Eq)]
 pub enum ClassMro {
-    Resolved(Vec<ClassType>),
+    Resolved {
+        ancestors: Vec<ClassType>,
+        nearest_disjoint_base: Option<Class>,
+    },
     Cyclic,
 }
 
 impl Display for ClassMro {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            ClassMro::Resolved(xs) => {
-                write!(f, "[{}]", commas_iter(|| xs.iter()))
+            ClassMro::Resolved { ancestors, .. } => {
+                write!(f, "[{}]", commas_iter(|| ancestors.iter()))
             }
             ClassMro::Cyclic => write!(f, "Cyclic"),
         }
@@ -535,10 +643,14 @@ impl ClassMro {
     /// about the algorithm and a worked-through example here:
     /// https://en.wikipedia.org/wiki/C3_linearization
     ///
+    /// `nearest_disjoint_base` is computed by the caller and dropped when
+    /// the MRO is cyclic.
+    ///
     /// TODO: We currently omit some classes that are in the runtime MRO:
     /// `Generic`, `Protocol`, and `object`.
     pub fn new(
         cls: &Class,
+        nearest_disjoint_base: Option<Class>,
         bases_with_mro: Vec<(&ClassType, Arc<ClassMro>)>,
         errors: &ErrorCollector,
     ) -> Self {
@@ -546,7 +658,10 @@ impl ClassMro {
             Linearization::Cyclic => Self::Cyclic,
             Linearization::Resolved(ancestor_chains) => {
                 let ancestors = Linearization::merge(cls, ancestor_chains, errors);
-                Self::Resolved(ancestors)
+                Self::Resolved {
+                    ancestors,
+                    nearest_disjoint_base,
+                }
             }
         }
     }
@@ -555,7 +670,7 @@ impl ClassMro {
     /// some use cases (for example checking if the type is an enum) do not care about `object`.
     pub fn ancestors_no_object(&self) -> &[ClassType] {
         match self {
-            ClassMro::Resolved(ancestors) => ancestors,
+            ClassMro::Resolved { ancestors, .. } => ancestors,
             ClassMro::Cyclic => &[],
         }
     }
@@ -564,6 +679,19 @@ impl ClassMro {
         self.ancestors_no_object()
             .iter()
             .chain(iter::once(stdlib.object()))
+    }
+
+    /// The nearest `@disjoint_base` ancestor in this class's MRO, if any.
+    /// Returns `None` for cyclic MROs; callers that care about the class
+    /// itself should check `ClassMetadata::is_disjoint_base()` first.
+    pub fn nearest_disjoint_base(&self) -> Option<&Class> {
+        match self {
+            ClassMro::Resolved {
+                nearest_disjoint_base,
+                ..
+            } => nearest_disjoint_base.as_ref(),
+            ClassMro::Cyclic => None,
+        }
     }
 
     pub fn recursive() -> Self {
@@ -621,14 +749,55 @@ impl Linearization {
             Err(_) => return Linearization::empty(),
         };
         let mut ancestor_chains = Vec::new();
+        let mut seen_ancestors: SmallMap<Class, ClassType> = SmallMap::new();
         for (base, mro) in bases_with_mro {
             match &*mro {
-                ClassMro::Resolved(ancestors) => {
+                ClassMro::Resolved { ancestors, .. } => {
                     let ancestors_through_base = ancestors
                         .iter()
                         .map(|ancestor| ancestor.substitute_with(&base.substitution()))
                         .rev()
                         .collect::<Vec<_>>();
+                    let mut check_conflicting_targs = |ctype: &ClassType| -> bool {
+                        if let Some(prev) = seen_ancestors.get(ctype.class_object())
+                            && (prev.targs().len() != ctype.targs().len()
+                                || prev
+                                    .targs()
+                                    .as_slice()
+                                    .iter()
+                                    .zip(ctype.targs().as_slice())
+                                    .any(|(ta, tb)| ta != tb && !ta.is_any() && !tb.is_any()))
+                        {
+                            let ctx = ClassDisplayContext::new(&[cls, ctype.class_object()]);
+                            // TODO: Extend this error message to say where in the class bases the mismatch comes from
+                            // we will need to wire additional information for this.
+                            errors
+                                .error_builder(
+                                    cls.range(),
+                                    ErrorKind::InvalidInheritance,
+                                    format!(
+                                        "Class `{}` has inconsistent type arguments for base class `{}`: `{}` and `{}`",
+                                        ctx.display(cls),
+                                        ctx.display(ctype.class_object()),
+                                        Type::ClassType(prev.clone()),
+                                        Type::ClassType(ctype.clone()),
+                                    ),
+                                )
+                                .emit();
+                            true
+                        } else {
+                            seen_ancestors.insert(ctype.class_object().dupe(), ctype.clone());
+                            false
+                        }
+                    };
+
+                    for ancestor in ancestors_through_base.iter() {
+                        if check_conflicting_targs(ancestor) {
+                            break;
+                        }
+                    }
+                    check_conflicting_targs(base);
+
                     ancestor_chains.push(AncestorChain::from_base_and_ancestors(
                         base.clone(),
                         ancestors_through_base,
@@ -639,15 +808,17 @@ impl Linearization {
                 ClassMro::Cyclic => {
                     let base = base.class_object();
                     let ctx = ClassDisplayContext::new(&[cls, base]);
-                    errors.add(
-                        cls.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidInheritance),
-                        vec1![format!(
-                            "Class `{}` inheriting from `{}` creates a cycle",
-                            ctx.display(cls),
-                            ctx.display(base),
-                        )],
-                    );
+                    errors
+                        .error_builder(
+                            cls.range(),
+                            ErrorKind::InvalidInheritance,
+                            format!(
+                                "Class `{}` inheriting from `{}` creates a cycle",
+                                ctx.display(cls),
+                                ctx.display(base),
+                            ),
+                        )
+                        .emit();
                     // Signal that we detected a cycle
                     return Linearization::Cyclic;
                 }
@@ -723,15 +894,17 @@ impl Linearization {
                     .class_object()
                     .dupe();
                 let ctx = ClassDisplayContext::new(&[cls, first_candidate]);
-                errors.add(
-                    cls.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidInheritance),
-                    vec1![format!(
-                        "Class `{}` has a nonlinearizable inheritance chain detected at `{}`",
-                        ctx.display(cls),
-                        ctx.display(first_candidate),
-                    )],
-                );
+                errors
+                    .error_builder(
+                        cls.range(),
+                        ErrorKind::InvalidInheritance,
+                        format!(
+                            "Class `{}` has a nonlinearizable inheritance chain detected at `{}`",
+                            ctx.display(cls),
+                            ctx.display(first_candidate),
+                        ),
+                    )
+                    .emit();
 
                 ancestor_chains = Vec::new()
             }

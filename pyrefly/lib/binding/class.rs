@@ -9,6 +9,7 @@ use std::mem;
 use std::sync::LazyLock;
 
 use dupe::Dupe as _;
+use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::docstring::Docstring;
 use pyrefly_python::nesting_context::NestingContext;
@@ -16,6 +17,7 @@ use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::Visit;
 use regex::Regex;
+use ruff_python_ast::Decorator;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprDict;
 use ruff_python_ast::ExprList;
@@ -43,12 +45,16 @@ use crate::binding::binding::BindingClassBaseType;
 use crate::binding::binding::BindingClassField;
 use crate::binding::binding::BindingClassMetadata;
 use crate::binding::binding::BindingClassMro;
+use crate::binding::binding::BindingClassSubscriptSymmetry;
 use crate::binding::binding::BindingClassSynthesizedFields;
 use crate::binding::binding::BindingConsistentOverrideCheck;
 use crate::binding::binding::BindingExpect;
+use crate::binding::binding::BindingShapedArrayMetadata;
 use crate::binding::binding::BindingTParams;
 use crate::binding::binding::BindingVariance;
+use crate::binding::binding::BindingVarianceCheck;
 use crate::binding::binding::ClassBinding;
+use crate::binding::binding::ClassDefData;
 use crate::binding::binding::ClassFieldDefinition;
 use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::Key;
@@ -59,25 +65,27 @@ use crate::binding::binding::KeyClassBaseType;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyClassMetadata;
 use crate::binding::binding::KeyClassMro;
+use crate::binding::binding::KeyClassSubscriptSymmetry;
 use crate::binding::binding::KeyClassSynthesizedFields;
 use crate::binding::binding::KeyConsistentOverrideCheck;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyVariance;
+use crate::binding::binding::KeyVarianceCheck;
 use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::LegacyTParamCollector;
-use crate::binding::django::DjangoFieldInfo;
+use crate::binding::expr::Usage;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::ClassIndices;
 use crate::binding::scope::FlowStyle;
 use crate::binding::scope::Scope;
 use crate::config::error_kind::ErrorKind;
-use crate::error::context::ErrorInfo;
 use crate::export::special::SpecialExport;
 use crate::types::class::ClassDefIndex;
 use crate::types::class::ClassFieldProperties;
-use crate::types::types::Type;
+use crate::types::class::ClassFields;
+use crate::types::types::AnyStyle;
 
 enum IllegalIdentifierHandling {
     Error,
@@ -93,40 +101,155 @@ enum SynthesizedClassKind {
     NewType,
 }
 
+/// Right-align `default_elts` into `defaults`: a slice of N elements makes the last N fields
+/// optional. An empty slice clears all defaults.
+fn apply_adjacent_defaults(default_elts: &[Expr], n_members: usize, defaults: &mut [Option<Expr>]) {
+    defaults.iter_mut().for_each(|d| *d = None);
+    let n_defaults = default_elts.len().min(n_members);
+    // Right-align: skip leading elements if more defaults than fields
+    let start = default_elts.len() - n_defaults;
+    for (i, elt) in default_elts[start..].iter().enumerate() {
+        defaults[n_members - n_defaults + i] = Some(elt.clone());
+    }
+}
+
 impl<'a> BindingsBuilder<'a> {
     fn def_index(&mut self) -> ClassDefIndex {
-        let res = ClassDefIndex(self.class_count);
-        self.class_count += 1;
-        res
+        self.metadata.push_class()
     }
 
-    fn class_object_and_indices(&mut self, class_name: &Identifier) -> (CurrentIdx, ClassIndices) {
+    /// Shared helper that allocates class indices and declares the class object with the given key.
+    fn class_object_and_indices_inner(
+        &mut self,
+        class_name: &Identifier,
+        key: Key,
+    ) -> (CurrentIdx, ClassIndices) {
         let def_index = self.def_index();
+        let class_object = self.declare_current_idx(key);
         let class_indices = ClassIndices {
             def_index,
             class_idx: self.idx_for_promise(KeyClass(ShortIdentifier::new(class_name))),
+            class_object_idx: class_object.idx(),
             base_type_idx: self.idx_for_promise(KeyClassBaseType(def_index)),
             metadata_idx: self.idx_for_promise(KeyClassMetadata(def_index)),
             mro_idx: self.idx_for_promise(KeyClassMro(def_index)),
             synthesized_fields_idx: self.idx_for_promise(KeyClassSynthesizedFields(def_index)),
             variance_idx: self.idx_for_promise(KeyVariance(def_index)),
+            variance_check_idx: self.idx_for_promise(KeyVarianceCheck(def_index)),
             consistent_override_check_idx: self
                 .idx_for_promise(KeyConsistentOverrideCheck(def_index)),
             abstract_class_check_idx: self.idx_for_promise(KeyAbstractClassCheck(def_index)),
+            subscript_symmetry_idx: self.idx_for_promise(KeyClassSubscriptSymmetry(def_index)),
         };
-        // The user - used for first-usage tracking of any expressions we analyze in a class definition -
-        // is the `Idx<Key>` of the class object bound to the class name.
-        let class_object =
-            self.declare_current_idx(Key::Definition(ShortIdentifier::new(class_name)));
         (class_object, class_indices)
     }
 
+    fn class_object_and_indices(&mut self, class_name: &Identifier) -> (CurrentIdx, ClassIndices) {
+        self.class_object_and_indices_inner(
+            class_name,
+            Key::Definition(ShortIdentifier::new(class_name)),
+        )
+    }
+
+    /// Like `class_object_and_indices`, but uses `Key::Anon` instead of `Key::Definition`,
+    /// so the synthesized class is never bound to a name in scope.
+    fn anon_class_object_and_indices(
+        &mut self,
+        class_name: &Identifier,
+    ) -> (CurrentIdx, ClassIndices) {
+        self.class_object_and_indices_inner(class_name, Key::Anon(class_name.range))
+    }
+
+    /// Pre-scan base classes for namedtuple calls and synthesize them anonymously.
+    /// Returns a list of `(call_range, class_idx)` pairs that `class_def_inner` uses
+    /// to recognize which base class expressions have already been synthesized.
+    fn prescan_synthesized_bases(
+        &mut self,
+        x: &mut StmtClassDef,
+        parent: &NestingContext,
+    ) -> Vec<(TextRange, Idx<KeyClass>)> {
+        let mut synthesized_base_classes = Vec::new();
+        if let Some(arguments) = &mut x.arguments {
+            for base in arguments.args.iter_mut() {
+                if let Expr::Call(call) = base {
+                    // Extract the name from the first argument string literal.
+                    // If the first argument is not a string literal, skip
+                    // synthesis and let the normal base class processing
+                    // handle the error.
+                    let nt_name = match call.arguments.args.first() {
+                        Some(Expr::StringLiteral(s)) => {
+                            Identifier::new(Name::new(s.value.to_str()), s.range())
+                        }
+                        _ => continue,
+                    };
+                    let call_range = call.range();
+                    let class_idx = match self.as_special_export(&call.func) {
+                        Some(SpecialExport::CollectionsNamedTuple) => {
+                            if let Some((_arg_name, members)) =
+                                call.arguments.args.split_first_mut()
+                            {
+                                Some(self.synthesize_collections_named_tuple_def(
+                                    nt_name,
+                                    parent,
+                                    &mut call.func,
+                                    members,
+                                    &mut call.arguments.keywords,
+                                    false,
+                                    None,
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        Some(SpecialExport::TypingNamedTuple) => {
+                            if let Some((_arg_name, members)) =
+                                call.arguments.args.split_first_mut()
+                            {
+                                Some(self.synthesize_typing_named_tuple_def(
+                                    nt_name,
+                                    parent,
+                                    &mut call.func,
+                                    members,
+                                    false,
+                                    None,
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(class_idx) = class_idx {
+                        synthesized_base_classes.push((call_range, class_idx));
+                    }
+                }
+            }
+        }
+        synthesized_base_classes
+    }
+
     pub fn class_def(&mut self, mut x: StmtClassDef, parent: &NestingContext) {
+        if x.name.id.is_empty() {
+            return;
+        }
+        let synthesized_base_classes = self.prescan_synthesized_bases(&mut x, parent);
+        self.class_def_inner(x, parent, synthesized_base_classes);
+    }
+
+    fn class_def_inner(
+        &mut self,
+        mut x: StmtClassDef,
+        parent: &NestingContext,
+        synthesized_base_classes: Vec<(TextRange, Idx<KeyClass>)>,
+    ) {
         let (mut class_object, class_indices) = self.class_object_and_indices(&x.name);
         let mut pydantic_config_dict = PydanticConfigDict::default();
         let docstring_range = Docstring::range_from_stmts(x.body.as_slice());
         let body = mem::take(&mut x.body);
         let field_docstrings = self.extract_field_docstrings(&body);
+        let pydantic_before_validator_fields = self.extract_field_validator_fields(&body);
+        let capture_init = self.extract_capture_init(&body);
+        let shaped_array_metadata = self.extract_shaped_array_metadata(&x.decorator_list);
         let decorators =
             self.ensure_and_bind_decorators(mem::take(&mut x.decorator_list), class_object.usage());
 
@@ -135,19 +258,48 @@ impl<'a> BindingsBuilder<'a> {
         let scoped_type_param_names = x
             .type_params
             .as_mut()
-            .map(|x| self.type_params(x))
+            .map(|tp| {
+                let owner = parent.owner_path(&self.module_info, x.name.id.as_str());
+                self.type_params_with_owner(tp, owner)
+            })
             .unwrap_or_default();
+        let shaped_array_metadata = match shaped_array_metadata {
+            Some(metadata) if x.type_params.is_none() => {
+                // TODO(stroxler): This restriction seems 100% fine with experiments, I see no reason
+                // to support legacy-style class tparams right now. We may eventually need to, at which point
+                // we'd have to move this check to solve time.
+                self.error(
+                    metadata.range,
+                    ErrorKind::InvalidAnnotation,
+                    format!(
+                        "Shape parameter `{}` must be a scoped (PEP-695-style) type parameter of class `{}`",
+                        metadata.shape_name, x.name.id
+                    ),
+                );
+                None
+            }
+            metadata => metadata,
+        };
 
         let mut legacy = Some(LegacyTParamCollector::new(x.type_params.is_some()));
         let bases = x.bases().map(|base| {
             let mut base = base.clone();
+            // If this base was pre-synthesized as a namedtuple, return the synthesized base
+            // directly, skipping ensure_type and base_class_of (already processed during synthesis).
+            if let Expr::Call(call) = &base
+                && let Some((_, class_idx)) = synthesized_base_classes
+                    .iter()
+                    .find(|(r, _)| *r == call.range())
+            {
+                return BaseClass::SynthesizedBase(*class_idx, base.range());
+            }
             // Forward refs are fine *inside* of a base expression in the type arguments,
             // but outermost class cannot be a forward ref.
             match &base {
                 Expr::StringLiteral(v) => {
                     self.error(
                         base.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                        ErrorKind::InvalidInheritance,
                         format!(
                             "Cannot use string annotation `{}` as a base class",
                             v.value.to_str()
@@ -177,7 +329,13 @@ impl<'a> BindingsBuilder<'a> {
                 }
                 _ => &mut none,
             };
-            self.ensure_type(&mut base, legacy);
+            self.ensure_type_with_usage(
+                &mut base,
+                legacy,
+                &mut Usage::StaticTypeInformation {
+                    is_annotation: false,
+                },
+            );
 
             let base_class = self.base_class_of(base.clone());
             // NOTE(grievejia): If any of the class base is a specialized generic class (e.g. `Foo[Bar]`), and if the tparam of the
@@ -190,24 +348,36 @@ impl<'a> BindingsBuilder<'a> {
             //
             // Also note that there's no risk of first-usage tracking issues here because `ensure_type` does not participate in first
             // usage tracking.
-            if matches!(base_class, BaseClass::BaseClassExpr(..)) {
+            if matches!(
+                base_class,
+                BaseClass::BaseClassExpr(..) | BaseClass::TypeOf(..)
+            ) {
                 self.insert_binding(
-                    KeyExpect(base.range()),
+                    KeyExpect::TypeCheckBaseClassExpr(base.range()),
                     BindingExpect::TypeCheckBaseClassExpr(base),
                 );
             }
             base_class
         });
 
-        let has_protocol_base = bases.iter().any(|base| {
-            matches!(
-                base,
-                BaseClass::Generic(BaseClassGeneric {
-                    kind: BaseClassGenericKind::Protocol,
-                    ..
-                })
-            )
-        });
+        let mut has_protocol_base = false;
+        for base in bases.iter() {
+            if let BaseClass::Generic(BaseClassGeneric {
+                kind: BaseClassGenericKind::Protocol,
+                range,
+                ..
+            }) = base
+            {
+                if has_protocol_base {
+                    self.error(
+                        *range,
+                        ErrorKind::InvalidInheritance,
+                        "Duplicate base class `Protocol`".to_owned(),
+                    );
+                }
+                has_protocol_base = true;
+            }
+        }
 
         let mut keywords = Vec::new();
         if let Some(args) = &mut x.arguments {
@@ -218,11 +388,8 @@ impl<'a> BindingsBuilder<'a> {
                 } else {
                     self.error(
                         keyword.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidInheritance),
-                        format!(
-                            "The use of unpacking in class header of `{}` is not supported",
-                            x.name
-                        ),
+                        ErrorKind::InvalidInheritance,
+                        "Unpacking is not supported in class header".to_owned(),
                     )
                 }
             });
@@ -256,6 +423,15 @@ impl<'a> BindingsBuilder<'a> {
             x.name.clone(),
             has_protocol_base,
         ));
+        // Record the class body range for solve-time `typing.Self` resolution.
+        // We use the body extent (first..last stmt) — not `x.range` — so
+        // bases, decorators, and type params (which are evaluated in the
+        // enclosing scope) fall outside this entry.
+        if let (Some(first), Some(last)) = (body.first(), body.last()) {
+            let body_range = first.range().cover(last.range());
+            self.class_scopes
+                .push((body_range, class_indices.class_idx));
+        }
         self.init_static_scope(&body, false);
         self.stmts(
             body,
@@ -263,40 +439,25 @@ impl<'a> BindingsBuilder<'a> {
         );
         let field_definitions = self.scopes.finish_class_and_get_field_definitions();
 
-        let mut django_primary_key_field: Option<Name> = None;
-        let mut django_foreign_key_fields: Vec<Name> = Vec::new();
-        let mut django_fields_with_choices: Vec<Name> = Vec::new();
+        let django_field_info = self.extract_django_fields_from_class_body(&field_definitions);
         let mut fields = SmallMap::with_capacity(field_definitions.len());
         for (name, (definition, range)) in field_definitions.into_iter_hashed() {
-            if let ClassFieldDefinition::AssignedInBody {
-                value: ExprOrBinding::Expr(e),
-                ..
-            } = &definition
+            if let ClassFieldDefinition::AssignedInBody { value, .. } = &definition
+                && let ExprOrBinding::Expr(e) = value.as_ref()
             {
                 self.extract_pydantic_config_dict(e, &name, &mut pydantic_config_dict);
-
-                if self.extract_django_primary_key(e) {
-                    django_primary_key_field = Some(name.clone().into_key());
-                }
-
-                if self.extract_django_foreign_key(e) {
-                    django_foreign_key_fields.push(name.clone().into_key());
-                }
-
-                if self.extract_django_choices(e) {
-                    django_fields_with_choices.push(name.clone().into_key());
-                }
             }
-            let (is_initialized_on_class, is_annotated) = match &definition {
-                ClassFieldDefinition::DefinedInMethod { annotation, .. } => {
-                    (false, annotation.is_some())
-                }
-                ClassFieldDefinition::DeclaredByAnnotation { .. } => (false, true),
-                ClassFieldDefinition::AssignedInBody { annotation, .. } => {
-                    (true, annotation.is_some())
-                }
-                _ => (true, false),
-            };
+            let (is_initialized_on_class, is_annotated, is_defined_in_class_body) =
+                match &definition {
+                    ClassFieldDefinition::DefinedInMethod { annotation, .. } => {
+                        (false, annotation.is_some(), false)
+                    }
+                    ClassFieldDefinition::DeclaredByAnnotation { .. } => (false, true, true),
+                    ClassFieldDefinition::AssignedInBody { annotation, .. } => {
+                        (true, annotation.is_some(), true)
+                    }
+                    _ => (true, false, true),
+                };
 
             let docstring_range = field_docstrings.get(&range).copied();
 
@@ -305,6 +466,7 @@ impl<'a> BindingsBuilder<'a> {
                 ClassFieldProperties::new(
                     is_annotated,
                     is_initialized_on_class,
+                    is_defined_in_class_body,
                     range,
                     docstring_range,
                 ),
@@ -326,7 +488,10 @@ impl<'a> BindingsBuilder<'a> {
                 class_indices.class_idx,
                 decorators.clone().into_boxed_slice(),
             ),
-            FlowStyle::ClassDef,
+            FlowStyle::ClassDef {
+                class_idx: class_indices.class_object_idx,
+                pristine: true,
+            },
         );
 
         // Insert a `KeyTParams` / `BindingTParams` pair, but only if there is at least
@@ -354,13 +519,13 @@ impl<'a> BindingsBuilder<'a> {
         }
 
         fields.reserve(0); // Attempt to shrink to capacity
+        self.metadata.get_class_mut(class_indices.def_index).fields = ClassFields::new(fields);
         self.insert_binding_idx(
             class_indices.class_idx,
             BindingClass::ClassDef(ClassBinding {
                 def_index: class_indices.def_index,
-                def: x,
+                def: ClassDefData::new(x),
                 parent: parent.dupe(),
-                fields,
                 tparams_require_binding,
                 docstring_range,
             }),
@@ -370,6 +535,12 @@ impl<'a> BindingsBuilder<'a> {
             class_indices.variance_idx,
             BindingVariance {
                 class_key: class_indices.class_idx,
+            },
+        );
+        self.insert_binding_idx(
+            class_indices.variance_check_idx,
+            BindingVarianceCheck {
+                class_idx: class_indices.class_idx,
             },
         );
         self.insert_binding_idx(
@@ -387,11 +558,11 @@ impl<'a> BindingsBuilder<'a> {
                 decorators: decorators.into_boxed_slice(),
                 is_new_type: false,
                 pydantic_config_dict,
-                django_field_info: Box::new(DjangoFieldInfo {
-                    primary_key_field: django_primary_key_field,
-                    foreign_key_fields: django_foreign_key_fields,
-                    fields_with_choices: django_fields_with_choices,
-                }),
+                pydantic_before_validator_fields: pydantic_before_validator_fields
+                    .into_boxed_slice(),
+                django_field_info: Box::new(django_field_info),
+                capture_init: capture_init.map(|v| v.into_boxed_slice()),
+                shaped_array_metadata,
             },
         );
         self.insert_binding_idx(
@@ -400,6 +571,162 @@ impl<'a> BindingsBuilder<'a> {
                 class_idx: class_indices.class_idx,
             },
         );
+        self.insert_binding_idx(
+            class_indices.subscript_symmetry_idx,
+            BindingClassSubscriptSymmetry {
+                class_idx: class_indices.class_idx,
+            },
+        );
+    }
+
+    fn is_shaped_array_decorator(&self, expr: &Expr) -> bool {
+        self.as_special_export(expr) == Some(SpecialExport::ShapedArray)
+    }
+
+    /// Extract `@shaped_array(shape="Shape")` from class decorators.
+    fn extract_shaped_array_metadata(
+        &mut self,
+        decorators: &[Decorator],
+    ) -> Option<Box<BindingShapedArrayMetadata>> {
+        let mut metadata = None;
+        let mut seen_shaped_array = false;
+        for decorator in decorators {
+            let Some(call) = decorator.expression.as_call_expr() else {
+                if self.is_shaped_array_decorator(&decorator.expression) {
+                    if seen_shaped_array {
+                        self.error(
+                            decorator.range(),
+                            ErrorKind::InvalidArgument,
+                            "Duplicate `@shaped_array` decorator".to_owned(),
+                        );
+                        continue;
+                    }
+                    seen_shaped_array = true;
+                    self.error(
+                        decorator.range(),
+                        ErrorKind::InvalidArgument,
+                        "`@shaped_array` requires a `shape` keyword argument".to_owned(),
+                    );
+                }
+                continue;
+            };
+            if !self.is_shaped_array_decorator(&call.func) {
+                continue;
+            }
+            if seen_shaped_array {
+                self.error(
+                    decorator.range(),
+                    ErrorKind::InvalidArgument,
+                    "Duplicate `@shaped_array` decorator".to_owned(),
+                );
+                continue;
+            }
+            seen_shaped_array = true;
+
+            let mut invalid = false;
+            if let Some(arg) = call.arguments.args.first() {
+                self.error(
+                    arg.range(),
+                    ErrorKind::InvalidArgument,
+                    "`@shaped_array` expects `shape` as a keyword argument".to_owned(),
+                );
+                invalid = true;
+            }
+
+            let mut shape_keyword = None;
+            for keyword in &call.arguments.keywords {
+                let Some(arg) = &keyword.arg else {
+                    self.error(
+                        keyword.range(),
+                        ErrorKind::InvalidArgument,
+                        "Unpacking is not supported in `@shaped_array`".to_owned(),
+                    );
+                    invalid = true;
+                    continue;
+                };
+                if arg.as_str() == "shape" {
+                    if shape_keyword.is_none() {
+                        shape_keyword = Some(keyword);
+                    }
+                } else {
+                    self.error(
+                        keyword.range(),
+                        ErrorKind::InvalidArgument,
+                        format!(
+                            "Unexpected keyword argument `{}` for `@shaped_array`; expected `shape`",
+                            arg.id
+                        ),
+                    );
+                    invalid = true;
+                }
+            }
+
+            let Some(shape_keyword) = shape_keyword else {
+                if !invalid {
+                    self.error(
+                        call.range(),
+                        ErrorKind::InvalidArgument,
+                        "`@shaped_array` requires a `shape` keyword argument".to_owned(),
+                    );
+                }
+                continue;
+            };
+            let Expr::StringLiteral(shape) = &shape_keyword.value else {
+                self.error(
+                    shape_keyword.value.range(),
+                    ErrorKind::InvalidArgument,
+                    "`@shaped_array` `shape` argument must be a string literal".to_owned(),
+                );
+                continue;
+            };
+            if !invalid {
+                metadata = Some(Box::new(BindingShapedArrayMetadata {
+                    shape_name: Name::new(shape.value.to_str()),
+                    range: shape_keyword.value.range(),
+                }));
+            }
+        }
+        metadata
+    }
+
+    /// Scan a class body for a `forward` method decorated with
+    /// `@uses_shape_dsl(..., capture_init=[...])` and return the list of `__init__`
+    /// parameter names to capture for shape inference.
+    fn extract_capture_init(&mut self, body: &[Stmt]) -> Option<Vec<Name>> {
+        let forward = body
+            .iter()
+            .filter_map(|stmt| stmt.as_function_def_stmt())
+            .find(|func_def| func_def.name.as_str() == "forward")?;
+
+        forward.decorator_list.iter().find_map(|decorator| {
+            let call = decorator.expression.as_call_expr()?;
+            if self.as_special_export(&call.func) != Some(SpecialExport::UsesShapeDsl) {
+                return None;
+            }
+            let capture_init_kw = call.arguments.keywords.iter().find(|kw| {
+                kw.arg
+                    .as_ref()
+                    .is_some_and(|a| a.as_str() == "capture_init")
+            })?;
+            let list = capture_init_kw.value.as_list_expr()?;
+            let names: Vec<Name> = list
+                .elts
+                .iter()
+                .filter_map(|elt| {
+                    if let Some(s) = elt.as_string_literal_expr() {
+                        Some(Name::new(s.value.to_str()))
+                    } else {
+                        self.error(
+                            elt.range(),
+                            ErrorKind::InvalidArgument,
+                            "`capture_init` entries must be string literals".to_owned(),
+                        );
+                        None
+                    }
+                })
+                .collect();
+            Some(names)
+        })
     }
 
     /// Extracts docstrings for each field, mapping the field's range to the docstring's range.
@@ -466,6 +793,136 @@ impl<'a> BindingsBuilder<'a> {
         expr.recurse(&mut |e| Self::collect_ranges_from_expr(e, ranges));
     }
 
+    /// Parse fields for `collections.namedtuple`: string splitting, list/tuple of strings.
+    /// `members` is a slice of the positional arguments after the name string.
+    /// `error_range` is used for the fallback error.
+    ///
+    /// Returns a tuple of (fields, has_dynamic_fields) where has_dynamic_fields is true
+    /// if the fields couldn't be statically resolved.
+    fn parse_collections_namedtuple_fields(
+        &mut self,
+        members: &[Expr],
+        error_range: TextRange,
+    ) -> (Vec<(String, TextRange, Option<Expr>)>, bool) {
+        let mut has_dynamic_fields = false;
+        let fields = match members {
+            // namedtuple('Point', 'x y')
+            // namedtuple('Point', 'x, y')
+            [Expr::StringLiteral(x)] => {
+                let s = x.value.to_str();
+                if s.contains(',') {
+                    s.split(',')
+                        .map(str::trim)
+                        .map(|s| (s.to_owned(), x.range(), None))
+                        .collect()
+                } else {
+                    s.split_whitespace()
+                        .map(|s| (s.to_owned(), x.range(), None))
+                        .collect()
+                }
+            }
+            // namedtuple('Point', []), namedtuple('Point', ())
+            [Expr::List(ExprList { elts, .. }) | Expr::Tuple(ExprTuple { elts, .. })]
+                if elts.is_empty() =>
+            {
+                Vec::new()
+            }
+            // namedtuple('Point', [*Base._fields, 'z'])
+            // Starred expressions can't be resolved statically, so mark
+            // the namedtuple as having dynamic fields. We still extract
+            // any string literals or Final variable references we can see
+            // as known fields for autocomplete and type checking.
+            [Expr::List(ExprList { elts, .. }) | Expr::Tuple(ExprTuple { elts, .. })]
+                if elts.iter().any(|elt| matches!(elt, Expr::Starred(_))) =>
+            {
+                has_dynamic_fields = true;
+                elts.iter()
+                    .filter_map(|elt| match elt {
+                        Expr::StringLiteral(s) => Some((s.value.to_string(), s.range(), None)),
+                        Expr::Name(n) => self
+                            .scopes
+                            .lookup_final_string_value(&n.id)
+                            .map(str::to_owned)
+                            .map(|value| (value, n.range(), None)),
+                        _ => None,
+                    })
+                    .collect()
+            }
+            // namedtuple('Point', ['x', 'y']) or namedtuple('Point', [X, Y]) with Final variables
+            [Expr::List(ExprList { elts, .. })]
+                if matches!(
+                    elts.as_slice(),
+                    [Expr::StringLiteral(_) | Expr::Name(_), ..]
+                ) =>
+            {
+                self.extract_string_literals(elts)
+            }
+            // namedtuple('Point', ('x', 'y')) or namedtuple('Point', (X, Y)) with Final variables
+            [Expr::Tuple(ExprTuple { elts, .. })]
+                if matches!(
+                    elts.as_slice(),
+                    [Expr::StringLiteral(_) | Expr::Name(_), ..]
+                ) =>
+            {
+                self.extract_string_literals(elts)
+            }
+            _ => {
+                self.error(
+                    error_range,
+                    ErrorKind::BadClassDefinition,
+                    "Expected valid functional named tuple definition".to_owned(),
+                );
+                has_dynamic_fields = true;
+                Vec::new()
+            }
+        };
+        (fields, has_dynamic_fields)
+    }
+
+    /// Parse fields for `typing.NamedTuple`: list/tuple of (name, type) pairs.
+    /// `members` is a slice of the positional arguments after the name string.
+    /// `error_range` is used for the fallback error.
+    ///
+    /// Returns a tuple of (fields, has_dynamic_fields) where has_dynamic_fields is true
+    /// if the fields couldn't be statically resolved.
+    fn parse_typing_namedtuple_fields(
+        &mut self,
+        members: &[Expr],
+        error_range: TextRange,
+    ) -> (Vec<(String, TextRange, Option<Expr>)>, bool) {
+        let mut has_dynamic_fields = false;
+        let fields = match members {
+            // NamedTuple('Point', []), NamedTuple('Point', ())
+            [Expr::List(ExprList { elts, .. }) | Expr::Tuple(ExprTuple { elts, .. })]
+                if elts.is_empty() =>
+            {
+                Vec::new()
+            }
+            // NamedTuple('Point', [('x', int), ('y', int)])
+            [Expr::List(ExprList { elts, .. })]
+                if matches!(elts.as_slice(), [Expr::Tuple(_), ..]) =>
+            {
+                self.decompose_key_value_pairs(elts)
+            }
+            // NamedTuple('Point', (('x', int), ('y', int)))
+            [Expr::Tuple(ExprTuple { elts, .. })]
+                if matches!(elts.as_slice(), [Expr::Tuple(_), ..]) =>
+            {
+                self.decompose_key_value_pairs(elts)
+            }
+            _ => {
+                self.error(
+                    error_range,
+                    ErrorKind::BadClassDefinition,
+                    "Expected valid functional named tuple definition".to_owned(),
+                );
+                has_dynamic_fields = true;
+                Vec::new()
+            }
+        };
+        (fields, has_dynamic_fields)
+    }
+
     fn extract_string_literals(
         &mut self,
         items: &[Expr],
@@ -474,10 +931,26 @@ impl<'a> BindingsBuilder<'a> {
             .iter()
             .filter_map(|item| match item {
                 Expr::StringLiteral(x) => Some((x.value.to_string(), x.range(), None)),
+                Expr::Name(n) => {
+                    if let Some(value) = self
+                        .scopes
+                        .lookup_final_string_value(&n.id)
+                        .map(str::to_owned)
+                    {
+                        Some((value, n.range(), None))
+                    } else {
+                        self.error(
+                            item.range(),
+                            ErrorKind::InvalidLiteral,
+                            "Expected a string literal".to_owned(),
+                        );
+                        None
+                    }
+                }
                 _ => {
                     self.error(
                         item.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidLiteral),
+                        ErrorKind::InvalidLiteral,
                         "Expected a string literal".to_owned(),
                     );
                     None
@@ -497,19 +970,35 @@ impl<'a> BindingsBuilder<'a> {
                     [Expr::StringLiteral(k), v] => {
                         Some((k.value.to_string(), k.range(), Some(v.clone())))
                     }
+                    [Expr::Name(n), v] => {
+                        if let Some(value) = self
+                            .scopes
+                            .lookup_final_string_value(&n.id)
+                            .map(str::to_owned)
+                        {
+                            Some((value, n.range(), Some(v.clone())))
+                        } else {
+                            self.error(
+                                n.range(),
+                                ErrorKind::InvalidArgument,
+                                "Expected first item to be a string literal".to_owned(),
+                            );
+                            None
+                        }
+                    }
                     [k, _] => {
                         self.error(
                             k.range(),
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "Expected first item to be a string literal".to_owned(),
                         );
                         None
                     }
-                    _ => {
+                    elts => {
                         self.error(
                             item.range(),
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                            "Expected a pair".to_owned(),
+                            ErrorKind::InvalidArgument,
+                            format!("Expected (name, type) pair, got {}-tuple", elts.len()),
                         );
                         None
                     }
@@ -517,13 +1006,124 @@ impl<'a> BindingsBuilder<'a> {
                 _ => {
                     self.error(
                         item.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                        ErrorKind::InvalidArgument,
                         "Expected a tuple".to_owned(),
                     );
                     None
                 }
             })
             .collect()
+    }
+
+    /// Validate and insert synthesized field definitions into a class.
+    /// Handles identifier validation, duplicate detection, annotation bindings,
+    /// and field definition bindings.
+    fn insert_synthesized_fields(
+        &mut self,
+        member_definitions: Vec<(String, TextRange, Option<Expr>, Option<ExprOrBinding>)>,
+        fields: &mut SmallMap<Name, ClassFieldProperties>,
+        class_indices: &ClassIndices,
+        illegal_identifier_handling: IllegalIdentifierHandling,
+        force_class_initialization: bool,
+        class_kind: SynthesizedClassKind,
+    ) {
+        for (idx, (member_name, range, member_annotation, member_value)) in
+            member_definitions.into_iter().enumerate()
+        {
+            let mut member_name = member_name;
+            if !is_valid_identifier(member_name.as_str()) {
+                match illegal_identifier_handling {
+                    IllegalIdentifierHandling::Allow => {}
+                    IllegalIdentifierHandling::Error => {
+                        self.error(
+                            range,
+                            ErrorKind::BadClassDefinition,
+                            format!("`{member_name}` is not a valid identifier"),
+                        );
+                        continue;
+                    }
+                    IllegalIdentifierHandling::Rename => member_name = format!("_{idx}"),
+                }
+            }
+            if class_kind == SynthesizedClassKind::NamedTuple && member_name.starts_with("_") {
+                match illegal_identifier_handling {
+                    IllegalIdentifierHandling::Allow => {}
+                    IllegalIdentifierHandling::Error => {
+                        self.error(
+                             range,
+                             ErrorKind::BadClassDefinition,
+                             format!(
+                                 "NamedTuple field name may not start with an underscore: `{member_name}`"
+                             ),
+
+                         );
+                        continue;
+                    }
+                    IllegalIdentifierHandling::Rename => member_name = format!("_{idx}"),
+                }
+            }
+            let member_name = Name::new(member_name);
+            if fields.contains_key(&member_name) {
+                self.error(
+                    range,
+                    ErrorKind::BadClassDefinition,
+                    format!("Duplicate field `{member_name}`"),
+                );
+                continue;
+            }
+            // Synthesized fields for named tuples are always considered annotated
+            fields.insert(
+                member_name.clone(),
+                ClassFieldProperties::new(
+                    member_annotation.is_some() || class_kind == SynthesizedClassKind::NamedTuple,
+                    member_value.is_some(),
+                    true, // Synthesized fields are class body fields
+                    range,
+                    None, // Synthesized fields don't have docstrings
+                ),
+            );
+            let annotation = member_annotation.map(|annotation_expr| {
+                self.insert_binding(
+                    KeyAnnotation::Annotation(ShortIdentifier::new(&Identifier::new(
+                        member_name.clone(),
+                        range,
+                    ))),
+                    BindingAnnotation::AnnotateExpr(
+                        AnnotationTarget::ClassMember(member_name.clone()),
+                        annotation_expr,
+                        None,
+                    ),
+                )
+            });
+            let definition = match (member_value, force_class_initialization) {
+                (Some(value), _) => ClassFieldDefinition::AssignedInBody {
+                    value: Box::new(value),
+                    annotation,
+                    alias_of: None,
+                },
+                (None, true) => ClassFieldDefinition::AssignedInBody {
+                    value: Box::new(ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))),
+                    annotation,
+                    alias_of: None,
+                },
+                (None, false) => match annotation {
+                    Some(annotation) => ClassFieldDefinition::DeclaredByAnnotation {
+                        annotation,
+                        initialized_in_recognized_method: false,
+                    },
+                    None => ClassFieldDefinition::DeclaredWithoutAnnotation,
+                },
+            };
+            self.insert_binding(
+                KeyClassField(class_indices.def_index, member_name.clone()),
+                BindingClassField {
+                    class_idx: class_indices.class_idx,
+                    name: member_name,
+                    range,
+                    definition,
+                },
+            );
+        }
     }
 
     fn synthesize_class_def(
@@ -535,11 +1135,12 @@ impl<'a> BindingsBuilder<'a> {
         base: Option<Expr>,
         keywords: Box<[(Name, Expr)]>,
         // name, position, annotation, value
-        member_definitions: Vec<(String, TextRange, Option<Expr>, Option<Expr>)>,
+        member_definitions: Vec<(String, TextRange, Option<Expr>, Option<ExprOrBinding>)>,
         illegal_identifier_handling: IllegalIdentifierHandling,
         force_class_initialization: bool,
         class_kind: SynthesizedClassKind,
         special_base: Option<BaseClass>,
+        bind_to_name: bool,
     ) {
         let base_classes = base
             .into_iter()
@@ -564,7 +1165,10 @@ impl<'a> BindingsBuilder<'a> {
                 decorators: Box::new([]),
                 is_new_type,
                 pydantic_config_dict: PydanticConfigDict::default(),
+                pydantic_before_validator_fields: Box::default(),
                 django_field_info: Box::default(),
+                capture_init: None,
+                shaped_array_metadata: None,
             },
         );
         self.insert_binding_idx(
@@ -579,119 +1183,46 @@ impl<'a> BindingsBuilder<'a> {
         );
 
         let mut fields = SmallMap::new();
-        for (idx, (member_name, range, member_annotation, member_value)) in
-            member_definitions.into_iter().enumerate()
-        {
-            let mut member_name = member_name;
-            if !is_valid_identifier(member_name.as_str()) {
-                match illegal_identifier_handling {
-                    IllegalIdentifierHandling::Allow => {}
-                    IllegalIdentifierHandling::Error => {
-                        self.error(
-                            range,
-                            ErrorInfo::Kind(ErrorKind::BadClassDefinition),
-                            format!("`{member_name}` is not a valid identifier"),
-                        );
-                        continue;
-                    }
-                    IllegalIdentifierHandling::Rename => member_name = format!("_{idx}"),
-                }
-            }
-            if class_kind == SynthesizedClassKind::NamedTuple && member_name.starts_with("_") {
-                match illegal_identifier_handling {
-                    IllegalIdentifierHandling::Allow => {}
-                    IllegalIdentifierHandling::Error => {
-                        self.error(
-                             range,
-                             ErrorInfo::Kind(ErrorKind::BadClassDefinition),
-                             format!(
-                                 "NamedTuple field name may not start with an underscore: `{member_name}`"
-                             ),
-
-                         );
-                        continue;
-                    }
-                    IllegalIdentifierHandling::Rename => member_name = format!("_{idx}"),
-                }
-            }
-            let member_name = Name::new(member_name);
-            if fields.contains_key(&member_name) {
-                self.error(
-                    range,
-                    ErrorInfo::Kind(ErrorKind::BadClassDefinition),
-                    format!("Duplicate field `{member_name}`"),
-                );
-                continue;
-            }
-            // Synthesized fields for named tuples are always considered annotated
-            fields.insert(
-                member_name.clone(),
-                ClassFieldProperties::new(
-                    member_annotation.is_some() || class_kind == SynthesizedClassKind::NamedTuple,
-                    member_value.is_some(),
-                    range,
-                    None, // Synthesized fields don't have docstrings
-                ),
+        self.insert_synthesized_fields(
+            member_definitions,
+            &mut fields,
+            &class_indices,
+            illegal_identifier_handling,
+            force_class_initialization,
+            class_kind,
+        );
+        self.metadata.get_class_mut(class_indices.def_index).fields = ClassFields::new(fields);
+        if bind_to_name {
+            self.bind_current_as(
+                &class_name,
+                class_object,
+                Binding::ClassDef(class_indices.class_idx, Box::new([])),
+                FlowStyle::ClassDef {
+                    class_idx: class_indices.class_object_idx,
+                    pristine: true,
+                },
             );
-            let annotation = member_annotation.map(|annotation_expr| {
-                self.insert_binding(
-                    KeyAnnotation::Annotation(ShortIdentifier::new(&Identifier::new(
-                        member_name.clone(),
-                        range,
-                    ))),
-                    BindingAnnotation::AnnotateExpr(
-                        AnnotationTarget::ClassMember(member_name.clone()),
-                        annotation_expr,
-                        None,
-                    ),
-                )
-            });
-            let definition = match (member_value, force_class_initialization) {
-                (Some(value), _) => ClassFieldDefinition::AssignedInBody {
-                    value: ExprOrBinding::Expr(value),
-                    annotation,
-                    alias_of: None,
-                },
-                (None, true) => ClassFieldDefinition::AssignedInBody {
-                    value: ExprOrBinding::Binding(Binding::Type(Type::any_implicit())),
-                    annotation,
-                    alias_of: None,
-                },
-                (None, false) => match annotation {
-                    Some(annotation) => ClassFieldDefinition::DeclaredByAnnotation { annotation },
-                    None => ClassFieldDefinition::DeclaredWithoutAnnotation,
-                },
-            };
-            self.insert_binding(
-                KeyClassField(class_indices.def_index, member_name.clone()),
-                BindingClassField {
-                    class_idx: class_indices.class_idx,
-                    name: member_name,
-                    range,
-                    definition,
-                },
+        } else {
+            self.insert_binding_current(
+                class_object,
+                Binding::ClassDef(class_indices.class_idx, Box::new([])),
             );
         }
-        self.bind_current_as(
-            &class_name,
-            class_object,
-            Binding::ClassDef(class_indices.class_idx, Box::new([])),
-            FlowStyle::ClassDef,
-        );
         self.insert_binding_idx(
             class_indices.class_idx,
-            BindingClass::FunctionalClassDef(
-                class_indices.def_index,
-                class_name,
-                parent.dupe(),
-                fields,
-            ),
+            BindingClass::FunctionalClassDef(class_indices.def_index, class_name, parent.dupe()),
         );
 
         self.insert_binding_idx(
             class_indices.variance_idx,
             BindingVariance {
                 class_key: class_indices.class_idx,
+            },
+        );
+        self.insert_binding_idx(
+            class_indices.variance_check_idx,
+            BindingVarianceCheck {
+                class_idx: class_indices.class_idx,
             },
         );
         self.insert_binding_idx(
@@ -703,6 +1234,12 @@ impl<'a> BindingsBuilder<'a> {
         self.insert_binding_idx(
             class_indices.abstract_class_check_idx,
             BindingAbstractClassCheck {
+                class_idx: class_indices.class_idx,
+            },
+        );
+        self.insert_binding_idx(
+            class_indices.subscript_symmetry_idx,
+            BindingClassSubscriptSymmetry {
                 class_idx: class_indices.class_idx,
             },
         );
@@ -718,13 +1255,13 @@ impl<'a> BindingsBuilder<'a> {
     ) {
         let class_name = Ast::expr_name_identifier(name.clone());
         let (mut class_object, class_indices) = self.class_object_and_indices(&class_name);
-        self.check_functional_definition_name(&name.id, arg_name);
+        self.check_functional_definition_name(&name.id, arg_name, ErrorKind::NameMismatch);
         self.ensure_expr(func, class_object.usage());
         self.ensure_expr(arg_name, class_object.usage());
         for arg in &mut *members {
             self.ensure_expr(arg, class_object.usage());
         }
-        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<Expr>)> =
+        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<ExprOrBinding>)> =
             match members {
                 // Enum('Color', 'RED, GREEN, BLUE')
                 // Enum('Color', 'RED GREEN BLUE')
@@ -782,7 +1319,7 @@ impl<'a> BindingsBuilder<'a> {
                         (Some(k), _) => {
                             self.error(
                                 k.range(),
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                                ErrorKind::InvalidArgument,
                                 "Expected first item to be a string literal".to_owned(),
                             );
                             None
@@ -790,8 +1327,9 @@ impl<'a> BindingsBuilder<'a> {
                         _ => {
                             self.error(
                                 item.range(),
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                                "Expected a key-value pair".to_owned(),
+                                ErrorKind::InvalidArgument,
+                                "Unpacking is not supported in functional enum definition"
+                                    .to_owned(),
                             );
                             None
                         }
@@ -800,14 +1338,14 @@ impl<'a> BindingsBuilder<'a> {
                 _ => {
                     self.error(
                         class_name.range,
-                        ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                        ErrorKind::InvalidArgument,
                         "Expected valid functional enum definition".to_owned(),
                     );
                     Vec::new()
                 }
             }
             .into_iter()
-            .map(|(name, range, value)| (name, range, None, value))
+            .map(|(name, range, value)| (name, range, None, value.map(ExprOrBinding::Expr)))
             .collect();
         self.synthesize_class_def(
             class_name,
@@ -821,6 +1359,7 @@ impl<'a> BindingsBuilder<'a> {
             true,
             SynthesizedClassKind::Enum,
             None,
+            true,
         );
     }
 
@@ -828,60 +1367,22 @@ impl<'a> BindingsBuilder<'a> {
     // but cannot specify the type of each element
     pub fn synthesize_collections_named_tuple_def(
         &mut self,
-        name: &ExprName,
+        class_name: Identifier,
         parent: &NestingContext,
         func: &mut Expr,
-        arg_name: &Expr,
         members: &mut [Expr],
         keywords: &mut [Keyword],
-    ) {
-        let class_name = Ast::expr_name_identifier(name.clone());
-        let (mut class_object, class_indices) = self.class_object_and_indices(&class_name);
-        self.ensure_expr(func, class_object.usage());
-        self.check_functional_definition_name(&name.id, arg_name);
-        let member_definitions: Vec<(String, TextRange, Option<Expr>)> = match members {
-            // namedtuple('Point', 'x y')
-            // namedtuple('Point', 'x, y')
-            [Expr::StringLiteral(x)] => {
-                let s = x.value.to_str();
-                if s.contains(',') {
-                    s.split(',')
-                        .map(str::trim)
-                        .map(|s| (s.to_owned(), x.range(), None))
-                        .collect()
-                } else {
-                    s.split_whitespace()
-                        .map(|s| (s.to_owned(), x.range(), None))
-                        .collect()
-                }
-            }
-            // namedtuple('Point', []), namedtuple('Point', ())
-            [Expr::List(ExprList { elts, .. }) | Expr::Tuple(ExprTuple { elts, .. })]
-                if elts.is_empty() =>
-            {
-                Vec::new()
-            }
-            // namedtuple('Point', ['x', 'y'])
-            [Expr::List(ExprList { elts, .. })]
-                if matches!(elts.as_slice(), [Expr::StringLiteral(_), ..]) =>
-            {
-                self.extract_string_literals(elts)
-            }
-            // namedtuple('Point', ('x', 'y'))
-            [Expr::Tuple(ExprTuple { elts, .. })]
-                if matches!(elts.as_slice(), [Expr::StringLiteral(_), ..]) =>
-            {
-                self.extract_string_literals(elts)
-            }
-            _ => {
-                self.error(
-                    class_name.range,
-                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                    "Expected valid functional named tuple definition".to_owned(),
-                );
-                Vec::new()
-            }
+        bind_to_name: bool,
+        adjacent_defaults: Option<Vec<Expr>>,
+    ) -> Idx<KeyClass> {
+        let (mut class_object, class_indices) = if bind_to_name {
+            self.class_object_and_indices(&class_name)
+        } else {
+            self.anon_class_object_and_indices(&class_name)
         };
+        self.ensure_expr(func, class_object.usage());
+        let (member_definitions, has_dynamic_fields) =
+            self.parse_collections_namedtuple_fields(members, class_name.range);
         let n_members = member_definitions.len();
         let mut illegal_identifier_handling = IllegalIdentifierHandling::Error;
         let mut defaults: Vec<Option<Expr>> = vec![None; n_members];
@@ -903,9 +1404,9 @@ impl<'a> BindingsBuilder<'a> {
                 if n_defaults > n_members {
                     self.error(
                         kw.value.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                        ErrorKind::InvalidArgument,
                         format!(
-                            "Too many defaults values: expected up to {n_members}, got {n_defaults}",
+                            "Too many defaults: expected at most {n_members}, got {n_defaults}",
                         ),
                     );
                     let n_to_drop = n_defaults - n_members;
@@ -914,29 +1415,42 @@ impl<'a> BindingsBuilder<'a> {
                     defaults.splice(n_members - n_defaults.., elts.map(|x| Some(x.clone())));
                 }
             } else {
-                let maybe_name = if let Some(name) = &kw.arg {
-                    format!(" `{name}`")
+                let msg = if let Some(name) = &kw.arg {
+                    format!("Unrecognized keyword argument `{name}`")
                 } else {
-                    "".to_owned()
+                    "Unpacking is not supported".to_owned()
                 };
                 self.error(
                     kw.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                    format!("Unrecognized argument{maybe_name} for named tuple definition"),
+                    ErrorKind::InvalidArgument,
+                    format!("{msg} in named tuple definition"),
                 );
             }
         }
-        let member_definitions_with_defaults: Vec<(String, TextRange, Option<Expr>, Option<Expr>)> =
-            member_definitions
-                .into_iter()
-                .zip(defaults)
-                .map(|((name, range, annotation), default)| (name, range, annotation, default))
-                .collect();
+        if let Some(ref default_elts) = adjacent_defaults {
+            apply_adjacent_defaults(default_elts, n_members, &mut defaults);
+        }
+        let member_definitions_with_defaults: Vec<(
+            String,
+            TextRange,
+            Option<Expr>,
+            Option<ExprOrBinding>,
+        )> = member_definitions
+            .into_iter()
+            .zip(defaults)
+            .map(|((name, range, annotation), default)| {
+                // collections.namedtuple fields are untyped: defaults only
+                // mark optionality, not the field type.
+                let value =
+                    default.map(|_| ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit)));
+                (name, range, annotation, value)
+            })
+            .collect();
         let range = class_name.range();
         self.synthesize_class_def(
             class_name,
             class_object,
-            class_indices,
+            class_indices.clone(),
             parent,
             None,
             Box::new([]),
@@ -944,66 +1458,52 @@ impl<'a> BindingsBuilder<'a> {
             illegal_identifier_handling,
             false,
             SynthesizedClassKind::NamedTuple,
-            Some(BaseClass::NamedTuple(range)),
+            Some(BaseClass::NamedTuple(range, has_dynamic_fields)),
+            bind_to_name,
         );
+        class_indices.class_idx
     }
 
     // This functional form allows specifying types for each element, but not default values
     pub fn synthesize_typing_named_tuple_def(
         &mut self,
-        name: &ExprName,
+        class_name: Identifier,
         parent: &NestingContext,
         func: &mut Expr,
-        arg_name: &Expr,
         members: &[Expr],
-    ) {
-        let class_name = Ast::expr_name_identifier(name.clone());
-        let (mut class_object, class_indices) = self.class_object_and_indices(&class_name);
+        bind_to_name: bool,
+        adjacent_defaults: Option<Vec<Expr>>,
+    ) -> Idx<KeyClass> {
+        let (mut class_object, class_indices) = if bind_to_name {
+            self.class_object_and_indices(&class_name)
+        } else {
+            self.anon_class_object_and_indices(&class_name)
+        };
         self.ensure_expr(func, class_object.usage());
-        self.check_functional_definition_name(&name.id, arg_name);
-        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<Expr>)> =
-            match members {
-                // NamedTuple('Point', []), NamedTuple('Point', ())
-                [Expr::List(ExprList { elts, .. }) | Expr::Tuple(ExprTuple { elts, .. })]
-                    if elts.is_empty() =>
-                {
-                    Vec::new()
-                }
-                // NamedTuple('Point', [('x', int), ('y', int)])
-                [Expr::List(ExprList { elts, .. })]
-                    if matches!(elts.as_slice(), [Expr::Tuple(_), ..]) =>
-                {
-                    self.decompose_key_value_pairs(elts)
-                }
-                // NamedTuple('Point', (('x', int), ('y', int)))
-                [Expr::Tuple(ExprTuple { elts, .. })]
-                    if matches!(elts.as_slice(), [Expr::Tuple(_), ..]) =>
-                {
-                    self.decompose_key_value_pairs(elts)
-                }
-                _ => {
-                    self.error(
-                        class_name.range,
-                        ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                        "Expected valid functional named tuple definition".to_owned(),
-                    );
-                    Vec::new()
-                }
-            }
-            .into_iter()
-            .map(|(name, range, annotation)| {
-                if let Some(mut ann) = annotation {
-                    self.ensure_type(&mut ann, &mut None);
-                    (name, range, Some(ann), None)
-                } else {
-                    (name, range, None, None)
-                }
-            })
-            .collect();
+        let (parsed_fields, _has_dynamic) =
+            self.parse_typing_namedtuple_fields(members, class_name.range);
+        let n_members = parsed_fields.len();
+        let mut defaults: Vec<Option<Expr>> = vec![None; n_members];
+        if let Some(ref default_elts) = adjacent_defaults {
+            apply_adjacent_defaults(default_elts, n_members, &mut defaults);
+        }
+        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<ExprOrBinding>)> =
+            parsed_fields
+                .into_iter()
+                .zip(defaults)
+                .map(|((name, range, annotation), default)| {
+                    if let Some(mut ann) = annotation {
+                        self.ensure_type(&mut ann, &mut None);
+                        (name, range, Some(ann), default.map(ExprOrBinding::Expr))
+                    } else {
+                        (name, range, None, default.map(ExprOrBinding::Expr))
+                    }
+                })
+                .collect();
         self.synthesize_class_def(
             class_name,
             class_object,
-            class_indices,
+            class_indices.clone(),
             parent,
             Some(func.clone()),
             Box::new([]),
@@ -1012,7 +1512,9 @@ impl<'a> BindingsBuilder<'a> {
             false,
             SynthesizedClassKind::NamedTuple,
             None,
+            bind_to_name,
         );
+        class_indices.class_idx
     }
 
     // Synthesize a class definition for NewType
@@ -1020,13 +1522,15 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         name: &ExprName,
         parent: &NestingContext,
+        func: &mut Expr,
         new_type_name: &mut Expr,
         base: &mut Expr,
     ) {
         let class_name = Ast::expr_name_identifier(name.clone());
         let (mut class_object, class_indices) = self.class_object_and_indices(&class_name);
+        self.ensure_expr(func, class_object.usage());
         self.ensure_expr(new_type_name, class_object.usage());
-        self.check_functional_definition_name(&name.id, new_type_name);
+        self.check_functional_definition_name(&name.id, new_type_name, ErrorKind::InvalidArgument);
         self.ensure_type(base, &mut None);
         self.synthesize_class_def(
             class_name,
@@ -1040,6 +1544,7 @@ impl<'a> BindingsBuilder<'a> {
             false,
             SynthesizedClassKind::NewType,
             None,
+            true,
         );
     }
 
@@ -1055,7 +1560,7 @@ impl<'a> BindingsBuilder<'a> {
         let class_name = Ast::expr_name_identifier(name.clone());
         let (mut class_object, class_indices) = self.class_object_and_indices(&class_name);
         self.ensure_expr(func, class_object.usage());
-        self.check_functional_definition_name(&name.id, arg_name);
+        self.check_functional_definition_name(&name.id, arg_name, ErrorKind::NameMismatch);
         let mut base_class_keywords = Vec::new();
         for kw in keywords {
             self.ensure_expr(&mut kw.value, class_object.usage());
@@ -1069,35 +1574,36 @@ impl<'a> BindingsBuilder<'a> {
             if let Some(kw_name) = recognized_kw {
                 base_class_keywords.push((kw_name.clone(), kw.value.clone()));
             } else {
-                let maybe_name = if let Some(name) = &kw.arg {
-                    format!(" `{name}`")
+                let msg = if let Some(name) = &kw.arg {
+                    format!("Unrecognized keyword argument `{name}`")
                 } else {
-                    "".to_owned()
+                    "Unpacking is not supported".to_owned()
                 };
                 self.error(
                     kw.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                    format!("Unrecognized argument{maybe_name} for typed dictionary definition"),
+                    ErrorKind::InvalidArgument,
+                    format!("{msg} in typed dictionary definition"),
                 );
             }
         }
-        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<Expr>)> = match args {
-            // Movie = TypedDict('Movie', {'name': str, 'year': int})
-            [Expr::Dict(ExprDict { items, .. })] => items
-                .iter_mut()
-                .filter_map(|item| {
-                    if let Some(key) = &mut item.key {
-                        self.ensure_expr(key, class_object.usage());
-                    }
-                    self.ensure_type(&mut item.value, &mut None);
-                    match (&item.key, &item.value) {
-                        (Some(Expr::StringLiteral(k)), v) => {
-                            Some((k.value.to_string(), k.range(), Some(v.clone()), None))
+        let member_definitions: Vec<(String, TextRange, Option<Expr>, Option<ExprOrBinding>)> =
+            match args {
+                // Movie = TypedDict('Movie', {'name': str, 'year': int})
+                [Expr::Dict(ExprDict { items, .. })] => items
+                    .iter_mut()
+                    .filter_map(|item| {
+                        if let Some(key) = &mut item.key {
+                            self.ensure_expr(key, class_object.usage());
                         }
+                        self.ensure_type(&mut item.value, &mut None);
+                        match (&item.key, &item.value) {
+                            (Some(Expr::StringLiteral(k)), v) => {
+                                Some((k.value.to_string(), k.range(), Some(v.clone()), None))
+                            }
                         (Some(k), _) => {
                             self.error(
                                 k.range(),
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                                ErrorKind::InvalidArgument,
                                 "Expected first item to be a string literal".to_owned(),
                             );
                             None
@@ -1105,8 +1611,9 @@ impl<'a> BindingsBuilder<'a> {
                         _ => {
                             self.error(
                                 item.range(),
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
-                                "Expected a key-value pair".to_owned(),
+                                ErrorKind::InvalidArgument,
+                                "Unpacking is not supported in functional typed dictionary definition"
+                                    .to_owned(),
                             );
                             None
                         }
@@ -1116,7 +1623,7 @@ impl<'a> BindingsBuilder<'a> {
             _ => {
                 self.error(
                     class_name.range,
-                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                    ErrorKind::InvalidArgument,
                     "Expected valid functional typed dictionary definition".to_owned(),
                 );
                 Vec::new()
@@ -1134,23 +1641,29 @@ impl<'a> BindingsBuilder<'a> {
             false,
             SynthesizedClassKind::TypedDict,
             None,
+            true,
         );
     }
 
     // Check that the variable name in a functional class definition matches the first argument string
-    fn check_functional_definition_name(&mut self, name: &Name, arg: &Expr) {
+    pub fn check_functional_definition_name(
+        &mut self,
+        name: &Name,
+        arg: &Expr,
+        error_kind: ErrorKind,
+    ) {
         if let Expr::StringLiteral(x) = arg {
             if x.value.to_str() != name.as_str() {
                 self.error(
                     arg.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                    error_kind,
                     format!("Expected string literal \"{name}\""),
                 );
             }
         } else {
             self.error(
                 arg.range(),
-                ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                error_kind,
                 format!("Expected string literal \"{name}\""),
             );
         }

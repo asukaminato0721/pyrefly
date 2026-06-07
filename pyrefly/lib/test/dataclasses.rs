@@ -24,6 +24,30 @@ assert_type(Data, type[Data])
 );
 
 testcase!(
+    test_enum_dataclass_rejected,
+    r#"
+from dataclasses import dataclass
+import dataclasses
+from enum import Enum
+
+class Good(Enum):
+    RED = 1
+
+@dataclass
+class Bad1(Enum):  # E: Cannot apply `@dataclass` to Enum `Bad1`
+    RED = 1
+
+@dataclasses.dataclass
+class Bad2(Enum):  # E: Cannot apply `@dataclass` to Enum `Bad2`
+    RED = 1
+
+@dataclass()
+class Bad3(Enum):  # E: Cannot apply `@dataclass` to Enum `Bad3`
+    RED = 1
+    "#,
+);
+
+testcase!(
     test_kw_only_sentinel_deep_inheritance,
     r#"
 from dataclasses import dataclass, KW_ONLY
@@ -660,7 +684,7 @@ testcase!(
     test_bad_keyword,
     r#"
 from dataclasses import dataclass
-@dataclass(flibbertigibbet=True)  # E: No matching overload found
+@dataclass(flibbertigibbet=True)  # E: Unexpected keyword argument `flibbertigibbet`
 class C:
     pass
     "#,
@@ -789,6 +813,21 @@ import dataclasses
 class C:
     replace: ClassVar = dataclasses.replace
 C()
+    "#,
+);
+
+testcase!(
+    test_frozen_classvar_class_assignment,
+    r#"
+import dataclasses
+from typing import ClassVar
+
+@dataclasses.dataclass(frozen=True)
+class C:
+    x: ClassVar[bool] = True
+
+    def set_x(self) -> None:
+        self.__class__.x = False
     "#,
 );
 
@@ -1418,7 +1457,7 @@ from dataclasses import dataclass, field
 @dataclass
 class C:
     x: int = 1
-    y: int = field(kw_only=True) # E: No matching overload found for function `dataclasses.field`
+    y: int = field(kw_only=True)
     z: int # E: Dataclass field `z` without a default may not follow dataclass field with a default
 C(5, y=2) # E: Missing argument `z` in function `C.__init__`
 C(5, y=2, z=3)
@@ -1497,7 +1536,7 @@ class Bad1:
     x: int
     y: InitVar[str]
     z: InitVar[bytes]
-    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `BoundMethod[Bad1, (self: Bad1, y: bytes, z: str) -> None]` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
+    def __post_init__(self, y: bytes, z: str): ...  # E: `__post_init__` type `(self: Bad1, y: bytes, z: str) -> None` is not assignable to expected type `(y: str, z: bytes) -> object` generated from the dataclass's `InitVar` fields
 @dataclass
 class Bad2:
     x: int
@@ -1517,7 +1556,7 @@ class Desc:
     def __set__(self, obj, value: str) -> None: ...
 @dataclass
 class C:
-    x: Desc = Desc()  # E: Data descriptor `x` has incompatible default
+    x: Desc = Desc()  # E: Cannot set field `x` to data descriptor `Desc` with inconsistent types
 c = C('')
 assert_type(c.x, int)
 c.x = 'cat'
@@ -1654,7 +1693,7 @@ class DescB:
 
 @dataclass
 class C:
-    x: DescA = DescA()  # E: Non-data descriptor `x` in dataclass is unsound. The dataclass __init__ writes to the instance dict, shadowing the descriptor. Add a __set__ method to make it a data descriptor.
+    x: DescA = DescA()  # E: Cannot set field `x` to non-data descriptor `DescA`\n  Hint: add a `__set__` method to make `DescA` a data descriptor
     y: DescB = DescB()
 
 # Regardless of any errors, any descriptors assigned in the class body do have default values.
@@ -1683,7 +1722,7 @@ class DescB:
 @dataclass
 class C:
     x: DescA = DescA()
-    y: DescB = DescB()  # E: Data descriptor `y` has incompatible default: `__get__` returns `int` which is not assignable to `__set__` value type `str`. The class-level descriptor value cannot be used as a default.
+    y: DescB = DescB()  # E: Cannot set field `y` to data descriptor `DescB` with inconsistent types\n  Return type `int` of `DescB.__get__` is not assignable to value type `str` of `DescB.__set__`
 
 # The field has a default, and accepts the `__set__` type if provided.
 c = C()
@@ -1693,4 +1732,197 @@ c = C(x=42, y='42')
 assert_type(c.x, int)
 assert_type(c.y, int)
     "#,
+);
+
+testcase!(
+    test_dataclass_generic_descriptor_conformance,
+    r#"
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar, assert_type, overload
+
+T = TypeVar("T")
+
+class Desc2(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: Any) -> list[T]: ...
+    @overload
+    def __get__(self, instance: object, owner: Any) -> T: ...
+    def __get__(self, instance: object | None, owner: Any) -> list[T] | T: ...
+
+@dataclass
+class DC2:
+    x: Desc2[int]
+    y: Desc2[str]
+    z: Desc2[str] = Desc2()  # E: Cannot set field `z` to non-data descriptor `Desc2`
+
+assert_type(DC2.x, list[int])
+assert_type(DC2.y, list[str])
+
+dc2 = DC2(Desc2(), Desc2(), Desc2())
+assert_type(dc2.x, int)
+assert_type(dc2.y, str)
+"#,
+);
+
+testcase!(
+    test_dataclass_slots_undeclared_attr_conformance,
+    r#"
+from dataclasses import dataclass
+
+@dataclass(slots=True)
+class DC2:
+    x: int
+
+    def __init__(self):
+        self.x = 3
+        # should error: y is not in slots
+        self.y = 3  # E: not declared in `__slots__`
+
+@dataclass(slots=False)
+class DC3:
+    x: int
+    __slots__ = ("x",)
+
+    def __init__(self):
+        self.x = 3
+        # should error: y is not in slots
+        self.y = 3  # E: not declared in `__slots__`
+"#,
+);
+
+testcase!(
+    test_dataclass_protocol_dataclass_fields,
+    r#"
+from dataclasses import dataclass, Field
+from typing import Any, ClassVar, Protocol
+
+class P(Protocol):
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
+
+@dataclass
+class C(P):
+    x: int
+
+C(42)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/2923
+testcase!(
+    bug = "Should reject @dataclass applied to NamedTuple subclass",
+    test_dataclass_on_named_tuple,
+    r#"
+from dataclasses import dataclass
+from typing import NamedTuple
+
+class Coord(NamedTuple):
+    x: int
+    y: int
+
+dataclass(Coord)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/2921
+testcase!(
+    bug = "Should reject @dataclass applied to Protocol subclass",
+    test_dataclass_on_protocol,
+    r#"
+from dataclasses import dataclass
+from typing import Protocol
+
+class Printable(Protocol):
+    def display(self) -> str: ...
+
+dataclass(Printable)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/2921
+testcase!(
+    test_dataclass_decorator_on_protocol,
+    r#"
+from dataclasses import dataclass
+from typing import Protocol
+
+@dataclass
+class MyProto(Protocol):  # E: `@dataclass` cannot be applied to Protocol
+    x: int
+    def display(self) -> str: ...
+
+@dataclass
+class DC:
+    x: int
+
+class DC2(Protocol, DC):  # E: If `Protocol` is included as a base class, all other bases must be protocols
+    y: int
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/2920
+testcase!(
+    test_frozen_dataclass_override_setattr_delattr,
+    r#"
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Immutable:
+    value: int
+
+    def __setattr__(self, name: str, val: object) -> None: ...  # E: Cannot override `__setattr__` in a frozen dataclass
+    def __delattr__(self, name: str) -> None: ...  # E: Cannot override `__delattr__` in a frozen dataclass
+"#,
+);
+
+// Subclass of a frozen dataclass: only `BadOverride` fires (it carries the
+// richer "declared as final in parent class `Base`" message). Our
+// `Cannot override __setattr__/__delattr__ in a frozen dataclass`
+// diagnostic is suppressed here because it is scoped to the class that is
+// itself decorated with `@dataclass(frozen=True)`.
+testcase!(
+    test_frozen_dataclass_subclass_override_setattr,
+    r#"
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Base:
+    value: int
+
+class Child(Base):
+    def __setattr__(self, name: str, val: object) -> None: ...  # E: `__setattr__` is declared as final in parent class `Base`
+    def __delattr__(self, name: str) -> None: ...  # E: `__delattr__` is declared as final in parent class `Base`
+"#,
+);
+
+// Doubly-frozen: child is also `@dataclass(frozen=True)`. The parent already
+// synthesizes `@final __setattr__`/`__delattr__`, so only `BadOverride` fires.
+testcase!(
+    test_frozen_dataclass_doubly_frozen_override_setattr,
+    r#"
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class FrozenBase:
+    value: int
+
+@dataclass(frozen=True)
+class FrozenChild(FrozenBase):
+    def __setattr__(self, name: str, val: object) -> None: ...  # E: `__setattr__` is declared as final in parent class `FrozenBase`
+    def __delattr__(self, name: str) -> None: ...  # E: `__delattr__` is declared as final in parent class `FrozenBase`
+"#,
+);
+
+// Non-frozen dataclass should allow overriding __setattr__ and __delattr__
+testcase!(
+    test_non_frozen_dataclass_override_setattr_ok,
+    r#"
+from dataclasses import dataclass
+
+@dataclass
+class Mutable:
+    value: int
+
+    def __setattr__(self, name: str, val: object) -> None: ...
+    def __delattr__(self, name: str) -> None: ...
+"#,
 );

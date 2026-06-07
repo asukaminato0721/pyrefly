@@ -13,8 +13,6 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_types::literal::Lit;
-use pyrefly_types::literal::LitEnum;
-use pyrefly_types::literal::Literal;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
@@ -29,14 +27,29 @@ use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::binding::binding::Binding;
+use crate::binding::binding::ClassFieldDefinition;
+use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyClassField;
 use crate::binding::binding::UnpackedPosition;
+use crate::binding::bindings::Bindings;
 use crate::state::lsp::AllOffPartial;
+use crate::state::lsp::AnnotationKind;
+use crate::state::lsp::DefinitionMetadata;
 use crate::state::lsp::InlayHintConfig;
 use crate::state::state::CancellableTransaction;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
+use crate::types::callable::Params;
 use crate::types::types::Type;
+
+pub struct InlayHintData {
+    pub position: TextSize,
+    /// Label parts with optional location info for click-to-navigate
+    pub label_parts: Vec<(String, Option<TextRangeWithModule>)>,
+    /// Whether double-clicking should insert the type annotation.
+    pub insertable: bool,
+}
 
 #[derive(Debug)]
 pub struct ParameterAnnotation {
@@ -64,10 +77,10 @@ impl<'param> ParamNameMatch<'param> {
 pub fn normalize_singleton_function_type_into_params(type_: Type) -> Option<Vec<Param>> {
     let callable = type_.to_callable()?;
     // We will drop the self parameter for signature help
-    if let crate::types::callable::Params::List(params_list) = callable.params {
+    if let Params::List(params_list) = callable.params {
         if let Some(Param::PosOnly(Some(name), _, _) | Param::Pos(name, _, _)) =
             params_list.items().first()
-            && (name.as_str() == "self" || name.as_str() == "cls")
+            && (name.as_str() == "self" || name.as_str() == "cls" || name.as_str() == "_cls")
         {
             let mut params = params_list.into_items();
             params.remove(0);
@@ -83,7 +96,7 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         inlay_hint_config: InlayHintConfig,
-    ) -> Option<Vec<(TextSize, Vec<(String, Option<TextRangeWithModule>)>)>> {
+    ) -> Option<Vec<InlayHintData>> {
         let is_interesting = |e: &Expr, ty: &Type, class_name: Option<&Name>| {
             !ty.is_any()
                 && match e {
@@ -104,20 +117,19 @@ impl<'a> Transaction<'a> {
                             true
                         }
                     }
-                    Expr::Attribute(ExprAttribute {
-                        box value, attr, ..
-                    }) if let Type::Literal(box Literal {
-                        value: Lit::Enum(box LitEnum { class, member, .. }),
-                        ..
-                    }) = ty =>
+                    Expr::Attribute(ExprAttribute { value, attr, .. })
+                        if let Type::Literal(lit) = ty
+                            && let Lit::Enum(lit_enum) = &lit.value =>
                     {
                         // Exclude enum literals
-                        match value {
+                        match &**value {
                             Expr::Name(object) => {
-                                *object.id() != *class.name() || *attr.id() != *member
+                                *object.id() != *lit_enum.class.name()
+                                    || *attr.id() != *lit_enum.member
                             }
                             Expr::Attribute(ExprAttribute { attr: object, .. }) => {
-                                *object.id() != *class.name() || *attr.id() != *member
+                                *object.id() != *lit_enum.class.name()
+                                    || *attr.id() != *lit_enum.member
                             }
                             _ => true,
                         }
@@ -127,55 +139,69 @@ impl<'a> Transaction<'a> {
         };
         let bindings = self.get_bindings(handle)?;
         let stdlib = self.get_stdlib(handle);
+        let make_type_hint =
+            |prefix: &str, position: TextSize, ty: &Type, insertable: bool| -> InlayHintData {
+                let type_parts = ty.get_types_with_locations(Some(&stdlib));
+                let label_parts = once((prefix.to_owned(), None))
+                    .chain(
+                        type_parts
+                            .iter()
+                            .map(|(text, loc)| (text.clone(), loc.clone())),
+                    )
+                    .collect();
+                InlayHintData {
+                    position,
+                    label_parts,
+                    insertable,
+                }
+            };
         let mut res = Vec::new();
         for idx in bindings.keys::<Key>() {
             match bindings.idx_to_key(idx) {
-                key @ Key::ReturnType(id) => {
-                    if inlay_hint_config.function_return_types {
-                        match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
-                            Binding::Function(x, _pred, _class_meta) => {
-                                if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
-                                    && let Some(mut ty) = self.get_type(handle, key)
-                                    && !ty.is_any()
+                key @ Key::ReturnType(id) if inlay_hint_config.function_return_types => {
+                    match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
+                        Binding::Function(x, _pred, _class_meta) => {
+                            if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
+                                && let Some(mut ty) = self.get_type_for_display(handle, key)
+                                && !ty.is_any()
+                            {
+                                let fun = bindings.get(bindings.get(*x).undecorated_idx);
+                                if fun.def.is_async
+                                    && let Some(Some((_, _, return_ty))) = self.ad_hoc_solve(
+                                        handle,
+                                        "inlay_hint_coroutine",
+                                        |solver| solver.unwrap_coroutine(&ty),
+                                    )
                                 {
-                                    let fun = bindings.get(bindings.get(*x).undecorated_idx);
-                                    if fun.def.is_async
-                                        && let Some(Some((_, _, return_ty))) = self
-                                            .ad_hoc_solve(handle, |solver| {
-                                                solver.unwrap_coroutine(&ty)
-                                            })
-                                    {
-                                        ty = return_ty;
-                                    }
-                                    // Use get_types_with_locations to get type parts with location info
-                                    let type_parts = ty.get_types_with_locations(Some(&stdlib));
-                                    let label_parts = once((" -> ".to_owned(), None))
-                                        .chain(
-                                            type_parts
-                                                .iter()
-                                                .map(|(text, loc)| (text.clone(), loc.clone())),
-                                        )
-                                        .collect();
-                                    res.push((fun.def.parameters.range.end(), label_parts));
+                                    ty = return_ty;
                                 }
+                                res.push(make_type_hint(
+                                    " -> ",
+                                    fun.def.parameters.range.end(),
+                                    &ty,
+                                    true,
+                                ));
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
                 key @ Key::Definition(_)
                     if inlay_hint_config.variable_types
-                        && let Some(ty) = self.get_type(handle, key) =>
+                        && let Some(ty) = self.get_type_for_display(handle, key) =>
                 {
                     // For unpacked values, extract the element expression if available
                     let (e, is_unpacked) = match bindings.get(idx) {
-                        Binding::NameAssign {
-                            annotation: None,
-                            expr: e,
-                            ..
-                        } => (Some(&**e), false),
-                        Binding::Expr(None, e) => (Some(e), false),
-                        Binding::UnpackedValue(None, unpack_idx, _, pos) => {
+                        // Pinned assignments (explicit annotation or
+                        // receiver-constrained class rebind) are already
+                        // authoritatively typed; suggesting an explicit
+                        // annotation here would be redundant and, for the
+                        // receiver case, could mislead users into
+                        // annotating with the RHS-derived type. The same
+                        // applies to receiver-bearing unpacked rebinds.
+                        Binding::NameAssign(x) if !x.is_pinned() => (Some(&*x.expr), false),
+                        Binding::Expr(None, e) => (Some(&**e), false),
+                        Binding::UnpackedValue(None, unpack_idx, _, pos, None) => {
                             // Try to get the element expression from the unpacked source
                             let element_expr =
                                 Self::get_unpacked_element_expr(&bindings, *unpack_idx, *pos);
@@ -204,19 +230,55 @@ impl<'a> Transaction<'a> {
                         is_unpacked && !ty.is_any()
                     };
                     if should_show {
-                        // Use get_types_with_locations to get type parts with location info
-                        let type_parts = ty.get_types_with_locations(Some(&stdlib));
-                        let label_parts = once((": ".to_owned(), None))
-                            .chain(
-                                type_parts
-                                    .iter()
-                                    .map(|(text, loc)| (text.clone(), loc.clone())),
-                            )
-                            .collect();
-                        res.push((key.range().end(), label_parts));
+                        res.push(make_type_hint(": ", key.range().end(), &ty, !is_unpacked));
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Inlay hints for unannotated class attributes defined in methods (e.g. self.x = value in __init__)
+        if inlay_hint_config.variable_types
+            && let Some(answers) = self.get_answers(handle)
+        {
+            for field_idx in bindings.keys::<KeyClassField>() {
+                let field = bindings.get(field_idx);
+                if let ClassFieldDefinition::DefinedInMethod {
+                    value,
+                    annotation: None,
+                    ..
+                } = &field.definition
+                {
+                    let Some(class_field) = answers.get_idx::<KeyClassField>(field_idx) else {
+                        continue;
+                    };
+                    let ty = answers.solver().for_display(class_field.ty());
+                    let expr = match value.as_ref() {
+                        ExprOrBinding::Expr(e) => Some(e),
+                        ExprOrBinding::Binding(_) => None,
+                    };
+                    // Suppress self.x = x where the RHS is a bare name matching the
+                    // attribute name. The type is already visible at the parameter.
+                    if let Some(Expr::Name(name)) = expr
+                        && *name.id() == *field.name
+                    {
+                        continue;
+                    }
+                    let class_name = if let Type::ClassType(cls) = &ty
+                        && cls.targs().is_empty()
+                    {
+                        Some(cls.name())
+                    } else {
+                        None
+                    };
+                    let should_show = match expr {
+                        Some(e) => is_interesting(e, &ty, class_name),
+                        None => !ty.is_any(),
+                    };
+                    if should_show {
+                        res.push(make_type_hint(": ", field.range.end(), &ty, true));
+                    }
+                }
             }
         }
 
@@ -224,7 +286,11 @@ impl<'a> Transaction<'a> {
             res.extend(
                 self.add_inlay_hints_for_positional_function_args(handle)
                     .into_iter()
-                    .map(|(pos, text)| (pos, vec![(text, None)])),
+                    .map(|(pos, text)| InlayHintData {
+                        position: pos,
+                        label_parts: vec![(text, None)],
+                        insertable: true,
+                    }),
             );
         }
 
@@ -236,7 +302,7 @@ impl<'a> Transaction<'a> {
     /// For nested unpacking or function calls, returns None (caller should fall back to
     /// showing hints based on type information alone).
     fn get_unpacked_element_expr<'b>(
-        bindings: &'b crate::binding::bindings::Bindings,
+        bindings: &'b Bindings,
         unpack_idx: Idx<Key>,
         pos: UnpackedPosition,
     ) -> Option<&'b Expr> {
@@ -250,7 +316,7 @@ impl<'a> Transaction<'a> {
         }?;
 
         // Try to extract elements from tuple or list literals
-        let elts = match source_expr {
+        let elts = match &**source_expr {
             Expr::Tuple(tup) => Some(&tup.elts),
             Expr::List(lst) => Some(&lst.elts),
             _ => None,
@@ -321,6 +387,7 @@ impl<'a> Transaction<'a> {
                                 && !param_match.is_vararg_repeat
                                 && param_match.name.as_str() != "self"
                                 && param_match.name.as_str() != "cls"
+                                && param_match.name.as_str() != "_cls"
                             {
                                 param_hints.push((
                                     arg.range().start(),
@@ -358,7 +425,7 @@ impl<'a> Transaction<'a> {
                     }
                     positional_params_seen += 1;
                 }
-                Param::VarArg(name, ..) => {
+                Param::Varargs(name, ..) => {
                     if positional_arg_index >= positional_params_seen {
                         return name.as_ref().map(|name| {
                             ParamNameMatch::new(name, positional_arg_index > positional_params_seen)
@@ -377,7 +444,10 @@ impl<'a> Transaction<'a> {
         param_with_default: ParameterWithDefault,
         handle: &Handle,
     ) -> Option<ParameterAnnotation> {
-        if param_with_default.name() == "self" || param_with_default.name() == "cls" {
+        if param_with_default.name() == "self"
+            || param_with_default.name() == "cls"
+            || param_with_default.name() == "_cls"
+        {
             return None;
         }
         let ty = match param_with_default.default() {
@@ -432,17 +502,18 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         idx: pyrefly_graph::index::Idx<Key>,
-        bindings: crate::binding::bindings::Bindings,
+        bindings: Bindings,
         transaction: &mut CancellableTransaction,
     ) -> Vec<(pyrefly_python::module::Module, Vec<TextRange>)> {
         if let Key::Definition(id) = bindings.idx_to_key(idx)
             && let Some(module_info) = self.get_module_info(handle)
         {
-            let definition_kind = crate::state::lsp::DefinitionMetadata::VariableOrAttribute(None);
+            let definition_kind = DefinitionMetadata::VariableOrAttribute(None);
             if let Ok(references) = transaction.find_global_references_from_definition(
-                handle.sys_info(),
+                *handle.sys_info(),
                 definition_kind,
                 TextRangeWithModule::new(module_info, id.range()),
+                true,
             ) {
                 return references;
             }
@@ -524,6 +595,11 @@ impl<'a> Transaction<'a> {
                                 self.filter_parameters(param_with_default, handle)
                             })
                             .collect();
+                        // Skip expensive reference collection and type inference
+                        // for functions where every parameter is already annotated.
+                        if func_args.iter().all(|arg| arg.has_annotation) {
+                            return vec![];
+                        }
                         let references =
                             self.collect_references(handle, idx, bindings.clone(), transaction);
                         let ranges: Vec<&TextRange> =
@@ -547,7 +623,7 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         return_types: bool,
         containers: bool,
-    ) -> Option<Vec<(TextSize, Type, crate::state::lsp::AnnotationKind)>> {
+    ) -> Option<Vec<(TextSize, Type, AnnotationKind)>> {
         let is_interesting_type = |x: &Type| !x.is_any();
         let is_interesting_expr = |x: &Expr| !Ast::is_literal(x);
         let bindings = self.get_bindings(handle)?;
@@ -559,14 +635,14 @@ impl<'a> Transaction<'a> {
                     match bindings.get(bindings.key_to_idx(&Key::Definition(*id))) {
                         Binding::Function(x, _pred, _class_meta) => {
                             if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
-                                && let Some(ty) = self.get_type(handle, key)
+                                && let Some(ty) = self.get_type_for_display(handle, key)
                                 && is_interesting_type(&ty)
                             {
                                 let fun = bindings.get(bindings.get(*x).undecorated_idx);
                                 res.push((
                                     fun.def.parameters.range.end(),
                                     ty,
-                                    crate::state::lsp::AnnotationKind::Return,
+                                    AnnotationKind::Return,
                                 ));
                             }
                         }
@@ -575,23 +651,19 @@ impl<'a> Transaction<'a> {
                 }
                 // Only annotate empty containers for now
                 key @ Key::Definition(_) if containers => {
-                    if let Some(ty) = self.get_type(handle, key) {
+                    if let Some(ty) = self.get_type_for_display(handle, key) {
                         let e = match bindings.get(idx) {
-                            Binding::NameAssign {
-                                annotation: None,
-                                expr: e,
-                                ..
-                            } => match &**e {
+                            Binding::NameAssign(x) if !x.is_pinned() => match &*x.expr {
                                 Expr::List(ExprList { elts, .. }) => {
                                     if elts.is_empty() {
-                                        Some(&**e)
+                                        Some(&*x.expr)
                                     } else {
                                         None
                                     }
                                 }
                                 Expr::Dict(ExprDict { items, .. }) => {
                                     if items.is_empty() {
-                                        Some(&**e)
+                                        Some(&*x.expr)
                                     } else {
                                         None
                                     }
@@ -604,11 +676,7 @@ impl<'a> Transaction<'a> {
                             && is_interesting_expr(e)
                             && is_interesting_type(&ty)
                         {
-                            res.push((
-                                key.range().end(),
-                                ty,
-                                crate::state::lsp::AnnotationKind::Variable,
-                            ));
+                            res.push((key.range().end(), ty, AnnotationKind::Variable));
                         }
                     }
                 }
@@ -621,23 +689,23 @@ impl<'a> Transaction<'a> {
 
 #[cfg(test)]
 mod tests {
+    use pyrefly_types::heap::TypeHeap;
     use ruff_python_ast::name::Name;
 
     use super::Transaction;
     use crate::types::callable::Param;
     use crate::types::callable::Required;
-    use crate::types::types::AnyStyle;
     use crate::types::types::Type;
 
     fn any_type() -> Type {
-        Type::Any(AnyStyle::Explicit)
+        TypeHeap::new().mk_any_explicit()
     }
 
     #[test]
     fn param_name_for_positional_argument_marks_vararg_repeats() {
         let params = vec![
             Param::Pos(Name::new_static("x"), any_type(), Required::Required),
-            Param::VarArg(Some(Name::new_static("columns")), any_type()),
+            Param::Varargs(Some(Name::new_static("columns")), any_type()),
             Param::KwOnly(Name::new_static("kw"), any_type(), Required::Required),
         ];
 
@@ -650,7 +718,7 @@ mod tests {
     fn param_name_for_positional_argument_handles_missing_names() {
         let params = vec![
             Param::PosOnly(None, any_type(), Required::Required),
-            Param::VarArg(None, any_type()),
+            Param::Varargs(None, any_type()),
         ];
 
         assert!(Transaction::<'static>::param_name_for_positional_argument(&params, 0).is_none());
@@ -662,7 +730,7 @@ mod tests {
     fn duplicate_vararg_hints_are_not_emitted() {
         let params = vec![
             Param::Pos(Name::new_static("s"), any_type(), Required::Required),
-            Param::VarArg(Some(Name::new_static("args")), any_type()),
+            Param::Varargs(Some(Name::new_static("args")), any_type()),
             Param::KwOnly(Name::new_static("a"), any_type(), Required::Required),
         ];
 

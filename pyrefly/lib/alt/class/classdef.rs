@@ -10,10 +10,9 @@ use std::sync::Arc;
 use dupe::Dupe;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_types::callable::Callable;
+use pyrefly_types::quantified::Quantified;
 use pyrefly_types::special_form::SpecialForm;
-use pyrefly_types::types::Union;
 use ruff_python_ast::Identifier;
-use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::name::Name;
 use starlark_map::small_map::SmallMap;
 
@@ -25,17 +24,18 @@ use crate::alt::types::class_bases::ClassBases;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
 use crate::alt::types::class_metadata::EnumMetadata;
+use crate::binding::binding::ClassDefData;
 use crate::binding::binding::KeyAbstractClassCheck;
 use crate::binding::binding::KeyClassBaseType;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyClassMetadata;
 use crate::binding::binding::KeyClassMro;
+use crate::binding::binding::KeyClassSubscriptSymmetry;
 use crate::error::collector::ErrorCollector;
 use crate::types::callable::Param;
 use crate::types::callable::Required;
 use crate::types::class::Class;
 use crate::types::class::ClassDefIndex;
-use crate::types::class::ClassFieldProperties;
 use crate::types::class::ClassType;
 use crate::types::types::TParams;
 use crate::types::types::Type;
@@ -52,7 +52,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             Type::SelfType(ty_cls) | Type::ClassType(ty_cls) => {
                 self.has_superclass(ty_cls.class_object(), class)
             }
-            Type::Union(box Union { members: xs, .. }) => xs
+            Type::Union(f) => f
+                .members
                 .iter()
                 .all(|x| self.is_compatible_constructor_return(x, class)),
             _ => false,
@@ -62,9 +63,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn class_definition(
         &self,
         def_index: ClassDefIndex,
-        x: &StmtClassDef,
+        x: &ClassDefData,
         parent: &NestingContext,
-        fields: SmallMap<Name, ClassFieldProperties>,
         tparams_require_binding: bool,
         errors: &ErrorCollector,
     ) -> Class {
@@ -80,7 +80,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             parent.dupe(),
             self.module().dupe(),
             precomputed_tparams,
-            fields,
         )
     }
 
@@ -89,7 +88,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         def_index: ClassDefIndex,
         name: &Identifier,
         parent: &NestingContext,
-        fields: &SmallMap<Name, ClassFieldProperties>,
     ) -> Class {
         Class::new(
             def_index,
@@ -97,7 +95,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             parent.dupe(),
             self.module().dupe(),
             Some(Arc::new(TParams::default())),
-            fields.clone(),
         )
     }
 
@@ -106,9 +103,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .unwrap_or_else(|| Arc::new(ClassMetadata::recursive()))
     }
 
+    pub fn shaped_array_shape_for_class(&self, cls: &Class) -> Option<Quantified> {
+        // Shaped-array registration is explicit per class, via the `@shaped_array` decorator.
+        self.get_metadata_for_class(cls)
+            .shaped_array_shape()
+            .cloned()
+    }
+
+    pub fn shaped_array_shape_for_class_type(&self, cls: &ClassType) -> Option<Quantified> {
+        self.shaped_array_shape_for_class(cls.class_object())
+    }
+
     pub fn get_abstract_members_for_class(&self, cls: &Class) -> Arc<AbstractClassMembers> {
         self.get_from_class(cls, &KeyAbstractClassCheck(cls.index()))
             .unwrap_or_else(|| Arc::new(AbstractClassMembers::recursive()))
+    }
+
+    pub fn get_subscript_symmetry_for_class(&self, cls: &Class) -> Arc<bool> {
+        self.get_from_class(cls, &KeyClassSubscriptSymmetry(cls.index()))
+            .unwrap_or_else(|| Arc::new(true))
     }
 
     pub fn get_base_types_for_class(&self, cls: &Class) -> Arc<ClassBases> {
@@ -122,10 +135,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     }
 
     pub fn get_class_field_map(&self, cls: &Class) -> SmallMap<Name, Arc<ClassField>> {
-        let fields = cls.fields();
-        let mut map = SmallMap::with_capacity(fields.len());
+        let Some(class_fields) = self.get_class_fields(cls) else {
+            return SmallMap::new();
+        };
+        let mut map = SmallMap::with_capacity(class_fields.len());
 
-        for name in fields {
+        for name in class_fields.names() {
             let key = KeyClassField(cls.index(), name.clone());
             if let Some(field) = self.get_from_class(cls, &key) {
                 map.insert(name.clone(), field);
@@ -140,24 +155,49 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
     pub fn unwrap_class_object_silently(&self, ty: &Type) -> Option<(TParams, Type)> {
         match ty {
-            Type::ClassDef(c) if c.is_builtin("tuple") => Some(self.instantiate_type_var_tuple()),
+            Type::ClassDef(c) if c.is_builtin("tuple") => Some(self.instantiate_unbounded_tuple()),
             Type::ClassDef(c) => Some(((*self.get_class_tparams(c)).clone(), self.instantiate(c))),
-            Type::TypeAlias(ta) => self.unwrap_class_object_silently(&ta.as_value(self.stdlib)),
+            Type::TypeAlias(ta) => {
+                self.unwrap_class_object_silently(&self.get_type_alias(ta).as_value(self.stdlib))
+            }
             // Note that for the purposes of type narrowing, we always unwrap Type::Type(Type::ClassType),
             // but it's not always a valid argument to isinstance/issubclass. expr_infer separately checks
             // whether the argument is valid.
-            Type::Type(box ty @ (Type::ClassType(_) | Type::Quantified(_) | Type::SelfType(_))) => {
-                Some((TParams::empty(), ty.clone()))
+            Type::Type(f)
+                if matches!(
+                    &**f,
+                    Type::ClassType(_) | Type::Quantified(_) | Type::SelfType(_)
+                ) =>
+            {
+                Some((TParams::empty(), (**f).clone()))
             }
-            Type::Type(box Type::Tuple(_)) => Some(self.instantiate_type_var_tuple()),
-            Type::Type(box Type::Any(a)) => Some((TParams::empty(), a.propagate())),
-            Type::Type(box Type::SpecialForm(SpecialForm::Callable)) => Some((
+            Type::Type(f) if matches!(&**f, Type::Tuple(_)) => {
+                Some(self.instantiate_unbounded_tuple())
+            }
+            Type::Type(f) if let Type::Any(a) = &**f => Some((TParams::empty(), a.propagate())),
+            // type[type[Any]] is what we get when `type` appears in an annotation position.
+            // We treat it as type[Any].
+            Type::Type(f) if matches!(&**f, Type::Type(inner) if inner.is_any()) => {
+                Some((TParams::empty(), (**f).clone()))
+            }
+            Type::Type(f) if matches!(&**f, Type::SpecialForm(SpecialForm::Callable)) => Some((
                 TParams::empty(),
-                Type::Callable(Box::new(Callable::ellipsis(Type::any_implicit()))),
+                self.heap
+                    .mk_callable_from(Callable::ellipsis(self.heap.mk_any_implicit())),
             )),
-            Type::None | Type::Type(box Type::None) => Some((TParams::empty(), Type::None)),
-            Type::ClassType(cls) if cls.is_builtin("type") => {
-                Some((TParams::empty(), Type::any_implicit()))
+            Type::None => Some((TParams::empty(), self.heap.mk_none())),
+            Type::Type(f) if matches!(&**f, Type::None) => {
+                Some((TParams::empty(), self.heap.mk_none()))
+            }
+            // Instances of `type` subclasses are class objects too, so metaclass-narrowed
+            // values remain valid inputs to isinstance()/issubclass().
+            Type::ClassType(cls)
+                if self.has_superclass(
+                    cls.class_object(),
+                    self.stdlib.builtins_type().class_object(),
+                ) =>
+            {
+                Some((TParams::empty(), self.heap.mk_any_implicit()))
             }
             Type::Any(_) => Some((TParams::empty(), ty.clone())),
             _ => None,
@@ -185,6 +225,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn as_superclass(&self, class: &ClassType, want: &Class) -> Option<ClassType> {
         if class.class_object() == want {
             Some(class.clone())
+        } else if !class.class_object().is_builtin("tuple")
+            && let Some(tuple) = self.as_tuple(class)
+            && self.has_superclass(self.stdlib.tuple_object(), want)
+        {
+            // NamedTuple subclasses support precise tuple operations via `as_tuple`, but their
+            // nominal base-class hierarchy still flows through `NamedTupleFallback`, whose tuple
+            // ancestor is `tuple[Any, ...]`. Route tuple-related superclass lookups through an
+            // erased tuple class so assignability to Sequence/Iterable/etc. uses the actual
+            // element types instead of `Any`.
+            let tuple_class = self.erase_tuple_type(tuple);
+            self.as_superclass(&tuple_class, want)
         } else {
             self.get_ancestor(class.class_object(), want)
                 .map(|ancestor| ancestor.substitute_with(&class.substitution()))

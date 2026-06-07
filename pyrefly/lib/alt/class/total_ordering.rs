@@ -16,7 +16,6 @@ use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::binding::binding::KeyClassField;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::types::class::Class;
 
 // https://github.com/python/cpython/blob/a8ec511900d0d84cffbb4ee6419c9a790d131129/Lib/functools.py#L173
@@ -40,9 +39,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             unreachable!("Unexpected rich comparison method: {}", cmp);
         };
         // The first field in the conversion order is the one that we will use to synthesize the method.
+        let class_fields = self.get_class_fields(cls);
         for other_cmp in conversion_order {
-            let other_cmp_field = cls.fields().find(|f| **f == *other_cmp);
-            if other_cmp_field.is_some()
+            let has_field = class_fields.is_some_and(|f| f.contains(other_cmp));
+            if has_field
                 && let Some(other_cmp_field) =
                     self.get_from_class(cls, &KeyClassField(cls.index(), other_cmp.clone()))
             {
@@ -62,16 +62,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         if !metadata.is_total_ordering() {
             return None;
         }
+        let class_fields = self.get_class_fields(cls);
         // The class must have one of the rich comparison dunder methods defined
-        if !cls
-            .fields()
-            .any(|f| *f == dunder::LT || *f == dunder::LE || *f == dunder::GT || *f == dunder::GE)
-        {
+        if !class_fields.is_some_and(|f| {
+            f.names().any(|f| {
+                *f == dunder::LT || *f == dunder::LE || *f == dunder::GT || *f == dunder::GE
+            })
+        }) {
             let total_ordering_metadata = metadata.total_ordering_metadata().unwrap();
             self.error(
                 errors,
                 total_ordering_metadata.location,
-                ErrorInfo::Kind(ErrorKind::MissingAttribute),
+                ErrorKind::MissingAttribute,
                 format!(
                     "Class `{}` must define at least one of the rich comparison methods.",
                     cls.name()
@@ -81,7 +83,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
         let rich_cmps_to_synthesize: Vec<_> = dunder::RICH_CMPS_TOTAL_ORDERING
             .iter()
-            .filter(|cmp| !cls.contains(cmp))
+            .filter(|cmp| !class_fields.is_some_and(|f| f.contains(cmp)))
             .collect();
         let mut fields = SmallMap::with_capacity(rich_cmps_to_synthesize.len());
         for cmp in rich_cmps_to_synthesize {

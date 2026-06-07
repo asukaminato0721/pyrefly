@@ -10,17 +10,21 @@ use std::mem;
 
 use dupe::Dupe;
 use pyrefly_config::error_kind::ErrorKind;
+use pyrefly_python::ignore::Tool;
+use pyrefly_util::lined_buffer::LineNumber;
 use pyrefly_util::lock::Mutex;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
-use vec1::Vec1;
+use starlark_map::small_map::SmallMap;
 
 use crate::config::error::ErrorConfig;
 use crate::config::error_kind::Severity;
-use crate::error::context::ErrorInfo;
+use crate::error::context::ErrorContext;
 use crate::error::error::Error;
+use crate::error::error::ErrorQuickFix;
 use crate::error::style::ErrorStyle;
 use crate::module::module_info::ModuleInfo;
+use crate::state::errors::find_containing_range;
 
 #[derive(Debug, Default, Clone)]
 struct ModuleErrors {
@@ -78,6 +82,19 @@ impl ModuleErrors {
         self.items.len()
     }
 
+    fn len_hard(&mut self) -> usize {
+        self.cleanup();
+        self.items
+            .iter()
+            .filter(|err| !err.error_kind().is_soft())
+            .count()
+    }
+
+    fn has_hard(&mut self) -> bool {
+        self.cleanup();
+        self.items.iter().any(|err| !err.error_kind().is_soft())
+    }
+
     /// Iterates over all errors, including ignored ones.
     fn iter(&mut self) -> impl ExactSizeIterator<Item = &Error> {
         self.cleanup();
@@ -87,8 +104,14 @@ impl ModuleErrors {
 
 #[derive(Debug, Default)]
 pub struct CollectedErrors {
-    /// Errors that will be reported to the user.
-    pub shown: Vec<Error>,
+    /// Ordinary diagnostics (errors, warnings, info) that passed severity and
+    /// suppression filters. These participate in baseline exclusion,
+    /// suppression, and min-severity filtering.
+    pub ordinary: Vec<Error>,
+    /// Directive diagnostics (e.g. `reveal_type`) that are always displayed to
+    /// the user. Directives are never subject to baseline exclusion,
+    /// suppression, or min-severity filtering.
+    pub directives: Vec<Error>,
     /// Errors that are suppressed with inline ignore comments.
     pub suppressed: Vec<Error>,
     /// Errors that are disabled with configuration options.
@@ -115,44 +138,52 @@ impl ErrorCollector {
         }
     }
 
+    pub fn is_active(&self) -> bool {
+        self.style != ErrorStyle::Never
+    }
+
     pub fn extend(&self, other: ErrorCollector) {
-        if self.style != ErrorStyle::Never {
+        if self.is_active() {
             self.errors.lock().extend(other.errors.into_inner());
         }
     }
 
-    pub fn add(&self, range: TextRange, info: ErrorInfo, mut msg: Vec1<String>) {
-        if self.style == ErrorStyle::Never {
-            return;
+    /// Start building an error. Returns a no-op builder if style is Never.
+    pub fn error_builder(
+        &self,
+        range: TextRange,
+        kind: ErrorKind,
+        header: String,
+    ) -> ErrorBuilder<'_> {
+        ErrorBuilder {
+            collector: self,
+            active: self.is_active(),
+            range,
+            kind,
+            header,
+            details: Vec::new(),
+            context: None,
+            annotations: Vec::new(),
+            quick_fixes: Vec::new(),
         }
-        let (kind, ctx) = match info {
-            ErrorInfo::Context(ctx) => {
-                let ctx = ctx();
-                (ctx.as_error_kind(), Some(ctx))
-            }
-            ErrorInfo::Kind(kind) => (kind, None),
-        };
-        if let Some(ctx) = ctx {
-            msg.insert(0, ctx.format());
-        }
-        let err = Error::new(self.module_info.dupe(), range, msg, kind);
-        self.errors.lock().push(err);
     }
 
-    pub fn internal_error(&self, range: TextRange, mut msg: Vec1<String>) {
-        msg.push(
-            "Sorry, Pyrefly encountered an internal error, this is always a bug in Pyrefly itself"
-                .to_owned(),
-        );
-        if cfg!(fbcode_build) {
-            msg.push("Please report the bug at https://fb.workplace.com/groups/pyreqa".to_owned());
-        } else {
-            msg.push(
-                "Please report the bug at https://github.com/facebook/pyrefly/issues/new"
+    pub fn internal_error(&self, range: TextRange, header: String) {
+        self.error_builder(range, ErrorKind::InternalError, header)
+            .with_detail(
+                "Sorry, Pyrefly encountered an internal error, \
+                 this is always a bug in Pyrefly itself"
                     .to_owned(),
-            );
-        }
-        self.add(range, ErrorInfo::Kind(ErrorKind::InternalError), msg);
+            )
+            .with_detail(
+                if cfg!(fbcode_build) {
+                    "Please report the bug at https://fb.workplace.com/groups/pyreqa"
+                } else {
+                    "Please report the bug at https://github.com/facebook/pyrefly/issues/new"
+                }
+                .to_owned(),
+            )
+            .emit();
     }
 
     pub fn module(&self) -> &ModuleInfo {
@@ -171,17 +202,85 @@ impl ErrorCollector {
         self.errors.lock().len()
     }
 
-    pub fn collect_into(&self, error_config: &ErrorConfig, result: &mut CollectedErrors) {
+    /// Count of errors excluding soft diagnostics (which should not
+    /// influence overload selection or type-inference decisions).
+    pub fn len_hard(&self) -> usize {
+        self.errors.lock().len_hard()
+    }
+
+    /// Whether any hard (non-soft) errors exist. Short-circuits on the first match.
+    pub fn has_hard(&self) -> bool {
+        self.errors.lock().has_hard()
+    }
+
+    /// Checks whether an error is suppressed, considering ignore-all directives,
+    /// per-line suppressions, and (for errors inside multi-line f/t-strings)
+    /// suppressions on the f-string's start or end lines.
+    fn is_error_suppressed(
+        err: &Error,
+        fstring_ranges: &[(LineNumber, LineNumber)],
+        ignore_all: &SmallMap<Tool, LineNumber>,
+        error_config: &ErrorConfig,
+    ) -> bool {
+        // Check whole-file ignore-all directives first.
+        // UnusedIgnore errors cannot be suppressed to prevent infinite loops.
+        if err.error_kind() != ErrorKind::UnusedIgnore
+            && error_config
+                .enabled_ignores
+                .iter()
+                .any(|tool| ignore_all.contains_key(tool))
+        {
+            return true;
+        }
+        if err.is_ignored(&error_config.enabled_ignores) {
+            return true;
+        }
+        // Check if the error is inside a multi-line f/t-string. If so, a
+        // suppression that covers the f-string's start or end line should also apply.
+        let line = err.display_range().start.line_within_file();
+        if let Some((fs_start, fs_end)) = find_containing_range(fstring_ranges, line) {
+            let ignore = err.module().ignore();
+            let enabled = &error_config.enabled_ignores;
+            // Check both this kind's name and any parent kind's name.
+            for kind in err.error_kind().suppression_names() {
+                if fs_start != line && ignore.is_ignored(fs_start, kind, enabled) {
+                    return true;
+                }
+                if fs_end != line && ignore.is_ignored(fs_end, kind, enabled) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn collect_into(
+        &self,
+        error_config: &ErrorConfig,
+        fstring_ranges: &[(LineNumber, LineNumber)],
+        ignore_all: &SmallMap<Tool, LineNumber>,
+        result: &mut CollectedErrors,
+    ) {
         let mut errors = self.errors.lock();
         if !(self.module_info.is_generated() && error_config.ignore_errors_in_generated_code) {
             for err in errors.iter() {
-                if err.is_ignored(&error_config.enabled_ignores) {
+                if err.error_kind().is_directive() {
+                    // Directives bypass suppression, baseline, and
+                    // min-severity, but still respect explicit severity
+                    // overrides (e.g. --ignore reveal-type).
+                    let severity = error_config.display_config.severity(err.error_kind());
+                    if severity == Severity::Ignore {
+                        result.disabled.push(err.clone());
+                    } else {
+                        result.directives.push(err.with_severity(severity));
+                    }
+                } else if Self::is_error_suppressed(err, fstring_ranges, ignore_all, error_config) {
                     result.suppressed.push(err.clone());
                 } else {
                     match error_config.display_config.severity(err.error_kind()) {
-                        Severity::Error => result.shown.push(err.with_severity(Severity::Error)),
-                        Severity::Warn => result.shown.push(err.with_severity(Severity::Warn)),
-                        Severity::Info => result.shown.push(err.with_severity(Severity::Info)),
+                        Severity::Error => result.ordinary.push(err.with_severity(Severity::Error)),
+                        Severity::Warn => result.ordinary.push(err.with_severity(Severity::Warn)),
+                        Severity::Info => result.ordinary.push(err.with_severity(Severity::Info)),
                         Severity::Ignore => result.disabled.push(err.clone()),
                     }
                 }
@@ -191,8 +290,99 @@ impl ErrorCollector {
 
     pub fn collect(&self, error_config: &ErrorConfig) -> CollectedErrors {
         let mut result = CollectedErrors::default();
-        self.collect_into(error_config, &mut result);
+        self.collect_into(error_config, &[], &SmallMap::new(), &mut result);
         result
+    }
+}
+
+/// A builder for constructing and emitting errors incrementally.
+/// Chain decoration methods and call `.emit()` to push the error into the collector.
+#[must_use = "errors are not emitted until .emit() is called"]
+pub struct ErrorBuilder<'a> {
+    collector: &'a ErrorCollector,
+    active: bool,
+    range: TextRange,
+    kind: ErrorKind,
+    header: String,
+    details: Vec<String>,
+    context: Option<ErrorContext>,
+    annotations: Vec<(TextRange, String)>,
+    quick_fixes: Vec<ErrorQuickFix>,
+}
+
+impl ErrorBuilder<'_> {
+    /// Append a detail line (shown indented below the header).
+    pub fn with_detail(mut self, msg: String) -> Self {
+        if self.active {
+            self.details.push(msg);
+        }
+        self
+    }
+
+    /// Convenience method to append multiple detail lines.
+    pub fn with_details(mut self, details: Vec<String>) -> Self {
+        if self.active {
+            self.details.extend(details);
+        }
+        self
+    }
+
+    /// Add a secondary labeled span.
+    pub fn with_annotation(mut self, range: TextRange, label: String) -> Self {
+        if self.active {
+            self.annotations.push((range, label));
+        }
+        self
+    }
+
+    /// Add a structured quick fix.
+    pub fn with_quick_fix(mut self, fix: ErrorQuickFix) -> Self {
+        if self.active {
+            self.quick_fixes.push(fix);
+        }
+        self
+    }
+
+    /// Set the ErrorContext. At emit time, the context's message becomes the header
+    /// (demoting the original header to first detail), its annotations are prepended,
+    /// and the ErrorKind is overridden. If called more than once, the last context wins.
+    /// `with_context(None)` clears the context.
+    pub fn with_context(mut self, ctx: Option<impl FnOnce() -> ErrorContext>) -> Self {
+        if self.active {
+            self.context = ctx.map(|ctx| ctx());
+        }
+        self
+    }
+
+    /// Emit the error into the collector.
+    pub fn emit(self) {
+        if !self.active {
+            return;
+        }
+        let (mut kind, mut header, mut details, mut annotations) =
+            (self.kind, self.header, self.details, self.annotations);
+        if let Some(ctx) = self.context {
+            kind = ctx.as_error_kind();
+            details.insert(0, header);
+            header = ctx.format();
+            let mut ctx_annotations = ctx.annotations();
+            ctx_annotations.extend(annotations);
+            annotations = ctx_annotations;
+        }
+        let mut err = Error::new(
+            self.collector.module_info.dupe(),
+            self.range,
+            header,
+            details,
+            kind,
+        );
+        for (range, label) in annotations {
+            err = err.with_annotation(range, label);
+        }
+        for fix in self.quick_fixes {
+            err = err.with_quick_fix(fix);
+        }
+        self.collector.errors.lock().push(err);
     }
 }
 
@@ -209,7 +399,6 @@ mod tests {
     use pyrefly_util::prelude::SliceExt;
     use ruff_python_ast::name::Name;
     use ruff_text_size::TextSize;
-    use vec1::vec1;
 
     use super::*;
     use crate::config::error::ErrorDisplayConfig;
@@ -217,7 +406,7 @@ mod tests {
     use crate::config::error_kind::Severity;
 
     fn add(errors: &ErrorCollector, range: TextRange, kind: ErrorKind, msg: String) {
-        errors.add(range, ErrorInfo::Kind(kind), vec1![msg]);
+        errors.error_builder(range, kind, msg).emit();
     }
 
     #[test]
@@ -265,7 +454,7 @@ mod tests {
                     false,
                     Tool::default_enabled(),
                 ))
-                .shown
+                .ordinary
                 .map(|x| x.msg()),
             vec!["b", "a", "a"]
         );
@@ -318,7 +507,7 @@ mod tests {
         let config = ErrorConfig::new(&display_config, false, Tool::default_enabled());
 
         assert_eq!(
-            errors.collect(&config).shown.map(|x| x.msg()),
+            errors.collect(&config).ordinary.map(|x| x.msg()),
             vec!["a", "b", "d"]
         );
     }
@@ -340,10 +529,19 @@ mod tests {
 
         let display_config = ErrorDisplayConfig::default();
         let config0 = ErrorConfig::new(&display_config, false, Tool::default_enabled());
-        assert_eq!(errors.collect(&config0).shown.map(|x| x.msg()), vec!["a"]);
+        assert_eq!(
+            errors.collect(&config0).ordinary.map(|x| x.msg()),
+            vec!["a"]
+        );
 
         let config1 = ErrorConfig::new(&display_config, true, Tool::default_enabled());
-        assert!(errors.collect(&config1).shown.map(|x| x.msg()).is_empty());
+        assert!(
+            errors
+                .collect(&config1)
+                .ordinary
+                .map(|x| x.msg())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -373,7 +571,7 @@ mod tests {
                     false,
                     Tool::default_enabled(),
                 ))
-                .shown
+                .ordinary
                 .map(|x| x.msg()),
             vec!["Overload", "A specific error"]
         );

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 use dupe::Dupe;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
-use pyrefly_python::module_path::ModulePathBuf;
 use pyrefly_python::module_path::ModuleStyle;
+use pyrefly_util::interned_path::InternedPath;
 use pyrefly_util::lock::RwLock;
 use pyrefly_util::telemetry::TelemetrySourceDbRebuildInstanceStats;
 use pyrefly_util::watch_pattern::WatchPattern;
@@ -49,8 +49,8 @@ impl Serialize for Target {
 
 impl<'de> Deserialize<'de> for Target {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s: &str = Deserialize::deserialize(deserializer)?;
-        Ok(Self::from_string(s.to_owned()))
+        let s: String = Deserialize::deserialize(deserializer)?;
+        Ok(Self::from_string(s))
     }
 }
 
@@ -108,6 +108,13 @@ pub trait SourceDatabase: Send + Sync + fmt::Debug {
     /// Get the Handles for modules that should be checked. Used when targets are
     /// specified with the sourcedb.
     fn modules_to_check(&self) -> Vec<Handle>;
+    /// Return whether this source database may contain `module`.
+    ///
+    /// Implementations should return `true` unless they can cheaply and exactly
+    /// prove the module is absent.
+    fn may_contain_module(&self, _module: ModuleName) -> bool {
+        true
+    }
     /// Find the given module in the sourcedb, given the module it's originating from.
     fn lookup(
         &self,
@@ -128,15 +135,15 @@ pub trait SourceDatabase: Send + Sync + fmt::Debug {
     /// related to this sourcedb should be invalidated.
     fn query_source_db(
         &self,
-        files: SmallSet<ModulePathBuf>,
+        files: SmallSet<InternedPath>,
         force: bool,
     ) -> (anyhow::Result<bool>, TelemetrySourceDbRebuildInstanceStats);
     /// The source database-related configuration files a watcher should wait for
     /// changes on. Changes to one of these returned watchfiles should force
     /// a sourcedb rebuild.
-    fn get_paths_to_watch(&self) -> SmallSet<WatchPattern<'_>>;
+    fn get_paths_to_watch(&self) -> SmallSet<WatchPattern>;
     /// Get the target for the given [`ModulePath`], if one exists.
     fn get_target(&self, origin: Option<&Path>) -> Option<Target>;
     /// Get any generated files for which we might have to override the config finder.
-    fn get_generated_files(&self) -> SmallSet<ModulePathBuf>;
+    fn get_generated_files(&self) -> SmallSet<InternedPath>;
 }

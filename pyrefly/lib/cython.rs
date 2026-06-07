@@ -230,17 +230,17 @@ fn cvar_def_type_and_names(node: Node<'_>, source: &str) -> Option<(String, Vec<
     let type_node = maybe_typed_name.child_by_field_name("type")?;
     let type_name = node_text(source, Some(type_node))?;
     let mut names = Vec::new();
-    if let Some(name_node) = maybe_typed_name.child_by_field_name("name") {
-        if let Some(name) = node_text(source, Some(name_node)) {
-            names.push(name);
-        }
+    if let Some(name_node) = maybe_typed_name.child_by_field_name("name")
+        && let Some(name) = node_text(source, Some(name_node))
+    {
+        names.push(name);
     }
     let mut child_cursor = node.walk();
     for child in node.children(&mut child_cursor) {
-        if child.kind() == "identifier" {
-            if let Some(name) = node_text(source, Some(child)) {
-                names.push(name);
-            }
+        if child.kind() == "identifier"
+            && let Some(name) = node_text(source, Some(child))
+        {
+            names.push(name);
         }
     }
     names.sort();
@@ -256,10 +256,10 @@ fn cvar_decl_names(node: Node<'_>, source: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            if let Some(name) = node_text(source, Some(child)) {
-                names.push(name);
-            }
+        if child.kind() == "identifier"
+            && let Some(name) = node_text(source, Some(child))
+        {
+            names.push(name);
         }
     }
     names.sort();
