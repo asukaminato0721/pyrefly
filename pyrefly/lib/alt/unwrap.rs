@@ -53,7 +53,11 @@ impl<'a, 'b> HintRef<'a, 'b> {
 
     fn split(t: &'b Type) -> &'b [Type] {
         match t {
-            Type::Union(u) => u.members.as_slice(),
+            Type::Union(u) => u
+                .members
+                .iter()
+                .find(|member| member.is_any())
+                .map_or(u.members.as_slice(), slice::from_ref),
             _ => slice::from_ref(t),
         }
     }
@@ -64,6 +68,29 @@ impl<'a, 'b> HintRef<'a, 'b> {
 
     pub fn errors(&self) -> Option<&ErrorCollector> {
         self.1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::types::AnyStyle;
+    use crate::types::types::Type;
+
+    use super::HintRef;
+
+    #[test]
+    fn hint_ref_splits_union() {
+        let hint = Type::union(vec![Type::None, Type::Ellipsis]);
+
+        assert_eq!(HintRef::soft(&hint).types().len(), 2);
+    }
+
+    #[test]
+    fn hint_ref_simplifies_union_with_any() {
+        let any = Type::Any(AnyStyle::Explicit);
+        let hint = Type::union(vec![Type::None, any.clone(), Type::Ellipsis]);
+
+        assert_eq!(HintRef::soft(&hint).types(), std::slice::from_ref(&any));
     }
 }
 
