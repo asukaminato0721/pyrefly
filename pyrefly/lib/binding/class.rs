@@ -395,6 +395,9 @@ impl<'a> BindingsBuilder<'a> {
             });
         }
         let bases: Arc<[BaseClass]> = Arc::from(bases.into_boxed_slice());
+        let has_direct_named_tuple_base = bases
+            .iter()
+            .any(|base| matches!(base, BaseClass::NamedTuple(..)));
 
         self.insert_binding_idx(
             class_indices.base_type_idx,
@@ -429,6 +432,7 @@ impl<'a> BindingsBuilder<'a> {
             class_indices.clone(),
             x.name.clone(),
             has_protocol_base,
+            has_direct_named_tuple_base,
         ));
         // Record the class body range for solve-time `typing.Self` resolution.
         // We use the body extent (first..last stmt) — not `x.range` — so

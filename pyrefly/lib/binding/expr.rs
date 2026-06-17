@@ -934,10 +934,19 @@ impl<'a> BindingsBuilder<'a> {
                                 kw,
                             );
                         }
+                        let current_method_and_class = self.scopes.current_method_and_class();
+                        if let Some((_, _, true)) = &current_method_and_class {
+                            self.error(
+                                call_range,
+                                ErrorKind::InvalidSuperCall,
+                                "`super` calls are not supported in NamedTuple class methods"
+                                    .to_owned(),
+                            );
+                        }
                         let nargs = call.arguments.args.len();
                         let style = if nargs == 0 {
-                            match self.scopes.current_method_and_class() {
-                                Some((method, class_idx)) => {
+                            match current_method_and_class {
+                                Some((method, class_idx, _)) => {
                                     SuperStyle::ImplicitArgs(class_idx, method)
                                 }
                                 None => {

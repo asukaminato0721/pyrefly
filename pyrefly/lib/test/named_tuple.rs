@@ -41,6 +41,27 @@ del p[0]  # E: Cannot delete item in `Pair`
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/3763
+testcase!(
+    test_named_tuple_super,
+    r#"
+from typing import NamedTuple
+
+class Pair(NamedTuple):
+    x: int
+
+    def method(self):
+        super()  # E: `super` calls are not supported in NamedTuple class methods
+
+    def explicit_method(self):
+        super(Pair, self)  # E: `super` calls are not supported in NamedTuple class methods
+
+class Child(Pair):
+    def method(self):
+        super()
+    "#,
+);
+
 testcase!(
     test_named_tuple_functional_attr_types,
     r#"

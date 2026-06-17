@@ -988,16 +988,23 @@ struct ScopeClass {
     attributes_from_recognized_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
     attributes_from_other_methods: SmallMap<Name, SmallMap<Name, InstanceAttribute>>,
     has_protocol_base: bool,
+    has_direct_named_tuple_base: bool,
 }
 
 impl ScopeClass {
-    pub fn new(name: Identifier, indices: ClassIndices, has_protocol_base: bool) -> Self {
+    pub fn new(
+        name: Identifier,
+        indices: ClassIndices,
+        has_protocol_base: bool,
+        has_direct_named_tuple_base: bool,
+    ) -> Self {
         Self {
             name,
             indices,
             attributes_from_recognized_methods: SmallMap::new(),
             attributes_from_other_methods: SmallMap::new(),
             has_protocol_base,
+            has_direct_named_tuple_base,
         }
     }
 
@@ -1336,11 +1343,17 @@ impl Scope {
         indices: ClassIndices,
         name: Identifier,
         has_protocol_base: bool,
+        has_direct_named_tuple_base: bool,
     ) -> Self {
         Self::new(
             range,
             FlowBarrier::AllowFlowChecked,
-            ScopeKind::Class(ScopeClass::new(name, indices, has_protocol_base)),
+            ScopeKind::Class(ScopeClass::new(
+                name,
+                indices,
+                has_protocol_base,
+                has_direct_named_tuple_base,
+            )),
         )
     }
 
@@ -2884,27 +2897,32 @@ impl Scopes {
         field_definitions
     }
 
-    /// Return a pair Some((method_name, class_key)) if we are currently in a method
-    /// (if we are in nested classes, we'll get the innermost).
+    /// Return the current method, enclosing class, and whether the class directly
+    /// inherits from `NamedTuple`, if we are currently in a method.
     ///
     /// Used to resolve `super()` behaviors.
-    pub fn current_method_and_class(&self) -> Option<(Identifier, Idx<KeyClass>)> {
+    pub fn current_method_and_class(&self) -> Option<(Identifier, Idx<KeyClass>, bool)> {
         let mut method_name = None;
-        let mut class_key = None;
+        let mut class_info = None;
         for scope in self.iter_rev() {
             match &scope.kind {
                 ScopeKind::Method(method_scope) => {
                     method_name = Some(method_scope.name.clone());
                 }
                 ScopeKind::Class(class_scope) if method_name.is_some() => {
-                    class_key = Some(class_scope.indices.class_idx);
+                    class_info = Some((
+                        class_scope.indices.class_idx,
+                        class_scope.has_direct_named_tuple_base,
+                    ));
                     break;
                 }
                 _ => {}
             }
         }
-        match (method_name, class_key) {
-            (Some(method_name), Some(class_key)) => Some((method_name, class_key)),
+        match (method_name, class_info) {
+            (Some(method_name), Some((class_key, has_direct_named_tuple_base))) => {
+                Some((method_name, class_key, has_direct_named_tuple_base))
+            }
             _ => None,
         }
     }
