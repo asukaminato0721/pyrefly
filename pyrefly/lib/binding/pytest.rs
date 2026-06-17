@@ -146,6 +146,20 @@ impl PytestBindingInfo {
         Some(None)
     }
 
+    pub fn visible_fixture_return_type_key(
+        &self,
+        name: &Name,
+        class_key: Option<&Idx<KeyClass>>,
+    ) -> Option<&ShortIdentifier> {
+        let defs = self.fixtures.get(name)?;
+        if let Some(class_key) = class_key
+            && let Some(return_type_key) = defs.classes.get(class_key)
+        {
+            return Some(return_type_key);
+        }
+        defs.module.as_ref()
+    }
+
     pub fn is_fixture_definition(
         &self,
         func_name: &ruff_python_ast::Identifier,

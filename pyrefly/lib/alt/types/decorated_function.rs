@@ -21,6 +21,7 @@ use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::callable::Deprecation;
 use pyrefly_types::callable::FuncDefIndex;
+use pyrefly_types::callable::IdentityIgnored;
 use pyrefly_types::callable::Param;
 use pyrefly_types::class::Class;
 use pyrefly_types::keywords::TypeMap;
@@ -36,6 +37,7 @@ use crate::alt::answers::Answers;
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::binding::binding::FunctionStubOrImpl;
+use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyDecoratedFunction;
 use crate::binding::bindings::Bindings;
 use crate::types::callable::FuncMetadata;
@@ -54,6 +56,7 @@ pub struct UndecoratedFunction {
     pub paramspec: Option<Quantified>,
     pub stub_or_impl: FunctionStubOrImpl,
     pub defining_cls: Option<Class>,
+    pub class_key: IdentityIgnored<Option<Idx<KeyClass>>>,
     /// Maps parameter names to their resolved types - used to connect
     /// FunctionParameter and KeyUndecoratedFunction.
     pub resolved_param_types: SmallMap<Name, Type>,
@@ -125,6 +128,7 @@ impl UndecoratedFunction {
             paramspec: None,
             stub_or_impl: FunctionStubOrImpl::Stub,
             defining_cls: None,
+            class_key: IdentityIgnored(None),
             resolved_param_types: SmallMap::new(),
         }
     }

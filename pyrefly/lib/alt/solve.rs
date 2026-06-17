@@ -4155,10 +4155,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .resolved_param_types
                     .get(param_name)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        // Fallback to Any for safety, though this should never happen
-                        self.heap.mk_any_implicit()
-                    });
+                    .unwrap_or_else(|| unreachable!("unannotated parameter type was not resolved"));
                 finalize(target, ty)
             }
         }

@@ -1793,8 +1793,9 @@ fn env_pytest() -> TestEnv {
         "pytest",
         "pytest.pyi",
         r#"
-from typing import NoReturn
+from typing import Any, Callable, NoReturn
 def fail(x: str) -> NoReturn: ...
+def fixture(func: Callable[..., Any]) -> Callable[..., Any]: ...
 "#,
     );
     t
@@ -1812,6 +1813,59 @@ def test_oops() -> None:
     except:
         pytest.fail("execution stops here")
     assert val, "oops"
+"#,
+);
+
+testcase!(
+    test_pytest_fixture_parameter_type,
+    env_pytest(),
+    r#"
+import pytest
+from typing import assert_type, Literal
+
+@pytest.fixture
+def x():
+    return 1
+
+def test_x(x) -> None:
+    assert_type(x, Literal[1])
+"#,
+);
+
+testcase!(
+    test_pytest_fixture_parameter_type_in_fixture,
+    env_pytest(),
+    r#"
+import pytest
+from typing import assert_type, Literal
+
+@pytest.fixture
+def x():
+    return 1
+
+@pytest.fixture
+def y(x):
+    assert_type(x, Literal[1])
+    return x
+
+def test_y(y) -> None:
+    assert_type(y, Literal[1])
+"#,
+);
+
+testcase!(
+    test_pytest_fixture_parameter_type_ignores_regular_function,
+    env_pytest(),
+    r#"
+import pytest
+from typing import assert_type, Any
+
+@pytest.fixture
+def x():
+    return 1
+
+def not_a_test(x) -> None:
+    assert_type(x, Any)
 "#,
 );
 

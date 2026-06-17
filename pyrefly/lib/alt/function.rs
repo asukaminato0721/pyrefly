@@ -59,6 +59,7 @@ use crate::alt::types::decorated_function::SpecialDecorator;
 use crate::alt::types::decorated_function::UndecoratedFunction;
 use crate::alt::unwrap::HintRef;
 use crate::binding::binding::Binding;
+use crate::binding::binding::BindingClass;
 use crate::binding::binding::FunctionDefData;
 use crate::binding::binding::FunctionParameter;
 use crate::binding::binding::FunctionStubOrImpl;
@@ -256,6 +257,35 @@ impl DecoratorParamHints {
 }
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    fn is_pytest_test_class(&self, class_key: Option<&Idx<KeyClass>>) -> bool {
+        let Some(class_key) = class_key else {
+            return true;
+        };
+        match self.bindings().get(*class_key) {
+            BindingClass::ClassDef(class) => class.def.name.id.as_str().starts_with("Test"),
+            BindingClass::FunctionalClassDef(_, name, _) => name.id.as_str().starts_with("Test"),
+        }
+    }
+
+    fn pytest_fixture_param_type(
+        &self,
+        def: &FunctionDefData,
+        class_key: Option<&Idx<KeyClass>>,
+        param_name: &Identifier,
+    ) -> Option<Type> {
+        if param_name.id == "self" || param_name.id == "cls" {
+            return None;
+        }
+        let pytest_info = self.bindings().pytest_info()?;
+        let is_pytest_function = pytest_info.is_fixture_definition(&def.name, class_key)
+            || def.name.id.as_str().starts_with("test_") && self.is_pytest_test_class(class_key);
+        if !is_pytest_function {
+            return None;
+        }
+        let key = pytest_info.visible_fixture_return_type_key(&param_name.id, class_key)?;
+        Some(self.get(&Key::ReturnType(*key)).arc_clone_ty())
+    }
+
     fn decorator_param_hints(
         &self,
         decorators: &[(Type, TextRange)],
@@ -550,6 +580,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             &mut self_type,
             &mut decorator_param_hints,
             &mut parent_param_hints,
+            class_key,
             errors,
         );
         let mut tparams = self.scoped_type_params(def.type_params.as_deref(), errors);
@@ -636,6 +667,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             paramspec,
             stub_or_impl,
             defining_cls,
+            class_key: IdentityIgnored(class_key.copied()),
             resolved_param_types,
         })
     }
@@ -673,6 +705,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 continue;
             }
             if p.annotation().is_none() {
+                if self
+                    .pytest_fixture_param_type(stmt, def.class_key.as_ref(), p.name())
+                    .is_some()
+                {
+                    continue;
+                }
                 let name = p.name().as_str();
                 if !Ast::is_intentionally_unused(name) {
                     self.error(
@@ -1046,6 +1084,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         stub_or_impl: FunctionStubOrImpl,
         self_type: &mut Option<Type>,
         hint: Option<Type>,
+        fixture_type: Option<Type>,
         errors: &ErrorCollector,
     ) -> ParamTypeResult {
         // We only want to use self for the first param, so take & replace with None
@@ -1088,6 +1127,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Otherwise, it will be Any.
                 let ty = if let Some(ty) = self_type {
                     ty.clone()
+                } else if let Some(ty) = fixture_type {
+                    ty
                 } else if let Some(hint) = hint {
                     hint.clone()
                 } else if let Required::Optional(Some(default_val)) = &required {
@@ -1122,6 +1163,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self_type: &mut Option<Type>,
         decorator_param_hints: &mut Option<DecoratorParamHints>,
         parent_param_hints: &mut Option<ParentParamHints>,
+        class_key: Option<&Idx<KeyClass>>,
         errors: &ErrorCollector,
     ) -> FunctionParamsResult {
         let mut paramspec_args = None;
@@ -1149,6 +1191,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 stub_or_impl,
                 self_type,
                 decorator_hint.or(parent_hint),
+                self.pytest_fixture_param_type(def, class_key, &x.parameter.name),
                 errors,
             );
             if is_unannotated {
@@ -1183,6 +1226,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 stub_or_impl,
                 self_type,
                 decorator_hint.or(parent_hint),
+                self.pytest_fixture_param_type(def, class_key, &x.parameter.name),
                 errors,
             );
             if is_unannotated {
@@ -1227,6 +1271,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 stub_or_impl,
                 &mut None,
                 parent_hint,
+                None,
                 errors,
             );
             if is_unannotated {
@@ -1264,6 +1309,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 stub_or_impl,
                 self_type,
                 parent_hint,
+                self.pytest_fixture_param_type(def, class_key, &x.parameter.name),
                 errors,
             );
             if is_unannotated {
@@ -1283,6 +1329,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 stub_or_impl,
                 self_type,
                 parent_hint,
+                None,
                 errors,
             );
             if is_unannotated {
