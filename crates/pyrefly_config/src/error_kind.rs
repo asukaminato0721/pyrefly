@@ -239,6 +239,9 @@ pub enum ErrorKind {
     InvalidSyntax,
     /// An error related to type alias usage or definition.
     InvalidTypeAlias,
+    /// `TYPE_CHECKING` was assigned a value other than `False`, or annotated
+    /// with a type that cannot accept `bool`.
+    InvalidTypeCheckingConstant,
     /// An error caused by incorrect usage or definition of a TypeVar.
     InvalidTypeVar,
     /// An error caused by incorrect usage or definition of a TypeVarTuple.

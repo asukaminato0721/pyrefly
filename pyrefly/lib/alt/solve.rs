@@ -3341,18 +3341,28 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             Some((style, k)) => {
                 let annot = self.get_idx(*k);
                 let annot_range = self.annotation_range(*k);
-                let tcc: &dyn Fn() -> TypeCheckContext = &|| {
-                    TypeCheckContext::of_kind(match style {
-                        AnnotationStyle::Direct => TypeCheckKind::AnnAssign,
-                        AnnotationStyle::ForwardedInitial | AnnotationStyle::Forwarded => {
-                            TypeCheckKind::AnnotatedName(name.clone())
-                        }
-                    })
-                    .with_annotation(annot_range, "declared type".to_owned())
-                };
                 let annot_ty = annot.ty(self.heap, self.stdlib);
-                let hint = annot_ty.as_ref().map(|t| (t, tcc));
-                let expr_ty = self.expr_check(expr, hint, errors);
+                let expr_ty = if Self::is_type_checking_constant_name(name) {
+                    self.check_type_checking_constant_assignment(
+                        annot_ty.as_ref(),
+                        annot_range,
+                        expr,
+                        errors,
+                    );
+                    self.expr_check(expr, None, errors)
+                } else {
+                    let tcc: &dyn Fn() -> TypeCheckContext = &|| {
+                        TypeCheckContext::of_kind(match style {
+                            AnnotationStyle::Direct => TypeCheckKind::AnnAssign,
+                            AnnotationStyle::ForwardedInitial | AnnotationStyle::Forwarded => {
+                                TypeCheckKind::AnnotatedName(name.clone())
+                            }
+                        })
+                        .with_annotation(annot_range, "declared type".to_owned())
+                    };
+                    let hint = annot_ty.as_ref().map(|t| (t, tcc));
+                    self.expr_check(expr, hint, errors)
+                };
                 let ty = if style == &AnnotationStyle::Direct {
                     // For direct assignments, user-provided annotation takes
                     // precedence over inferred expr type.
@@ -3378,7 +3388,57 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // `x = ...` in a stub file means that the type of `x` is unknown
                 (None, self.heap.mk_any_implicit())
             }
-            None => (None, self.expr_check(expr, None, errors)),
+            None => {
+                if Self::is_type_checking_constant_name(name) {
+                    self.check_type_checking_constant_assignment(None, None, expr, errors);
+                }
+                (None, self.expr_check(expr, None, errors))
+            }
+        }
+    }
+
+    fn is_type_checking_constant_name(name: &Name) -> bool {
+        name.as_str() == "TYPE_CHECKING"
+    }
+
+    fn check_type_checking_constant_assignment(
+        &self,
+        annot_ty: Option<&Type>,
+        annot_range: Option<TextRange>,
+        expr: &Expr,
+        errors: &ErrorCollector,
+    ) {
+        self.check_type_checking_constant_annotation(
+            annot_ty,
+            annot_range.unwrap_or_else(|| expr.range()),
+            errors,
+        );
+        if !matches!(expr, Expr::BooleanLiteral(x) if !x.value) {
+            self.error(
+                errors,
+                expr.range(),
+                ErrorKind::InvalidTypeCheckingConstant,
+                "`TYPE_CHECKING` must be assigned `False`".to_owned(),
+            );
+        }
+    }
+
+    fn check_type_checking_constant_annotation(
+        &self,
+        annot_ty: Option<&Type>,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) {
+        if let Some(annot_ty) = annot_ty {
+            let bool_ty = self.heap.mk_class_type(self.stdlib.bool().clone());
+            if !self.is_subset_eq(&bool_ty, annot_ty) {
+                self.error(
+                    errors,
+                    range,
+                    ErrorKind::InvalidTypeCheckingConstant,
+                    "Annotation for `TYPE_CHECKING` must be assignable from `bool`".to_owned(),
+                );
+            }
         }
     }
 
@@ -5282,6 +5342,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             },
             Binding::AnnotatedType(ann, val) => {
                 let annot = self.get_idx(*ann);
+                if let AnnotationTarget::Assign(name, _) = &annot.target
+                    && Self::is_type_checking_constant_name(name)
+                {
+                    self.check_type_checking_constant_annotation(
+                        annot.ty(self.heap, self.stdlib).as_ref(),
+                        self.bindings().idx_to_key(*ann).range(),
+                        errors,
+                    );
+                }
                 // `Binding::AnnotatedType` is the active binding for annotation-only declarations
                 // (`x: Final[int]`).  Fire the "must be initialized" error unless the name is
                 // subsequently initialized via a non-annotated assignment (tuple unpacking, walrus,

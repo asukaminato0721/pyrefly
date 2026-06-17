@@ -942,6 +942,18 @@ x = 2
 Bad: TypeAlias = x
 ```
 
+## invalid-type-checking-constant
+
+This error is raised when `TYPE_CHECKING` is assigned a value other than
+`False`, or when its annotation cannot accept `bool`. Type checkers treat
+`TYPE_CHECKING` as true, so a local runtime definition must be exactly `False`
+and any annotation must be compatible with both runtime and type-checking uses.
+
+```python
+TYPE_CHECKING: str = ""  # Invalid `TYPE_CHECKING` annotation [invalid-type-checking-constant]
+TYPE_CHECKING = True  # `TYPE_CHECKING` must be assigned `False` [invalid-type-checking-constant]
+```
+
 ## invalid-type-var
 
 An error caused by incorrect usage or definition of a TypeVar. A few examples:

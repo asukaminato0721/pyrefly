@@ -150,6 +150,40 @@ assert_type(Z1(), str)
 );
 
 testcase!(
+    test_typechecking_constant_assignment,
+    r#"
+from typing import Literal
+
+def ok1():
+    TYPE_CHECKING = False
+
+def ok2():
+    TYPE_CHECKING: bool = False
+
+def ok3():
+    TYPE_CHECKING: object = False
+
+def bad_value1():
+    TYPE_CHECKING = True  # E: `TYPE_CHECKING` must be assigned `False`
+
+def bad_value2():
+    TYPE_CHECKING = ""  # E: `TYPE_CHECKING` must be assigned `False`
+
+def bad_annotation1():
+    TYPE_CHECKING: str = False  # E: Annotation for `TYPE_CHECKING` must be assignable from `bool`
+
+def bad_annotation2():
+    TYPE_CHECKING: Literal[False] = False  # E: Annotation for `TYPE_CHECKING` must be assignable from `bool`
+
+def bad_bare_annotation():
+    TYPE_CHECKING: str  # E: Annotation for `TYPE_CHECKING` must be assignable from `bool`
+
+def bad_annotation_and_value():
+    TYPE_CHECKING: str = ""  # E: Annotation for `TYPE_CHECKING` must be assignable from `bool`  # E: `TYPE_CHECKING` must be assigned `False`
+"#,
+);
+
+testcase!(
     test_typechecking_with_pyrefly_constant,
     TestEnv::one("foo", "TYPE_CHECKING_WITH_PYREFLY: bool = False"),
     r#"
