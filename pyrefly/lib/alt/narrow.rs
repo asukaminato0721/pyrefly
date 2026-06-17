@@ -56,7 +56,9 @@ use crate::binding::narrow::NarrowSource;
 use crate::binding::narrow::NarrowingSubject;
 use crate::error::collector::ErrorCollector;
 use crate::error::style::ErrorStyle;
+use crate::types::callable::Callable;
 use crate::types::callable::FunctionKind;
+use crate::types::callable::Params;
 use crate::types::class::ClassType;
 use crate::types::lit_int::LitInt;
 use crate::types::literal::Lit;
@@ -102,6 +104,16 @@ fn extend_facet_chain(resolved_chain: Option<&FacetChain>, facet: FacetKind) -> 
         }
         None => Vec1::new(facet),
     }
+}
+
+fn materialize_top_level_callable_params(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    ty.transform_toplevel_callable(&mut |callable: &mut Callable| {
+        if matches!(callable.params, Params::Ellipsis) {
+            callable.params = Params::Materialization;
+        }
+    });
+    ty
 }
 
 /// Beyond this size, don't try and narrow an enum.
@@ -1436,7 +1448,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     );
                     if let Type::TypeIs(t) = ret {
                         return self.distribute_over_union(&t, |right| {
-                            self.intersect_with_fallback(ty, right, &|| {
+                            let narrowed = self.intersect_with_fallback(ty, right, &|| {
                                 // TODO: falling back to Never when the lhs is a union is a hack to get
                                 // reasonable behavior in cases like this:
                                 //     def f(x: int | Callable[[], int]):
@@ -1453,7 +1465,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 } else {
                                     (*t).clone()
                                 }
-                            })
+                            });
+                            if !ty.is_toplevel_callable()
+                                && right.is_toplevel_callable()
+                                && narrowed == *right
+                            {
+                                materialize_top_level_callable_params(right)
+                            } else {
+                                narrowed
+                            }
                         });
                     }
                 }
