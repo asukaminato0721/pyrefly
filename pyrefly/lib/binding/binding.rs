@@ -137,7 +137,7 @@ assert_bytes!(BindingClassSynthesizedFields, 4);
 assert_bytes!(BindingLegacyTypeParam, 16);
 assert_words!(BindingYield, 4);
 assert_words!(BindingYieldFrom, 4);
-assert_words!(BindingDecorator, 13);
+assert_words!(BindingDecorator, 14);
 assert_bytes!(BindingDecoratedFunction, 20);
 assert_words!(BindingUndecoratedFunction, 20);
 
@@ -425,6 +425,7 @@ impl AnyExportedKey {
             AnyExportedKey::KeyClassMetadata(k) => ChangedExport::ClassDefIndex(k.0),
             AnyExportedKey::KeyDjangoRelations(_) => ChangedExport::DjangoRelations,
             AnyExportedKey::KeyClassMro(k) => ChangedExport::ClassDefIndex(k.0),
+            AnyExportedKey::KeyClassDisjointBase(k) => ChangedExport::ClassDefIndex(k.0),
             AnyExportedKey::KeyAbstractClassCheck(k) => ChangedExport::ClassDefIndex(k.0),
             AnyExportedKey::KeyClassSubscriptSymmetry(k) => ChangedExport::ClassDefIndex(k.0),
             AnyExportedKey::KeyTypeAlias(k) => ChangedExport::TypeAliasIndex(k.0),
