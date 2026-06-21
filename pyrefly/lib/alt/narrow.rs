@@ -590,10 +590,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         self.distribute_over_union(left, |l| {
             self.with_fresh_class_info_target(l, right, |right| {
                 if right.is_any() {
-                    // This is essentially `isinstance(..., Any)`, which gives no useful narrowing information.
-                    // We currently emit `left & Any` directly with `left` as the fallback to land on the middle
-                    // ground between strictness and gradualness. Subject to future behavioral adjustments.
-                    intersect(vec![l.clone(), right], l.clone(), self.heap)
+                    // An unknown class object (e.g. `type[Any]`) shouldn't widen the subject.
+                    l.clone()
                 } else {
                     // TODO: falling back to Never when the lhs is a union is a hack to get
                     // reasonable behavior in cases like this:
@@ -706,6 +704,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     continue;
                 }
                 if let Some((tparams, right)) = self.unwrap_class_info_target(&result, right) {
+                    if right.is_any() {
+                        continue;
+                    }
                     let (vs, right) = self
                         .solver()
                         .fresh_quantified(&tparams, right, self.uniques);
