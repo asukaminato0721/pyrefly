@@ -1792,6 +1792,8 @@ pub enum FunctionStubOrImpl {
 pub struct BindingDecorator {
     pub expr: Expr,
     pub trailing_name: Option<Name>,
+    /// Metadata decorators are consumed during binding and must not replace the class object.
+    pub is_class_metadata: bool,
 }
 
 impl DisplayWith<Bindings> for BindingDecorator {
