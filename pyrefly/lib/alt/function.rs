@@ -53,6 +53,7 @@ use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use starlark_map::small_map::Entry;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 use vec1::Vec1;
@@ -261,6 +262,7 @@ impl ParentParamHints {
 #[derive(Clone, Debug)]
 struct DecoratorParamHints {
     positional: Vec<Type>,
+    by_name: SmallMap<Name, Type>,
     next_positional: usize,
 }
 
@@ -291,12 +293,46 @@ impl DecoratorParamHints {
                 } else {
                     Some(Self {
                         positional,
+                        by_name: SmallMap::new(),
                         next_positional: 0,
                     })
                 }
             }
             _ => None,
         }
+    }
+
+    fn from_named(by_name: SmallMap<Name, Type>) -> Option<Self> {
+        if by_name.is_empty() {
+            None
+        } else {
+            Some(Self {
+                positional: Vec::new(),
+                by_name,
+                next_positional: 0,
+            })
+        }
+    }
+
+    fn merge<Ans: LookupAnswer>(&mut self, other: Self, solver: &AnswersSolver<'_, '_, Ans>) {
+        self.positional.extend(other.positional);
+        for (name, ty) in other.by_name {
+            match self.by_name.entry(name) {
+                Entry::Occupied(mut entry) => {
+                    let old = entry.get().clone();
+                    *entry.get_mut() = solver.union(old, ty);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(ty);
+                }
+            }
+        }
+    }
+
+    fn take(&mut self, name: &Identifier) -> Option<Type> {
+        self.by_name
+            .shift_remove(&name.id)
+            .or_else(|| self.next_positional())
     }
 
     fn next_positional(&mut self) -> Option<Type> {
@@ -590,6 +626,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             calls_super_method,
             ..Default::default()
         };
+        let pytest_param_hints = self
+            .pytest_parametrize_parameter_types(decorators, errors)
+            .and_then(DecoratorParamHints::from_named);
         let mut found_class_property = false;
         let decorators =
             Box::from_iter(decorators.iter().enumerate().filter_map(|(position, k)| {
@@ -632,6 +671,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }));
 
         let mut decorator_param_hints = self.decorator_param_hints(&decorators);
+        if let Some(pytest_hints) = pytest_param_hints {
+            if let Some(hints) = &mut decorator_param_hints {
+                hints.merge(pytest_hints, self);
+            } else {
+                decorator_param_hints = Some(pytest_hints);
+            }
+        }
         let mut parent_param_hints = if flags.is_override {
             defining_cls.as_ref().and_then(|cls| {
                 self.inherited_method_signature(cls, &def.name.id).and_then(
@@ -1698,7 +1744,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         params.extend(def.parameters.posonlyargs.iter().map(|x| {
             let decorator_hint = decorator_param_hints
                 .as_mut()
-                .and_then(|hint| hint.next_positional());
+                .and_then(|hint| hint.take(&x.parameter.name));
             let parent_hint = if self_type.is_some() {
                 None
             } else {
@@ -1732,7 +1778,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         params.extend(def.parameters.args.iter().map(|x| {
             let decorator_hint = decorator_param_hints
                 .as_mut()
-                .and_then(|hint| hint.next_positional());
+                .and_then(|hint| hint.take(&x.parameter.name));
             let parent_hint = if self_type.is_some() {
                 None
             } else {
@@ -1818,6 +1864,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             );
         }
         params.extend(def.parameters.kwonlyargs.iter().map(|x| {
+            let decorator_hint = decorator_param_hints
+                .as_mut()
+                .and_then(|hint| hint.by_name.shift_remove(&x.parameter.name.id));
             let parent_hint = parent_param_hints
                 .as_mut()
                 .and_then(|hint| hint.take_kwonly(&x.parameter.name));
@@ -1830,7 +1879,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 x.default.as_deref(),
                 is_stub,
                 self_type,
-                parent_hint,
+                decorator_hint.or(parent_hint),
                 errors,
             );
             if is_unannotated {

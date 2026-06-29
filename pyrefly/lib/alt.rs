@@ -23,6 +23,7 @@ pub mod nn_module_specials;
 pub mod operators;
 pub mod overload;
 pub mod polars_specials;
+pub mod pytest;
 pub mod regex;
 pub mod regular_nested_list;
 pub mod shape_declarations;
