@@ -80,8 +80,8 @@ use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
 use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::classmethod::MethodReceiverKind;
-use crate::config::base::ClassDecoratorBehavior;
 use crate::binding::pytest::is_pytest_parametrize_decorator;
+use crate::config::base::ClassDecoratorBehavior;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -467,10 +467,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut columns = vec![Vec::new(); arity];
         for row in rows {
             if arity == 1 {
-                columns[0].push(
-                    self.expr_infer(row, &hint_errors)
-                        .promote_implicit_literals(self.stdlib),
-                );
+                columns[0].push(self.expr_infer(row, &hint_errors).promote(self.stdlib));
                 continue;
             }
             let elts = match row {
@@ -482,10 +479,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 return None;
             }
             for (column, elt) in columns.iter_mut().zip(elts) {
-                column.push(
-                    self.expr_infer(elt, &hint_errors)
-                        .promote_implicit_literals(self.stdlib),
-                );
+                column.push(self.expr_infer(elt, &hint_errors).promote(self.stdlib));
             }
         }
         columns
