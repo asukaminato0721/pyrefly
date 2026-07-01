@@ -77,6 +77,7 @@ use crate::binding::expr::Usage;
 use crate::binding::function::SelfAssignments;
 use crate::binding::narrow::ExcludedNonePair;
 use crate::binding::narrow::ExcludedNonePairs;
+use crate::binding::narrow::InitializationCondition;
 use crate::binding::narrow::NarrowOps;
 use crate::export::definitions::Definition;
 use crate::export::definitions::DefinitionStyle;
@@ -652,6 +653,9 @@ pub struct Flow {
     info: SmallMap<Name, FlowInfo>,
     /// Pairs for which the current flow excludes both values being `None`.
     excluded_none_pairs: ExcludedNonePairs,
+    guarded_initializations: Vec<GuardedInitialization>,
+    /// Names proven initialized by the guards active on every path to this flow.
+    initialized_by_guard: SmallSet<Name>,
     // Have we seen control flow terminate?
     //
     // We continue to analyze the rest of the code after a flow terminates, but
@@ -685,6 +689,7 @@ impl Flow {
         in_loop: bool,
     ) {
         self.excluded_none_pairs.invalidate(name.key());
+        self.invalidate_guarded_initializations(name.key());
         match self.info.entry_hashed(name.cloned()) {
             Entry::Vacant(e) => {
                 e.insert(FlowInfo::new_value(idx, style));
@@ -713,6 +718,12 @@ impl Flow {
 
     fn get_value_mut(&mut self, name: &Name) -> Option<&mut FlowValue> {
         self.info.get_mut(name)?.value_mut()
+    }
+
+    fn invalidate_guarded_initializations(&mut self, name: &Name) {
+        self.initialized_by_guard.shift_remove(name);
+        self.guarded_initializations
+            .retain(|fact| fact.name != *name && fact.condition.name != *name);
     }
 }
 
@@ -761,6 +772,14 @@ struct FlowInfo {
     /// - Always set to our current inferred type when a flow info is created
     /// - Updated whenever we update the inferred type outside of all loops, but not inside
     loop_prior: Idx<Key>,
+}
+
+/// A condition that guarantees initialization without changing the inferred type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GuardedInitialization {
+    condition: InitializationCondition,
+    condition_value: Idx<Key>,
+    name: Name,
 }
 
 /// The most recent value for a name. Used in several cases:
@@ -1478,7 +1497,7 @@ pub struct Scope {
     /// Depth of finally blocks we're in. Resets in new function scopes (PEP 765).
     finally_depth: usize,
     /// The first source position where relations cannot feed future cleanup or eager scopes.
-    excluded_none_pairs_start: TextSize,
+    relations_start: TextSize,
     /// Stack of active `with` bodies, recording whether each has encountered a live
     /// statement that may raise. Resets in new function scopes.
     with_may_raise: Vec<bool>,
@@ -1516,7 +1535,7 @@ impl Scope {
             has_future_annotations: false,
             variables: SmallMap::new(),
             finally_depth: 0,
-            excluded_none_pairs_start: TextSize::new(0),
+            relations_start: TextSize::new(0),
             with_may_raise: Vec::new(),
             try_fallbacks: Vec::new(),
             implicit_captures: SmallSet::new(),
@@ -2171,7 +2190,7 @@ impl Scopes {
             scope.shadowed_implicit_builtins = shadowed_implicit_builtins;
             scope.final_names = final_names;
             scope.final_string_values = final_string_values;
-            scope.excluded_none_pairs_start =
+            scope.relations_start =
                 last_finally_or_class.map_or(TextSize::new(0), |range| range.end());
             // Presize the flow, as its likely to need as much space as static.
             scope.flow.info.reserve(scope.stat.0.len());
@@ -2622,15 +2641,18 @@ impl Scopes {
     }
 
     /// Discard sequential relationships across paths with unknown intervening writes.
-    pub fn clear_excluded_none_pairs(&mut self) {
-        self.current_mut().flow.excluded_none_pairs = ExcludedNonePairs::default();
+    pub fn clear_relational_facts(&mut self) {
+        let flow = &mut self.current_mut().flow;
+        flow.excluded_none_pairs = ExcludedNonePairs::default();
+        flow.guarded_initializations.clear();
+        flow.initialized_by_guard.clear();
     }
 
     /// Record a false test's relationship for subsequent clauses and implicit fall-through.
     pub fn exclude_none_pair_in_fork_base(&mut self, pair: ExcludedNonePair, start: TextSize) {
         // Prevent materialized narrows from entering cleanup or eager nested scopes.
         // Blocking the enclosing statement also covers loop backedges.
-        if start < self.current().excluded_none_pairs_start {
+        if start < self.current().relations_start {
             return;
         }
         self.current_mut()
@@ -2738,6 +2760,7 @@ impl Scopes {
     pub fn mark_as_deleted(&mut self, name: &Name) {
         let scope = self.current_mut();
         scope.flow.excluded_none_pairs.invalidate(name);
+        scope.flow.invalidate_guarded_initializations(name);
         if let Some(value) = scope.flow.get_value_mut(name) {
             value.style = FlowStyle::Uninitialized;
         }
@@ -2780,6 +2803,78 @@ impl Scopes {
     /// Returns `None` if there is no active fork or the name is not in the base flow.
     pub fn current_fork_base_idx(&self, name: &Name) -> Option<Idx<Key>> {
         Some(self.current().forks.last()?.base.get_info(name)?.idx())
+    }
+
+    /// Record definite initialization under a simple, unchanged branch condition.
+    pub(crate) fn guarded_initializations_for_current_branch(
+        &self,
+        condition: &InitializationCondition,
+    ) -> Vec<GuardedInitialization> {
+        let scope = self.current();
+        let fork = scope
+            .forks
+            .last()
+            .expect("guarded initialization requires an active fork");
+        if scope.flow.has_terminated || fork.range.start() < scope.relations_start {
+            return Vec::new();
+        }
+        let Some(base_value) = fork.base.get_value(&condition.name) else {
+            return Vec::new();
+        };
+        let current_value = scope.flow.get_value(&condition.name);
+        if Some(base_value.idx) != current_value.map(|value| value.idx) {
+            return Vec::new();
+        }
+
+        scope
+            .flow
+            .info
+            .iter()
+            .filter_map(|(name, info)| {
+                if matches!(info.initialized(), InitializedInFlow::Yes)
+                    && !fork
+                        .base
+                        .get_info(name)
+                        .is_some_and(|base| matches!(base.initialized(), InitializedInFlow::Yes))
+                {
+                    Some(GuardedInitialization {
+                        condition: condition.clone(),
+                        condition_value: base_value.idx,
+                        name: name.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Add initialization facts after merging the branches that established them.
+    pub(crate) fn add_guarded_initializations(&mut self, facts: Vec<GuardedInitialization>) {
+        let flow = &mut self.current_mut().flow;
+        for fact in facts {
+            // A sibling branch can change the guard before control reaches the merge.
+            if flow
+                .get_value(&fact.condition.name)
+                .is_some_and(|value| value.idx == fact.condition_value)
+                && !flow.guarded_initializations.contains(&fact)
+            {
+                flow.guarded_initializations.push(fact);
+            }
+        }
+    }
+
+    /// Record proven initialization without changing assignment styles or types.
+    pub(crate) fn apply_guarded_initializations(
+        &mut self,
+        is_active: impl Fn(&InitializationCondition) -> bool,
+    ) {
+        let flow = &mut self.current_mut().flow;
+        for fact in &flow.guarded_initializations {
+            if is_active(&fact.condition) {
+                flow.initialized_by_guard.insert(fact.name.clone());
+            }
+        }
     }
 
     /// Copy walrus-defined names from the current branch flow into the fork's
@@ -3819,7 +3914,9 @@ impl Scopes {
                     && flow_barrier < FlowBarrier::BlockFlow
                     && !(usage.is_static() && is_class_overload)
                 {
-                    let initialized = if flow_barrier == FlowBarrier::AllowFlowUnchecked {
+                    let initialized = if flow_barrier == FlowBarrier::AllowFlowUnchecked
+                        || scope.flow.initialized_by_guard.contains_hashed(name)
+                    {
                         // Just assume the name is initialized without checking.
                         InitializedInFlow::Yes
                     } else {
@@ -4583,6 +4680,18 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             live_branches
         };
+        let mut guarded_initializations = Vec::new();
+        let mut initialized_by_guard = SmallSet::new();
+        if !merge_style.is_loop()
+            && let Some((first, rest)) = flows.split_first()
+        {
+            guarded_initializations = first.guarded_initializations.clone();
+            initialized_by_guard = first.initialized_by_guard.clone();
+            for flow in rest {
+                guarded_initializations.retain(|fact| flow.guarded_initializations.contains(fact));
+                initialized_by_guard.retain(|name| flow.initialized_by_guard.contains(name));
+            }
+        }
         // A plain `Loop` may skip its body entirely, so the pre-loop flow stays a possible
         // path past it. `LoopDefinitelyRuns` means the body runs at least once, so it does
         // not.
@@ -4667,6 +4776,8 @@ impl<'a> BindingsBuilder<'a> {
         let flow = Flow {
             info: merged_flow_infos,
             excluded_none_pairs,
+            guarded_initializations,
+            initialized_by_guard,
             has_terminated,
             terminated_by_raise: has_terminated && any_terminated_by_raise,
             is_definitely_unreachable: all_are_unreachable,
@@ -4685,6 +4796,8 @@ impl<'a> BindingsBuilder<'a> {
     ) -> Flow {
         // Sequential facts do not establish invariants across loop backedges.
         flow.excluded_none_pairs = ExcludedNonePairs::default();
+        flow.guarded_initializations.clear();
+        flow.initialized_by_guard.clear();
         for (name, info) in flow.info.iter_mut() {
             if exclude_names.contains(name) {
                 continue;
@@ -4717,7 +4830,9 @@ impl<'a> BindingsBuilder<'a> {
     /// variables that are unconditionally reassigned in `for` loop headers
     pub fn setup_loop(&mut self, range: TextRange, loop_header_targets: &SmallSet<Name>) {
         let finally_depth = self.scopes.finally_depth();
-        let base = mem::take(&mut self.scopes.current_mut().flow);
+        let mut base = mem::take(&mut self.scopes.current_mut().flow);
+        base.guarded_initializations.clear();
+        base.initialized_by_guard.clear();
         // To account for possible assignments to existing names in a loop, we
         // speculatively insert phi keys upfront.
         self.scopes.current_mut().flow =

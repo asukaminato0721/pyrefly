@@ -47,6 +47,7 @@ use crate::export::special::SpecialExport;
 use crate::module::module_info::ModuleInfo;
 use crate::types::facet::UnresolvedFacetChain;
 use crate::types::facet::UnresolvedFacetKind;
+use crate::types::literal::Lit;
 use crate::types::types::Type;
 
 assert_words!(AtomicNarrowOp, 9);
@@ -770,6 +771,125 @@ impl NarrowOp {
 
 #[derive(Clone, Debug, Default)]
 pub struct NarrowOps(pub SmallMap<Name, (NarrowOp, TextRange)>);
+
+/// A simple name test whose result can guard initialization of another local.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InitializationCondition {
+    pub name: Name,
+    test: InitializationTest,
+    positive: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum InitializationTest {
+    Truthy,
+    /// `None` represents the Python `None` literal.
+    Compare(CmpOp, Option<Lit>),
+}
+
+impl InitializationTest {
+    /// Extract a comparison without retaining its source expression.
+    fn from_comparison(op: CmpOp, literal: &Expr) -> Option<Self> {
+        let literal = match op {
+            CmpOp::Eq | CmpOp::NotEq | CmpOp::Lt | CmpOp::LtE | CmpOp::Gt | CmpOp::GtE => {
+                match literal {
+                    Expr::NoneLiteral(_) => None,
+                    Expr::BooleanLiteral(x) => Some(Lit::Bool(x.value)),
+                    Expr::NumberLiteral(ExprNumberLiteral {
+                        value: Number::Int(x),
+                        ..
+                    }) => Some(Lit::from_int(x)),
+                    Expr::StringLiteral(x) => Some(Lit::from_string_literal(x)?),
+                    Expr::BytesLiteral(x) => Some(Lit::from_bytes_literal(x)?),
+                    _ => return None,
+                }
+            }
+            CmpOp::Is | CmpOp::IsNot => match literal {
+                Expr::NoneLiteral(_) => None,
+                Expr::BooleanLiteral(x) => Some(Lit::Bool(x.value)),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(Self::Compare(op, literal))
+    }
+}
+
+impl InitializationCondition {
+    /// Accept only bare names and comparisons against immutable literals.
+    pub fn from_test(expr: &Expr) -> Option<Self> {
+        match expr {
+            Expr::Name(name) => Some(Self {
+                name: name.id.clone(),
+                test: InitializationTest::Truthy,
+                positive: true,
+            }),
+            Expr::UnaryOp(ExprUnaryOp {
+                op: UnaryOp::Not,
+                operand,
+                ..
+            }) => Some(Self::from_test(operand)?.negate()),
+            Expr::Compare(ExprCompare { ops, operands, .. }) => {
+                let [op] = &ops[..] else {
+                    return None;
+                };
+                let [Expr::Name(name), literal] = &operands[..] else {
+                    return None;
+                };
+                Some(Self {
+                    name: name.id.clone(),
+                    test: InitializationTest::from_comparison(*op, literal)?,
+                    positive: true,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Check simple narrows, including guards established by short-circuit evaluation.
+    pub fn is_implied_by(&self, narrow_ops: &NarrowOps) -> bool {
+        narrow_ops
+            .0
+            .get(&self.name)
+            .is_some_and(|(op, _)| self.is_implied_by_op(op))
+    }
+
+    /// Require the guard on every alternative, or in at least one conjunct.
+    fn is_implied_by_op(&self, op: &NarrowOp) -> bool {
+        let op = match op {
+            NarrowOp::Atomic(None, op) => op,
+            NarrowOp::And(ops) => return ops.iter().any(|op| self.is_implied_by_op(op)),
+            NarrowOp::Or(ops) => {
+                return !ops.is_empty() && ops.iter().all(|op| self.is_implied_by_op(op));
+            }
+            _ => return false,
+        };
+        let (op, literal) = match op {
+            AtomicNarrowOp::IsTruthy => {
+                return self.test == InitializationTest::Truthy && self.positive;
+            }
+            AtomicNarrowOp::IsFalsy => {
+                return self.test == InitializationTest::Truthy && !self.positive;
+            }
+            AtomicNarrowOp::Eq(expr) => (CmpOp::Eq, expr),
+            AtomicNarrowOp::NotEq(expr) => (CmpOp::NotEq, expr),
+            AtomicNarrowOp::Is(expr) => (CmpOp::Is, expr),
+            AtomicNarrowOp::IsNot(expr) => (CmpOp::IsNot, expr),
+            _ => return false,
+        };
+        self.positive
+            && InitializationTest::from_comparison(op, literal)
+                .is_some_and(|test| self.test == test)
+    }
+
+    /// Return the condition that holds on the opposite branch.
+    pub fn negate(&self) -> Self {
+        Self {
+            positive: !self.positive,
+            ..self.clone()
+        }
+    }
+}
 
 /// A canonical pair of distinct names that cannot both be `None`.
 #[derive(Clone, Debug, PartialEq, Eq)]
