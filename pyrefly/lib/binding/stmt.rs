@@ -77,6 +77,7 @@ use crate::binding::expr::TypeExpressionContext;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::AtomicNarrowOp;
 use crate::binding::narrow::ExcludedNonePair;
+use crate::binding::narrow::InitializationCondition;
 use crate::binding::narrow::NarrowOp;
 use crate::binding::narrow::NarrowOps;
 use crate::binding::narrow::identifier_and_chain_prefix_for_expr;
@@ -1605,6 +1606,8 @@ impl<'a> BindingsBuilder<'a> {
                 // The `BranchTest` of the latest clause bound so far, which decides whether
                 // control reaches the next clause.
                 let mut previous_test = None;
+                let mut guarded_initializations = Vec::new();
+                let mut fall_through_condition = None;
                 let mut contains_environment_test_with_no_else = false;
                 let mut is_first_branch = true;
                 let mut following_runtime_only_branch = false;
@@ -1624,6 +1627,18 @@ impl<'a> BindingsBuilder<'a> {
                             Some(true)
                         }
                         Some(x) => self.sys_info.evaluate_bool(x),
+                    };
+                    // Only the first test and its direct `else` have a single guard.
+                    let initialization_condition = if is_first_branch {
+                        let condition = test.as_ref().and_then(InitializationCondition::from_test);
+                        fall_through_condition =
+                            condition.as_ref().map(InitializationCondition::negate);
+                        condition
+                    } else if test.is_none() {
+                        fall_through_condition.take()
+                    } else {
+                        fall_through_condition = None;
+                        None
                     };
                     // The first `if` test was already processed before the fork (above).
                     // Only process elif/else tests here, inside the branch.
@@ -1703,6 +1718,10 @@ impl<'a> BindingsBuilder<'a> {
                         .or(previous_test.map(|test| (test, false)));
                     previous_test = this_test.or(previous_test);
                     self.bind_narrow_ops(&new_narrow_ops, NarrowUseLocation::Span(range));
+                    if let Some(condition) = &initialization_condition {
+                        self.scopes
+                            .apply_guarded_initializations(|saved| saved == condition);
+                    }
                     negated_prev_ops.and_all(new_narrow_ops.negate());
                     let outer_environment_suite = self.environment_suite;
                     if after_environment_test {
@@ -1732,6 +1751,12 @@ impl<'a> BindingsBuilder<'a> {
                         && self.scopes.has_terminated()
                     {
                         contains_environment_test_with_no_else = true;
+                    }
+                    if let Some(condition) = &initialization_condition {
+                        guarded_initializations.extend(
+                            self.scopes
+                                .guarded_initializations_for_current_branch(condition),
+                        );
                     }
                     self.finish_branch();
                     if let Some(pair) = excluded_none_pair {
@@ -1810,6 +1835,8 @@ impl<'a> BindingsBuilder<'a> {
                     };
                     self.finish_non_exhaustive_fork(&negated_prev_ops, fall_through_key);
                 }
+                self.scopes
+                    .add_guarded_initializations(guarded_initializations);
                 // Preserve the configured-environment termination without treating it as
                 // universally unreachable. This keeps later bindings out of a dead branch
                 // while suppressing diagnostics that only apply to code live in this config.
@@ -1894,7 +1921,7 @@ impl<'a> BindingsBuilder<'a> {
                 let body_may_raise = self.scopes.exit_with();
                 if body_may_raise || contexts.len() > 1 {
                     // Suppression can bypass guards after an earlier write or exception.
-                    self.scopes.clear_excluded_none_pairs();
+                    self.scopes.clear_relational_facts();
                 }
                 // An exception raised in the body may be suppressed by the context
                 // manager, in which case control flow resumes after the `with`. That
@@ -1987,7 +2014,7 @@ impl<'a> BindingsBuilder<'a> {
             Stmt::Try(x) => {
                 self.scopes.enter_try();
                 // Handlers can observe writes made before an exception, not just entry values.
-                self.scopes.clear_excluded_none_pairs();
+                self.scopes.clear_relational_facts();
                 // A `finally` body that assigns attributes directly initializes them on the paths
                 // of the `return`s inside the statement too.
                 let before_try = self.scopes.finally_return_statuses(&x.finalbody);
