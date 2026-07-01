@@ -4596,7 +4596,7 @@ def f(a: bool) -> None:
     if a:
         print(b)
     if a:
-        print(b)  # E: `b` may be uninitialized
+        print(b)
     "#,
 );
 
