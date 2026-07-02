@@ -1296,7 +1296,7 @@ fn bind_class_attribute(
 }
 
 /// Return the type of making it bound, or if not, the unbound type.
-fn make_bound_method_helper(
+pub(super) fn make_bound_method_helper(
     heap: &TypeHeap,
     obj: Type,
     attr: Type,
@@ -3672,6 +3672,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         field: &ClassField,
         instance: &Instance,
     ) -> ClassAttribute {
+        if let Some(ty) = self.get_lru_cache_attribute(instance, field_name) {
+            return ClassAttribute::read_write(ty);
+        }
         // Special handling for `__new__`: because `__new__` is a static method, it can be called
         // with a `cls` argument that differs from the class on which it is accessed, so we use a
         // quantified to capture `cls`. Note that `__new__` is the only method that needs this
@@ -6315,9 +6318,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
-        if let Some(getter) = self.get_class_member(cls.class_object(), &dunder::GET) {
-            let attr =
-                self.as_instance_attribute(&dunder::GET, getter.as_ref(), &Instance::of_class(cls));
+        if let Some(attr) = self.get_instance_attribute(cls, &dunder::GET) {
             // `__get__` is bound and called like a method, never re-fed through the
             // descriptor protocol. If it is itself a descriptor, recursing here would
             // loop forever, so report no usable getter.

@@ -434,6 +434,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         };
 
+        if matches!(ty, Type::Overload(_))
+            && let Type::ClassType(cls) = def_ty
+            && cls.has_qname("functools", "_lru_cache_wrapper")
+            && let [_, _] = cls.targs().as_slice()
+        {
+            let mut wrapper = cls.clone();
+            if let Some(mut ret) = ty.callable_return_type(self.heap) {
+                ret.subst_mut_fn(&mut |q| Some(q.as_gradual_type()));
+                wrapper.targs_mut().as_mut()[0] = ret;
+            }
+            wrapper.targs_mut().as_mut()[1] = ty;
+            ty = self.heap.mk_class_type(wrapper);
+        }
+
         if let Some(metadata) = undecorated
             .metadata
             .flags
@@ -1888,6 +1902,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 original_decoratee.clone()
             }
+            Type::ClassType(cls) if cls.has_qname("functools", "_lru_cache_wrapper") => {
+                let mut cls = cls;
+                if let [_, callable] = cls.targs_mut().as_mut() {
+                    *callable = original_decoratee.clone();
+                }
+                self.heap.mk_class_type(cls)
+            }
+            Type::KwCall(call) if matches!(&call.return_ty, Type::ClassType(cls) if cls.has_qname("functools", "_lru_cache_wrapper")) => {
+                if original_decoratee.property_metadata().is_some() {
+                    original_decoratee.clone()
+                } else {
+                    let Type::ClassType(mut cls) = call.return_ty else {
+                        unreachable!("guarded by the cache wrapper return type")
+                    };
+                    if let [_, callable] = cls.targs_mut().as_mut() {
+                        *callable = original_decoratee.clone();
+                    }
+                    self.heap.mk_class_type(cls)
+                }
+            }
             // Heuristic for union-typed decorators (e.g. dual-use decorators that
             // can be applied with or without parentheses like @d or @d(flag)):
             //
@@ -2156,6 +2190,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> Vec1<(TextRange, OverloadType)> {
         ts.mapped(|(range, t, metadata)| {
+            let display_t = t.clone();
+            let t = if let Type::ClassType(cls) = &t
+                && cls.has_qname("functools", "_lru_cache_wrapper")
+                && let [_, callable] = cls.targs().as_slice()
+            {
+                callable.clone()
+            } else {
+                t
+            };
             (
                 range,
                 match t {
@@ -2207,7 +2250,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     format!(
                         "`{}` has type `{}` after decorator application, which is not callable",
                         func,
-                        self.for_display(t)
+                        self.for_display(display_t)
                     ),
                 );
                         OverloadType::Function(Function {
@@ -2285,6 +2328,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if Self::is_singledispatch_dispatcher(ty) {
             return;
         }
+        let ty = if let Type::ClassType(cls) = ty
+            && cls.has_qname("functools", "_lru_cache_wrapper")
+            && let [_, callable] = cls.targs().as_slice()
+        {
+            callable
+        } else {
+            ty
+        };
         let Ok((impl_sig, impl_tparams)) = ty.toplevel_callable_signatures().exactly_one() else {
             // If this is somehow not a callable (len == 0), there's nothing to check.
             // An overload's implementation can't be overloaded (len > 1).

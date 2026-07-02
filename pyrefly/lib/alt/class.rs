@@ -13,6 +13,7 @@ pub mod dataclass;
 pub mod django;
 pub mod enums;
 pub mod factory_boy;
+pub mod lru_cache;
 pub mod named_tuple;
 pub mod new_type;
 pub mod pydantic;

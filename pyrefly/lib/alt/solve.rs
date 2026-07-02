@@ -3613,6 +3613,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             None => ClassSynthesizedFields::default(),
             Some(cls) => {
                 let mut fields = ClassSynthesizedFields::default();
+                if let Some(new_fields) = self.get_lru_cache_synthesized_fields(cls) {
+                    fields = fields.combine(new_fields);
+                }
                 if let Some(registrations) = binding.nn_module_registrations.as_deref()
                     && let Some(new_fields) =
                         self.get_nn_module_synthesized_fields(cls, registrations)

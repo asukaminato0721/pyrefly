@@ -147,7 +147,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
 
-        self.finalize_class_tparams(name.range, tparams.into_iter().collect(), errors)
+        let mut tparams =
+            self.finalize_class_tparams(name.range, tparams.into_iter().collect(), errors);
+        self.add_lru_cache_type_param(name, &mut tparams);
+        tparams
     }
 
     /// The type parameters of a class, or `None` when it has none.
