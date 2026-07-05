@@ -47,4 +47,5 @@ suite('Extension Test Suite', () => {
 			await fs.rm(directory, {recursive: true, force: true});
 		}
 	});
+
 });

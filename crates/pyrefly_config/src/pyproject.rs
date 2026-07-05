@@ -6,14 +6,98 @@
  */
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::Context as _;
 use pyrefly_util::fs_anyhow;
+use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::config::ConfigFile;
+
+static DEPENDENCY_SPEC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\s*\[[^\]]+\])?\s*(.*)$")
+        .expect("dependency regex must be valid")
+});
+static EXACT_VERSION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\s*==\s*([^,;\s]+)").expect("version regex must be valid"));
+
+/// A dependency declaration at a byte range in a pyproject.toml file.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PyProjectDependency {
+    pub name: String,
+    pub configured_version: Option<String>,
+    pub range: Range<usize>,
+}
+
+/// Find the dependency declaration containing `offset` in standard dependency sections.
+pub fn dependency_at_offset(source: &str, offset: usize) -> Option<PyProjectDependency> {
+    let document = toml_edit::Document::parse(source).ok()?;
+    if let Some(project) = document.get("project").and_then(toml_edit::Item::as_table) {
+        if let Some(dependencies) = project
+            .get("dependencies")
+            .and_then(toml_edit::Item::as_array)
+            && let Some(dependency) = dependency_in_array(dependencies, source, offset)
+        {
+            return Some(dependency);
+        }
+        if let Some(groups) = project
+            .get("optional-dependencies")
+            .and_then(toml_edit::Item::as_table)
+        {
+            for (_, group) in groups {
+                if let Some(dependencies) = group.as_array()
+                    && let Some(dependency) = dependency_in_array(dependencies, source, offset)
+                {
+                    return Some(dependency);
+                }
+            }
+        }
+    }
+    if let Some(groups) = document
+        .get("dependency-groups")
+        .and_then(toml_edit::Item::as_table)
+    {
+        for (_, group) in groups {
+            if let Some(dependencies) = group.as_array()
+                && let Some(dependency) = dependency_in_array(dependencies, source, offset)
+            {
+                return Some(dependency);
+            }
+        }
+    }
+    None
+}
+
+fn dependency_in_array(
+    dependencies: &toml_edit::Array,
+    source: &str,
+    offset: usize,
+) -> Option<PyProjectDependency> {
+    for value in dependencies {
+        let span = value.span()?;
+        if offset < span.start || offset > span.end {
+            continue;
+        }
+        let spec = value.as_str()?;
+        let captures = DEPENDENCY_SPEC.captures(spec.trim())?;
+        let name = captures.get(1)?.as_str();
+        let literal = source.get(span.clone())?;
+        let name_start = span.start + literal.find(name)?;
+        return Some(PyProjectDependency {
+            name: name.to_owned(),
+            configured_version: EXACT_VERSION
+                .captures(captures.get(2)?.as_str())
+                .and_then(|captures| captures.get(1))
+                .map(|version| version.as_str().to_owned()),
+            range: name_start..name_start + name.len(),
+        });
+    }
+    None
+}
 
 /// Known Python tool names whose presence in `[tool.*]` indicates
 /// this directory is a Python project root.
@@ -136,6 +220,55 @@ mod tests {
     use pyrefly_util::globs::Globs;
 
     use super::*;
+
+    #[test]
+    fn find_project_dependency() {
+        let source = r#"[project]
+dependencies = ["requests==2.32.0"]
+"#;
+        let offset = source.find("requests").unwrap();
+        assert_eq!(
+            dependency_at_offset(source, offset),
+            Some(PyProjectDependency {
+                name: "requests".to_owned(),
+                configured_version: Some("2.32.0".to_owned()),
+                range: offset..offset + "requests".len(),
+            })
+        );
+    }
+
+    #[test]
+    fn find_dependency_groups() {
+        for source in [
+            r#"[project.optional-dependencies]
+dev = ["pytest>=8"]
+"#,
+            r#"[dependency-groups]
+dev = ["pytest>=8"]
+"#,
+        ] {
+            let offset = source.find("pytest").unwrap();
+            assert_eq!(
+                dependency_at_offset(source, offset),
+                Some(PyProjectDependency {
+                    name: "pytest".to_owned(),
+                    configured_version: None,
+                    range: offset..offset + "pytest".len(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn ignore_strings_outside_dependency_sections() {
+        let source = r#"[project]
+description = "requests"
+"#;
+        assert_eq!(
+            dependency_at_offset(source, source.find("requests").unwrap()),
+            None
+        );
+    }
 
     #[test]
     fn test_replace_existing_pyrefly_config() -> anyhow::Result<()> {

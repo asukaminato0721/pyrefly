@@ -6,11 +6,74 @@
  */
 
 use lsp_types::Url;
+use lsp_types::notification::DidChangeTextDocument;
+use lsp_types::notification::DidOpenTextDocument;
 use pyrefly_lsp_test::object_model::InitializeSettings;
 use pyrefly_lsp_test::object_model::LspInteraction;
 use serde_json::json;
 
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
+
+#[test]
+fn hover_pyproject_dependency() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("pyproject.toml");
+    let source = concat!(
+        "[project]\n",
+        "dependencies = [\"requests==2.32.0\"]\n",
+        "\n",
+        "[tool.pyrefly]\n",
+        "skip-interpreter-query = true\n",
+    );
+    std::fs::write(&path, source).unwrap();
+    let uri = Url::from_file_path(&path).unwrap();
+    let mut interaction = LspInteraction::new();
+    interaction.set_root(root.path().to_owned());
+    interaction
+        .initialize(InitializeSettings {
+            configuration: Some(None),
+            ..Default::default()
+        })
+        .unwrap();
+
+    interaction
+        .client
+        .send_notification::<DidOpenTextDocument>(json!({
+            "textDocument": {
+                "uri": uri.to_string(),
+                "languageId": "toml",
+                "version": 1,
+                "text": source,
+            }
+        }));
+    interaction
+        .client
+        .hover("pyproject.toml", 1, 18)
+        .expect_hover_response_with_markup(|value| {
+            value.is_some_and(|text| text == "Configured version: 2.32.0")
+        })
+        .unwrap();
+
+    let changed = source.replace("2.32.0", "2.33.0");
+    interaction
+        .client
+        .send_notification::<DidChangeTextDocument>(json!({
+            "textDocument": {
+                "uri": uri.to_string(),
+                "version": 2,
+            },
+            "contentChanges": [{"text": changed}],
+        }));
+    interaction
+        .client
+        .hover("pyproject.toml", 1, 18)
+        .expect_hover_response_with_markup(|value| {
+            value.is_some_and(|text| text == "Configured version: 2.33.0")
+        })
+        .unwrap();
+
+    interaction.shutdown().unwrap();
+}
 
 #[test]
 fn test_hover_basic() {

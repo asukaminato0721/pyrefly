@@ -35,6 +35,7 @@ export function registerHoverProvider(
         {scheme: 'untitled', language: 'python'},
         {scheme: 'vscode-notebook-cell', language: 'python'},
         {scheme: 'inmemory', language: 'python'},
+        {scheme: 'file', language: 'toml', pattern: '**/pyproject.toml'},
       ],
       ({
         async provideHover(

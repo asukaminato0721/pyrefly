@@ -163,7 +163,7 @@ export async function activate(context: ExtensionContext) {
   // Options to control the language client
   let clientOptions: LanguageClientOptions = {
     initializationOptions,
-    // Register the server for Python documents
+    // Register the server for documents it understands.
     documentSelector: [
       {scheme: 'file', language: 'python'},
       // Support for unsaved/untitled files
@@ -172,6 +172,7 @@ export async function activate(context: ExtensionContext) {
       {scheme: 'vscode-notebook-cell', language: 'python'},
       // Support for in-memory documents like the Positron Console
       {scheme: 'inmemory', language: 'python'},
+      {scheme: 'file', language: 'toml', pattern: '**/pyproject.toml'},
     ],
     // Support for notebooks
     // @ts-ignore

@@ -98,6 +98,13 @@ impl Interpreters {
         self.python_interpreter_path = Some(ConfigOrigin::lsp(interpreter));
     }
 
+    /// Return the resolved interpreter path, if interpreter discovery succeeded.
+    pub fn python_interpreter_path(&self) -> Option<&Path> {
+        self.python_interpreter_path
+            .as_deref()
+            .map(|path| path.as_path())
+    }
+
     /// Finds interpreters by searching in prioritized locations for the given project
     /// and interpreter settings.
     ///

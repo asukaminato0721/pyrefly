@@ -18,6 +18,7 @@ pub mod module_helpers;
 pub mod move_symbol_new_file;
 mod mru;
 pub mod protocol;
+mod pyproject_hover;
 pub mod queue;
 pub mod safe_delete_file;
 pub mod server;

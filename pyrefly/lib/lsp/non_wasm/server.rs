@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::hash_map::Entry;
+use std::fs;
 use std::hash::Hasher;
 use std::io::Write;
 use std::iter::once;
@@ -305,6 +306,10 @@ use crate::lsp::non_wasm::mru::CompletionMru;
 use crate::lsp::non_wasm::protocol::Message;
 use crate::lsp::non_wasm::protocol::Request;
 use crate::lsp::non_wasm::protocol::Response;
+use crate::lsp::non_wasm::pyproject_hover::PackageMetadata;
+use crate::lsp::non_wasm::pyproject_hover::dependency as pyproject_dependency;
+use crate::lsp::non_wasm::pyproject_hover::hover as make_pyproject_hover;
+use crate::lsp::non_wasm::pyproject_hover::package_metadata;
 use crate::lsp::non_wasm::queue::HeavyTaskQueue;
 use crate::lsp::non_wasm::queue::LspEvent;
 use crate::lsp::non_wasm::queue::LspQueue;
@@ -903,6 +908,9 @@ pub struct Server {
     /// should be mapped through here in case they correspond to a cell.
     open_notebook_cells: RwLock<HashMap<Url, PathBuf>>,
     open_files: RwLock<HashMap<PathBuf, Arc<LspFile>>>,
+    /// Open configuration documents are not Python modules and must not enter type checking.
+    open_pyproject_files: RwLock<HashMap<Url, (i32, String)>>,
+    package_metadata_cache: Mutex<HashMap<(PathBuf, String), PackageMetadata>>,
     /// Last published fingerprint for unversioned file-backed workspace diagnostics.
     published_workspace_diagnostics: Mutex<HashMap<Url, u64>>,
     /// Tracks URIs (including virtual/untitled ones) to synthetic on-disk paths so we can
@@ -1307,6 +1315,25 @@ fn client_uses_custom_hover_provider(initialization_params: &InitializeParams) -
         .and_then(|pyrefly| pyrefly.get("customHoverProvider"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn is_pyproject_uri(uri: &Url) -> bool {
+    uri.to_file_path()
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name == ConfigFile::PYPROJECT_FILE_NAME)
+        })
+        .unwrap_or(false)
+}
+
+fn normalize_package_name(name: &str) -> String {
+    name.chars()
+        .map(|character| match character {
+            '-' | '_' | '.' => '-',
+            character => character.to_ascii_lowercase(),
+        })
+        .collect()
 }
 
 pub fn capabilities(
@@ -1881,6 +1908,10 @@ impl Server {
                 self.set_file_stats(uri.clone(), telemetry_event);
                 if self.uris_pending_close.lock().contains_key(uri.path()) {
                     telemetry_event.canceled = true;
+                } else if is_pyproject_uri(&uri) {
+                    self.open_pyproject_files
+                        .write()
+                        .insert(uri, (version, text));
                 } else {
                     let contents = Arc::new(LspFile::from_source(text));
                     self.did_open(
@@ -1896,18 +1927,28 @@ impl Server {
             }
             LspEvent::DidChangeTextDocument(params) => {
                 self.set_file_stats(params.text_document.uri.clone(), telemetry_event);
-                self.text_document_did_change(
-                    ide_transaction_manager,
-                    subsequent_mutation,
-                    params,
-                    telemetry_event,
-                )?;
+                if self
+                    .open_pyproject_files
+                    .read()
+                    .contains_key(&params.text_document.uri)
+                {
+                    self.pyproject_did_change(params)?;
+                } else {
+                    self.text_document_did_change(
+                        ide_transaction_manager,
+                        subsequent_mutation,
+                        params,
+                        telemetry_event,
+                    )?;
+                }
             }
             LspEvent::DidCloseTextDocument(params) => {
                 let uri = params.text_document.uri;
                 self.set_file_stats(uri.clone(), telemetry_event);
                 self.decrement_uri_pending_close(&uri);
-                self.did_close(uri, DidCloseKind::TextDocument, telemetry, telemetry_event);
+                if self.open_pyproject_files.write().remove(&uri).is_none() {
+                    self.did_close(uri, DidCloseKind::TextDocument, telemetry, telemetry_event);
+                }
             }
             LspEvent::DidSaveTextDocument(params) => {
                 self.set_file_stats(params.text_document.uri.clone(), telemetry_event);
@@ -2739,6 +2780,8 @@ impl Server {
             state: State::new(config_finder, thread_count),
             open_notebook_cells: RwLock::new(HashMap::new()),
             open_files: RwLock::new(HashMap::new()),
+            open_pyproject_files: RwLock::new(HashMap::new()),
+            package_metadata_cache: Mutex::new(HashMap::new()),
             published_workspace_diagnostics: Mutex::new(HashMap::new()),
             unsaved_file_tracker: UnsavedFileTracker::new(),
             indexed_configs: Mutex::new(HashSet::new()),
@@ -3736,6 +3779,24 @@ impl Server {
         }
         // rewatch files in case we loaded or dropped any configs
         self.setup_file_watcher_if_necessary(Some(telemetry_event));
+        Ok(())
+    }
+
+    fn pyproject_did_change(&self, params: DidChangeTextDocumentParams) -> anyhow::Result<()> {
+        let VersionedTextDocumentIdentifier { uri, version } = params.text_document;
+        let mut files = self.open_pyproject_files.write();
+        let Some((old_version, source)) = files.get_mut(&uri) else {
+            return Err(anyhow::anyhow!(
+                "Received textDocument/didChange for unopened pyproject.toml: {uri}"
+            ));
+        };
+        if version < *old_version {
+            warn!(
+                "textDocument/didChange: version went backwards (new={version:?} < old={old_version:?}) for {uri}, applying anyway"
+            );
+        }
+        *source = apply_change_events(source, params.content_changes);
+        *old_version = version;
         Ok(())
     }
 
@@ -5201,6 +5262,9 @@ impl Server {
         verbosity_level: usize,
     ) -> Result<Option<HoverResult>, EmptyResponseReason> {
         let uri = &params.text_document_position_params.text_document.uri;
+        if is_pyproject_uri(uri) {
+            return Ok(self.pyproject_hover(uri, params.text_document_position_params.position));
+        }
         let (handle, lsp_config) =
             self.make_handle_with_lsp_analysis_config_if_enabled(uri, Some(HoverRequest::METHOD))?;
         let info = transaction
@@ -5220,6 +5284,43 @@ impl Server {
                 verbosity_level,
             },
         ))
+    }
+
+    fn pyproject_hover(&self, uri: &Url, position: Position) -> Option<HoverResult> {
+        let path = uri.to_file_path().ok()?;
+        let source = self
+            .open_pyproject_files
+            .read()
+            .get(uri)
+            .map(|(_, source)| source.clone())
+            .or_else(|| fs::read_to_string(&path).ok())?;
+        let dependency = pyproject_dependency(&source, position)?;
+        let metadata = path
+            .parent()
+            .and_then(|directory| self.state.config_finder().directory(directory))
+            .and_then(|config| {
+                config
+                    .interpreters
+                    .python_interpreter_path()
+                    .map(Path::to_owned)
+            })
+            .map(|interpreter| {
+                let key = (
+                    interpreter.clone(),
+                    normalize_package_name(&dependency.name),
+                );
+                if let Some(metadata) = self.package_metadata_cache.lock().get(&key).cloned() {
+                    metadata
+                } else {
+                    let metadata = package_metadata(&interpreter, &dependency.name);
+                    self.package_metadata_cache
+                        .lock()
+                        .insert(key, metadata.clone());
+                    metadata
+                }
+            })
+            .unwrap_or_default();
+        make_pyproject_hover(&source, &dependency, &metadata)
     }
 
     /// How long an inlay hint request should be deferred to debounce it, or

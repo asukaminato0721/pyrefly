@@ -37,6 +37,7 @@
     "main": "./dist/extension",
     "activationEvents": [
         "onLanguage:python",
+        "onLanguage:toml",
         "onNotebook:jupyter-notebook"
     ],
     "capabilities": {
@@ -55,6 +56,15 @@
                 "extensions": [
                     ".py",
                     ".pyi"
+                ]
+            },
+            {
+                "id": "toml",
+                "aliases": [
+                    "TOML"
+                ],
+                "filenames": [
+                    "pyproject.toml"
                 ]
             }
         ],
