@@ -32,6 +32,7 @@ import {PythonEnvironment} from './python-environment';
 import {
   triggerMsPythonRefreshLanguageServersIfInstalled,
 } from './extension-interop';
+import {registerPyprojectHoverProvider} from './pyproject-hover';
 
 let client: LanguageClient;
 let outputChannel: vscode.OutputChannel;
@@ -252,6 +253,7 @@ export async function activate(context: ExtensionContext) {
     }),
   );
   registerCodeLensCommands(context, pythonEnv);
+  registerPyprojectHoverProvider(context, pythonEnv);
 
   // When our extension is activated, make sure ms-python knows
   // TODO(kylei): remove this hack once ms-python has this behavior
