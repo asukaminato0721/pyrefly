@@ -540,7 +540,7 @@ class Foo(Generic[T_contra]):
 "#,
 );
 
-// Deep check: we should NOT raise an error here
+// Deep check: contravariant generic in a return type puts T_co in contravariant position.
 testcase!(
     test_deep_covariant_in_contra_return,
     r#"
@@ -550,12 +550,12 @@ T_contra = TypeVar("T_contra", contravariant=True)
 
 class Contra(Generic[T_contra]): ...
 
-class Foo(Generic[T_co]):  
-    def f(self) -> Contra[T_co]: ...
+class Foo(Generic[T_co]):
+    def f(self) -> Contra[T_co]: ...  # E: Type variable `T_co` is covariant but is used in contravariant position
 "#,
 );
 
-// Deep check: we should NOT raise an error here
+// Deep check: covariant generic in a parameter type puts T_co in contravariant position.
 testcase!(
     test_deep_covariant_in_co_param,
     r#"
@@ -564,36 +564,36 @@ T_co = TypeVar("T_co", covariant=True)
 
 class Co(Generic[T_co]): ...
 
-class Foo(Generic[T_co]):  
-    def f(self, x: Co[T_co]) -> None: ...
+class Foo(Generic[T_co]):
+    def f(self, x: Co[T_co]) -> None: ...  # E: Type variable `T_co` is covariant but is used in contravariant position
 "#,
 );
 
-// Deep check: we should NOT raise an error here
+// Deep check: Callable parameter types are contravariant.
 testcase!(
     test_deep_callable_param_in_return,
     r#"
 from typing import TypeVar, Generic, Callable
 T_co = TypeVar("T_co", covariant=True)
 
-class Foo(Generic[T_co]):  
-    def f(self) -> Callable[[T_co], None]: ...
+class Foo(Generic[T_co]):
+    def f(self) -> Callable[[T_co], None]: ...  # E: Type variable `T_co` is covariant but is used in contravariant position
 "#,
 );
 
-// Deep check: we should NOT raise an error here
+// Deep check: parameter position composed with Callable return position is contravariant.
 testcase!(
     test_deep_callable_return_in_param,
     r#"
 from typing import TypeVar, Generic, Callable
 T_co = TypeVar("T_co", covariant=True)
 
-class Foo(Generic[T_co]):  
-    def f(self, x: Callable[[], T_co]) -> None: ...
+class Foo(Generic[T_co]):
+    def f(self, x: Callable[[], T_co]) -> None: ...  # E: Type variable `T_co` is covariant but is used in contravariant position
 "#,
 );
 
-// Deep check: we should NOT raise an error here
+// Deep check: nested Callable variance composes through both layers.
 testcase!(
     test_deep_double_callable,
     r#"
@@ -601,7 +601,21 @@ from typing import TypeVar, Generic, Callable
 T_contra = TypeVar("T_contra", contravariant=True)
 
 class Foo(Generic[T_contra]):
-    def f(self) -> Callable[[Callable[[T_contra], None]], None]: ...
+    def f(self) -> Callable[[Callable[[T_contra], None]], None]: ...  # E: Type variable `T_contra` is contravariant but is used in covariant position
+"#,
+);
+
+testcase!(
+    test_covariant_typevar_in_union_or_generic_parameter,
+    r#"
+from typing import TypeVar, Generic, Iterable
+
+_T_co = TypeVar("_T_co", covariant=True)
+
+class Foo(Generic[_T_co]):
+    def foo(self, instance: _T_co) -> None: ...  # E: Type variable `_T_co` is covariant but is used in contravariant position
+    def bar(self, instance: _T_co | None) -> None: ...  # E: Type variable `_T_co` is covariant but is used in contravariant position
+    def baz(self, instance: Iterable[_T_co]) -> None: ...  # E: Type variable `_T_co` is covariant but is used in contravariant position
 "#,
 );
 

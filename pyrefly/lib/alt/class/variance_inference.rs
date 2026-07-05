@@ -460,33 +460,66 @@ fn check_typevar(
     }
 }
 
-/// Check a single callable signature for variance violations at `range`.
-/// The return type is a covariant position; parameters are contravariant.
-fn check_callable_variance(
-    callable: &Callable,
+fn check_type_variance(
+    typ: &Type,
+    position_variance: Variance,
     range: TextRange,
+    on_edge: &mut impl FnMut(&Class) -> InferenceMap,
     violations: &mut Vec<VarianceViolation>,
 ) {
-    if let Type::Quantified(q) = &callable.ret {
-        check_typevar(
-            q.name(),
-            Variance::Covariant,
-            q.variance(),
-            range,
-            violations,
-        );
-    }
-    if let Params::List(param_list) = &callable.params {
-        for param in param_list.items().iter() {
-            if let Type::Quantified(q) = param.as_type() {
-                check_typevar(
-                    q.name(),
+    let mut on_var =
+        |name: &Name, variance: Variance, _inj: bool, declared: PreInferenceVariance| {
+            check_typevar(name, variance, declared, range, violations);
+        };
+    on_type(position_variance, true, typ, on_edge, &mut on_var);
+}
+
+/// Check a single callable signature for variance violations at `range`.
+/// The return type is a covariant position; parameters are contravariant.
+fn check_callable_signature_variance(
+    callable: &Callable,
+    range: TextRange,
+    skip_receiver: bool,
+    on_edge: &mut impl FnMut(&Class) -> InferenceMap,
+    violations: &mut Vec<VarianceViolation>,
+) {
+    check_type_variance(
+        &callable.ret,
+        Variance::Covariant,
+        range,
+        on_edge,
+        violations,
+    );
+    match &callable.params {
+        Params::List(param_list) => {
+            for param in param_list.items().iter().skip(usize::from(skip_receiver)) {
+                check_type_variance(
+                    param.as_type(),
                     Variance::Contravariant,
-                    q.variance(),
                     range,
+                    on_edge,
                     violations,
                 );
             }
+        }
+        Params::Ellipsis | Params::Materialization => {}
+        Params::ParamSpec(prefix, param_spec) => {
+            for param in prefix.iter().skip(usize::from(skip_receiver)) {
+                check_type_variance(
+                    param.ty(),
+                    Variance::Contravariant,
+                    range,
+                    on_edge,
+                    violations,
+                );
+            }
+            check_type_variance(
+                param_spec,
+                Variance::Contravariant,
+                range,
+                on_edge,
+                violations,
+            );
         }
     }
 }
@@ -726,7 +759,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ///
     /// Checking behavior:
     /// - Base classes: DEEP checking (recurse into all nested generics)
-    /// - Methods: SHALLOW checking (only direct TypeVar usage, not nested Callables)
+    /// - Methods: DEEP checking (recurse into all nested generics)
     /// - Fields: NO checking (mutable fields constrain variance during inference only)
     pub fn check_variance_violations(
         &self,
@@ -752,7 +785,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             );
         }
 
-        // Check methods shallowly
+        // Check methods deeply.
         let class_fields = self.get_class_fields(class);
         for (name, field) in field_map.iter() {
             if name == &dunder::INIT || name == &dunder::NEW {
@@ -763,7 +796,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let range = class_fields
                     .and_then(|f| f.field_decl_range(name))
                     .unwrap_or_else(|| class.range());
-                self.check_method_shallow(ty, range, &mut violations);
+                self.check_method_variance(ty, range, &mut violations);
             }
         }
 
@@ -785,14 +818,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         Some(self.get_idx(idx).0.range())
     }
 
-    /// Check a method's signatures for variance violations (shallow: direct
-    /// TypeVars in params/return only, not nested Callables).
+    fn check_callable_variance(
+        &self,
+        callable: &Callable,
+        range: TextRange,
+        skip_receiver: bool,
+        violations: &mut Vec<VarianceViolation>,
+    ) {
+        let mut on_edge = |c: &Class| initial_inference_map(self.get_class_tparams(c).as_vec());
+        check_callable_signature_variance(callable, range, skip_receiver, &mut on_edge, violations);
+    }
+
+    /// Check a method's signatures for variance violations.
     ///
     /// Each overload arm is reported at its own `def` range, taken from that arm's
     /// own metadata — not the merged group metadata, which points at the
     /// implementation or first overload — so the error lands on the offending
     /// overload. Other callable shapes report at `field_range`.
-    fn check_method_shallow(
+    fn check_method_variance(
         &self,
         ty: &Type,
         field_range: TextRange,
@@ -805,12 +848,42 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     OverloadType::Forall(forall) => (&forall.body.signature, &forall.body.metadata),
                 };
                 let range = self.func_def_range(metadata).unwrap_or(field_range);
-                check_callable_variance(callable, range, violations);
+                self.check_callable_variance(
+                    callable,
+                    range,
+                    !metadata.flags.is_staticmethod,
+                    violations,
+                );
             }
             return;
         }
-        ty.visit_toplevel_callable(|callable| {
-            check_callable_variance(callable, field_range, violations);
-        });
+        match ty {
+            Type::Callable(callable) => {
+                self.check_callable_variance(callable, field_range, true, violations)
+            }
+            Type::Function(func) => self.check_callable_variance(
+                &func.signature,
+                field_range,
+                !func.metadata.flags.is_staticmethod,
+                violations,
+            ),
+            Type::Forall(forall) => match &forall.body {
+                Forallable::Callable(callable) => {
+                    self.check_callable_variance(callable, field_range, true, violations)
+                }
+                Forallable::Function(func) => self.check_callable_variance(
+                    &func.signature,
+                    field_range,
+                    !func.metadata.flags.is_staticmethod,
+                    violations,
+                ),
+                Forallable::TypeAlias(_) => {}
+            },
+            _ => {
+                ty.visit_toplevel_callable(|callable| {
+                    self.check_callable_variance(callable, field_range, false, violations);
+                });
+            }
+        }
     }
 }
