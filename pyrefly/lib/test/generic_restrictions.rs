@@ -1291,6 +1291,26 @@ def main(left: DataFrame, right: DataFrame) -> None:
 );
 
 testcase!(
+    test_bound_violation_in_generator_expr_argument,
+    r#"
+from collections.abc import Iterable, Sequence
+
+class Foo: ...
+class Bar(Foo): ...
+
+class BarContainer[T: Bar](Bar):
+    def __init__(self, modules: Iterable[T] = (), /) -> None: ...
+class Conditionable:
+    def condition(self) -> Foo: ...
+class Impl(Conditionable): ...
+
+class ImplContainer[T: Impl](Impl, Sequence[T]):
+    def condition(self) -> BarContainer:
+        return BarContainer(member.condition() for member in self)  # E: `Foo` is not assignable to upper bound `Bar` of type variable `T`  # E: `Foo` is not assignable to upper bound `Bar` of type variable `T`
+    "#,
+);
+
+testcase!(
     test_bound_violation_in_union_member,
     r#"
 from typing import Iterable, Iterator, TypeVar

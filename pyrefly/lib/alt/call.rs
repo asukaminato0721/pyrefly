@@ -747,8 +747,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         hint: Option<HintRef>,
     ) -> Option<Type> {
         let dunder_call = self.get_metaclass_dunder_call(cls)?;
-        // Clone targs because we don't want instantiations from metaclass __call__
-        let mut ctor_targs = cls.targs().clone();
+        // Use independent targs because we don't want instantiations from metaclass __call__.
+        let mut ctor_targs = TArgs::new(
+            Arc::new(cls.targs().tparams().clone()),
+            cls.targs()
+                .tparams()
+                .iter()
+                .map(|q| q.clone().to_type(self.heap))
+                .collect(),
+        );
         let mut ret = self.call_infer(
             self.as_call_target_or_error(
                 dunder_call,
@@ -911,7 +918,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // during class definition and should not be re-applied at call sites.
             if class_metadata.is_enum() {
                 let ty = if constructor_kind == ConstructorKind::TypeOfSelf {
-                    self.heap.mk_self_type(cls)
+                    self.heap.mk_self_type(cls.clone())
                 } else {
                     ret
                 };

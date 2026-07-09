@@ -90,6 +90,7 @@ use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::ErrorContext;
 use crate::error::context::TypeCheckContext;
+use crate::error::context::TypeCheckKind;
 use crate::solver::solver::CallContext;
 use crate::types::callable::Param;
 use crate::types::callable::ParamList;
@@ -641,29 +642,80 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     self.heap.mk_class_type(self.stdlib.dict(key_ty, value_ty))
                 },
             ),
-            Expr::Generator(x) => self.infer_with_decomposed_hint(
-                hint,
-                |hint| self.decompose_generator(hint).map(|(y, _, _)| y),
-                |yield_hint| {
-                    self.ifs_infer(&x.generators, errors);
-                    let yield_ty = self
-                        .expr_infer_impl(
-                            &x.elt,
-                            HintRef::with_ty_opt(hint, yield_hint.as_ref()),
-                            errors,
-                        )
-                        .into_ty();
-                    if self.generator_expr_is_async(x) {
-                        self.heap.mk_class_type(
-                            self.stdlib.async_generator(yield_ty, self.heap.mk_none()),
-                        )
-                    } else {
-                        let none = self.heap.mk_none();
-                        self.heap
-                            .mk_class_type(self.stdlib.generator(yield_ty, none.clone(), none))
+            Expr::Generator(x) => {
+                let is_async = self.generator_expr_is_async(x);
+                let yield_hint = hint.and_then(|hint| {
+                    let mut hints = self.decompose_hint(hint, |hint| {
+                        if is_async {
+                            match hint {
+                                Type::ClassType(cls)
+                                    if cls.has_qname("typing", "AsyncGenerator")
+                                        || cls.has_qname("typing", "AsyncIterable") =>
+                                {
+                                    cls.targs().as_slice().first().cloned()
+                                }
+                                _ => self
+                                    .decompose_async_generator(hint)
+                                    .map(|(y, _)| y)
+                                    .or_else(|| self.unwrap_async_iterable(hint)),
+                            }
+                        } else {
+                            match hint {
+                                Type::ClassType(cls)
+                                    if cls.has_qname("typing", "Generator")
+                                        || cls.has_qname("typing", "Iterable") =>
+                                {
+                                    cls.targs().as_slice().first().cloned()
+                                }
+                                _ => self
+                                    .decompose_generator(hint)
+                                    .map(|(y, _, _)| y)
+                                    .or_else(|| self.unwrap_iterable(hint)),
+                            }
+                        }
+                    });
+                    match hints.len() {
+                        0 => None,
+                        1 => hints.pop(),
+                        _ => Some(self.unions(hints)),
                     }
-                },
-            ),
+                });
+                self.ifs_infer(&x.generators, errors);
+                let yield_ty = self
+                    .expr_infer_impl(
+                        &x.elt,
+                        HintRef::with_ty_opt(hint, yield_hint.as_ref()),
+                        errors,
+                    )
+                    .into_ty();
+                if let Some(Type::Var(var)) = &yield_hint
+                    && let Some(q) = self.solver().quantified_for_var(*var)
+                    && q.restriction().is_restricted()
+                {
+                    let upper_bound = q.upper_bound(self.stdlib, self.heap);
+                    if !self.is_subset_eq(&yield_ty, &upper_bound) {
+                        let tck = TypeCheckKind::TypeVarSpecialization(q.name().clone());
+                        self.error(
+                            errors,
+                            x.elt.range(),
+                            tck.as_error_kind(),
+                            tck.format_error(
+                                &self.for_display(yield_ty.clone()),
+                                &self.for_display(upper_bound),
+                                self.module().name(),
+                            ),
+                        );
+                    }
+                }
+                if is_async {
+                    self.heap
+                        .mk_class_type(self.stdlib.async_generator(yield_ty, self.heap.mk_none()))
+                } else {
+                    let none = self.heap.mk_none();
+                    self.heap
+                        .mk_class_type(self.stdlib.generator(yield_ty, none.clone(), none))
+                }
+            }
             Expr::Await(x) => {
                 let awaiting_ty = self.expr_infer(&x.value, errors);
                 self.distribute_over_union(&awaiting_ty, |ty| match self.unwrap_awaitable(ty) {

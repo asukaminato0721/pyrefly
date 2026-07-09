@@ -455,6 +455,7 @@ struct VarState {
 pub struct Solver {
     variables: Mutex<Variables>,
     instantiation_errors: RwLock<SmallMap<Var, TypeVarSpecializationError>>,
+    quantified_var_origins: RwLock<SmallMap<Var, Quantified>>,
     /// Cross-call cache for protocol conformance results.
     /// Only caches results for types that contain no Vars, to ensure
     /// soundness across different subset contexts.
@@ -528,6 +529,7 @@ impl Solver {
         Self {
             variables: Default::default(),
             instantiation_errors: Default::default(),
+            quantified_var_origins: Default::default(),
             protocol_cache: Default::default(),
             typed_dict_cache: Default::default(),
             infer_with_first_use,
@@ -638,6 +640,14 @@ impl Solver {
             self.var_is_partial(*v)
         } else {
             false
+        }
+    }
+
+    pub fn quantified_for_var(&self, var: Var) -> Option<Quantified> {
+        let variables = self.variables.lock();
+        match &*variables.get(var) {
+            Variable::Quantified { quantified, .. } => Some(quantified.clone()),
+            _ => self.quantified_var_origins.read().get(&var).cloned(),
         }
     }
 
@@ -1193,7 +1203,9 @@ impl Solver {
     ) -> QuantifiedHandle {
         let vs = qs.map(|_| Var::new(uniques));
         let mut lock = self.variables.lock();
+        let mut origins = self.quantified_var_origins.write();
         for (v, q) in vs.iter().zip(qs.iter()) {
+            origins.insert(*v, (*q).clone());
             lock.insert_fresh(
                 *v,
                 Variable::Quantified {
@@ -2083,12 +2095,14 @@ impl Solver {
     ) -> QuantifiedHandle {
         let mut vs = Vec::new();
         let mut lock = self.variables.lock();
+        let mut origins = self.quantified_var_origins.write();
         targs.iter_paired_mut().for_each(|(param, t)| {
             if let Type::Quantified(q) = t
                 && **q == *param
             {
                 let v = Var::new(uniques);
                 vs.push(v);
+                origins.insert(v, param.clone());
                 *t = v.to_type(&self.heap);
                 lock.insert_fresh(
                     v,
