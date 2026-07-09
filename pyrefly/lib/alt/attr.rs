@@ -593,7 +593,49 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         todo_ctx: &str,
     ) -> Type {
-        let attr_base = self.as_attribute_base(base.clone());
+        self.type_of_attr_get_from_base(
+            base,
+            self.as_attribute_base(base.clone()),
+            attr_name,
+            range,
+            errors,
+            context,
+            todo_ctx,
+        )
+    }
+
+    /// Look up an attribute on a `type[...]` value as a class object, without
+    /// adding the `GenericAlias` runtime fallback used for direct `A[int]`.
+    pub fn type_of_class_object_attr_get(
+        &self,
+        base: &Type,
+        attr_name: &Name,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+        todo_ctx: &str,
+    ) -> Option<Type> {
+        Some(self.type_of_attr_get_from_base(
+            base,
+            Some(self.as_class_object_attribute_base(base.clone())?),
+            attr_name,
+            range,
+            errors,
+            context,
+            todo_ctx,
+        ))
+    }
+
+    fn type_of_attr_get_from_base(
+        &self,
+        base: &Type,
+        attr_base: Option<AttributeBase>,
+        attr_name: &Name,
+        range: TextRange,
+        errors: &ErrorCollector,
+        context: Option<&dyn Fn() -> ErrorContext>,
+        todo_ctx: &str,
+    ) -> Type {
         let lookup_result = attr_base.clone().map_or_else(
             || LookupResult::internal_error(InternalError::AttributeBaseUndefined(base.clone())),
             |attr_base| self.lookup_attr(attr_base, attr_name),
@@ -652,6 +694,35 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.heap.mk_any_error()
         } else {
             self.heap.mk_any_error() // we've encountered internal errors (already logged above)
+        }
+    }
+
+    fn as_class_object_attribute_base(&self, ty: Type) -> Option<AttributeBase> {
+        let mut acc = Vec::new();
+        self.as_class_object_attribute_base1(ty, &mut acc);
+        Vec1::try_from_vec(acc).map(AttributeBase).ok()
+    }
+
+    fn as_class_object_attribute_base1(&self, ty: Type, acc: &mut Vec<AttributeBase1>) {
+        match ty {
+            Type::Type(f) => match *f {
+                Type::ClassType(class) => {
+                    acc.push(AttributeBase1::ClassObject(ClassBase::ClassType(class)));
+                }
+                Type::Union(union) => {
+                    for ty in union.members {
+                        self.as_class_object_attribute_base1(self.heap.mk_type_of(ty), acc);
+                    }
+                }
+                Type::Var(v) => self.force_var_for_attribute_base(v, |ty| {
+                    self.as_class_object_attribute_base1(self.heap.mk_type_of(ty), acc)
+                }),
+                _ => {}
+            },
+            Type::Var(v) => self.force_var_for_attribute_base(v, |ty| {
+                self.as_class_object_attribute_base1(ty, acc)
+            }),
+            _ => {}
         }
     }
 

@@ -1965,7 +1965,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
     ) -> TypeInfo {
         self.record_external_attribute_definition_index(base.ty(), x.attr.id(), x.attr.range);
-        let attr_type = self.attr_infer(base, &x.attr.id, x.range, errors, None);
+        let attr_type = if x.attr.id == dunder::NEW
+            && !matches!(x.value.as_ref(), Expr::Subscript(_))
+            && let Some(ty) = self.type_of_class_object_attr_get(
+                base.ty(),
+                &x.attr.id,
+                x.range,
+                errors,
+                None,
+                "Expr::attr_infer_for_type",
+            ) {
+            TypeInfo::at_facet(base, &FacetKind::Attribute(x.attr.id.clone()), || {
+                ty.clone()
+            })
+        } else {
+            self.attr_infer(base, &x.attr.id, x.range, errors, None)
+        };
         if base.ty().is_literal_string() {
             match attr_type.ty() {
                 Type::BoundMethod(method) => attr_type

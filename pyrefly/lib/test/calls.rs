@@ -88,6 +88,27 @@ o = A[int].__new__(A[str], "foo") # E: Missing positional argument `args` in fun
 );
 
 testcase!(
+    test_type_generic_subclass_dunder_new,
+    r#"
+from typing import Any, TypeVar, assert_type
+
+_T = TypeVar("_T")
+
+class OrderingList(list[_T]):
+    ordering_attr: str = "position"
+
+def reconstitute(
+    cls: type[OrderingList[_T]], dict_: dict[str, Any], items: list[_T]
+) -> OrderingList[_T]:
+    obj = cls.__new__(cls)
+    assert_type(obj, OrderingList[_T])
+    obj.__dict__.update(dict_)
+    list.extend(obj, items)
+    return obj
+    "#,
+);
+
+testcase!(
     test_deprecated_call,
     r#"
 from warnings import deprecated
