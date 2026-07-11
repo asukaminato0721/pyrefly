@@ -3241,6 +3241,48 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
         Some(best)
     }
 
+    /// Check covariance inside `type`, distributing a union across constrained TypeVars.
+    pub(crate) fn is_subset_eq_type(&mut self, got: &Type, want: &Type) -> Result<(), SubsetError> {
+        if let (Type::Union(union), Type::Var(var)) = (got, want) {
+            let constraints = {
+                let variables = self.solver.variables.lock();
+                let variable = variables.get(*var);
+                match &*variable {
+                    Variable::Quantified { quantified, .. }
+                    | Variable::PartialQuantified(quantified) => {
+                        if let Restriction::Constraints(constraints) = quantified.restriction() {
+                            Some(constraints.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(constraints) = constraints {
+                let mut answers = Vec::with_capacity(union.members.len());
+                for member in &union.members {
+                    let promoted = member
+                        .clone()
+                        .promote_implicit_literals(self.type_order.stdlib());
+                    let constraint = self
+                        .find_matching_constraint(&promoted, &constraints)
+                        .or_else(|| self.find_matching_constraint(member, &constraints));
+                    let Some(constraint) = constraint else {
+                        return self.is_subset_eq(got, want);
+                    };
+                    answers.push(constraint.clone());
+                }
+                self.solver
+                    .variables
+                    .lock()
+                    .update(*var, Variable::Answer(unions(answers, &self.solver.heap)));
+                return Ok(());
+            }
+        }
+        self.is_subset_eq(got, want)
+    }
+
     /// is_subset_eq_var(t1, Quantified)
     fn is_subset_eq_quantified(
         &mut self,

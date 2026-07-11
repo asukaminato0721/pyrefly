@@ -78,6 +78,22 @@ assert_type(f(int | None), int | None)
 );
 
 testcase!(
+    test_type_of_union_matches_constrained_type_param,
+    r#"
+from typing import TypeVar, assert_type
+def f[T: (int, str)](x: type[T]) -> T: ...
+def g(x: type[int | str]):
+    assert_type(f(x), int | str)
+
+T = TypeVar("T", str, bool, float, int, bytes, None)
+Scalar = str | bool | float | int | bytes | None
+def legacy(x: type[T]) -> T: ...
+def legacy_caller(x: type[Scalar]):
+    assert_type(legacy(x), Scalar)
+    "#,
+);
+
+testcase!(
     test_type_of_union_matches_type_param_or_none,
     r#"
 from typing import assert_type

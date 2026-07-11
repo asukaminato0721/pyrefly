@@ -2365,7 +2365,7 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             (Type::Type(inner), Type::Type(_)) if matches!(**inner, Type::Callable(_)) => Err(
                 SubsetError::TypeCannotAcceptSpecialForms(SpecialForm::Callable),
             ),
-            (Type::Type(l), Type::Type(u)) => self.is_subset_eq(l, u),
+            (Type::Type(l), Type::Type(u)) => self.is_subset_eq_type(l, u),
             // type[A | B] <: X if type[A] <: X and type[B] <: X.
             (Type::Type(inner), _) if let Type::Union(inner_union) = &**inner => {
                 all(inner_union.members.iter(), |m| {
