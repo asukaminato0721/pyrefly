@@ -2126,6 +2126,39 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
     }
 
+    /// Whether fallthrough is constrained by an unguarded, irrefutable class pattern.
+    fn has_exhaustive_class_pattern(op: &NarrowOp) -> bool {
+        fn classify(op: &NarrowOp) -> (bool, bool) {
+            match op {
+                NarrowOp::Atomic(_, AtomicNarrowOp::IsNotInstance(_, NarrowSource::Pattern)) => {
+                    (true, true)
+                }
+                NarrowOp::Atomic(_, AtomicNarrowOp::IsNot(_) | AtomicNarrowOp::NotEq(_)) => {
+                    (true, false)
+                }
+                // Match fallthrough includes a top-level placeholder. Placeholders nested in an
+                // `Or` represent guards or refutable subpatterns, which we can't exhaust.
+                NarrowOp::Atomic(_, AtomicNarrowOp::Placeholder) => (true, false),
+                NarrowOp::And(ops) => {
+                    let mut has_class_pattern = false;
+                    for op in ops {
+                        let (can_check, op_has_class_pattern) = classify(op);
+                        if !can_check {
+                            return (false, false);
+                        }
+                        has_class_pattern |= op_has_class_pattern;
+                    }
+                    (true, has_class_pattern)
+                }
+                NarrowOp::Or(_) => (false, false),
+                _ => (false, false),
+            }
+        }
+
+        let (can_check, has_class_pattern) = classify(op);
+        can_check && has_class_pattern
+    }
+
     /// Formats the missing cases for a non-exhaustive match error message.
     /// Returns None if the remaining type can't be formatted nicely.
     fn format_missing_cases(&self, ty: &Type) -> Option<String> {
@@ -2159,8 +2192,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) {
         let (op, narrow_range) = narrow_ops_for_fall_through;
         let subject_info = self.with_type_for_exhaustiveness_check(self.get_idx(*subject_idx));
-        // We only check match exhaustiveness if the subject is an enum or a union of enum literals
-        if !self.should_check_exhaustiveness(subject_info.ty()) {
+        let has_finite_subject = self.should_check_exhaustiveness(subject_info.ty());
+        // Equality patterns are only exhaustible for finite types. Class patterns can also
+        // exhaust open-ended types because they cover every instance of the matched class.
+        if !has_finite_subject && !Self::has_exhaustive_class_pattern(op) {
             return;
         }
         let ignore_errors = self.error_swallower();
@@ -2189,6 +2224,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         };
         self.expand_mut(&mut remaining_ty);
+        // A disjoint class pattern doesn't make an open-ended subject exhaustible.
+        if !has_finite_subject && &remaining_ty == subject_info.ty() {
+            return;
+        }
         // If the result is `Never` then the cases were exhaustive
         if remaining_ty.is_never() || remaining_ty.is_any() {
             return;

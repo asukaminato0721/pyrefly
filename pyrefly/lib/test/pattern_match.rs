@@ -1003,6 +1003,28 @@ def process(x: A | B | C):
 );
 
 testcase!(
+    test_non_exhaustive_match_with_builtin_class_pattern,
+    r#"
+def process(x: int | str):
+    match x: # E: Match on `int | str` is not exhaustive
+        case int():
+            pass
+"#,
+);
+
+testcase!(
+    test_guarded_class_pattern_does_not_enable_exhaustiveness_check,
+    r#"
+def condition() -> bool: ...
+
+def process(x: int | str):
+    match x:
+        case int() if condition():
+            pass
+"#,
+);
+
+testcase!(
     test_exhaustiveness_in_enum_method,
     r#"
 from enum import Enum
