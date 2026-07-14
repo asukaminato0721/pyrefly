@@ -53,77 +53,198 @@ pub fn find_comment_start(
     line: &str,
     in_triple_quote: Option<char>,
 ) -> (Option<usize>, Option<char>) {
-    // Fast path: when not inside a triple-quoted string, scan for the first
-    // byte that requires string-aware parsing (#, ', ", \). If the first such
-    // byte is '#', it is the comment start — no further analysis is needed.
-    // This avoids the per-byte state machine for the common case of plain code
-    // lines like `x = foo(bar)  # comment`.
-    if in_triple_quote.is_none() {
-        let bytes = line.as_bytes();
+    let mut state = CommentState(
+        in_triple_quote
+            .map(|quote| {
+                vec![Context::String(StringContext {
+                    quote: quote as u8,
+                    triple: true,
+                    interpolated: false,
+                })]
+            })
+            .unwrap_or_default(),
+    );
+    let comment_start = find_comment_start_stateful(line, &mut state);
+    let triple_quote = state.0.iter().rev().find_map(|context| match context {
+        Context::String(StringContext {
+            quote,
+            triple: true,
+            ..
+        }) => Some(*quote as char),
+        _ => None,
+    });
+    (comment_start, triple_quote)
+}
+
+#[derive(Clone, Copy)]
+struct StringContext {
+    quote: u8,
+    triple: bool,
+    interpolated: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Context {
+    String(StringContext),
+    Interpolation { nesting: u32 },
+    FormatSpec,
+}
+
+#[derive(Default)]
+struct CommentState(Vec<Context>);
+
+/// Whether the quote at `quote` has an f-string or t-string prefix.
+fn has_interpolated_prefix(bytes: &[u8], quote: usize) -> bool {
+    let has_boundary = |start: usize| {
+        start == 0
+            || !(bytes[start - 1].is_ascii_alphanumeric()
+                || bytes[start - 1] == b'_'
+                || !bytes[start - 1].is_ascii())
+    };
+    (quote >= 2
+        && has_boundary(quote - 2)
+        && matches!(
+            (
+                bytes[quote - 2].to_ascii_lowercase(),
+                bytes[quote - 1].to_ascii_lowercase()
+            ),
+            (b'f' | b't', b'r') | (b'r', b'f' | b't')
+        ))
+        || (quote >= 1
+            && has_boundary(quote - 1)
+            && matches!(bytes[quote - 1].to_ascii_lowercase(), b'f' | b't'))
+}
+
+/// Full string-aware comment finder. The context stack is only allocated for lines
+/// containing strings, while the caller retains it to handle multiline f-string
+/// interpolations and nested strings.
+fn find_comment_start_stateful(line: &str, state: &mut CommentState) -> Option<usize> {
+    let bytes = line.as_bytes();
+
+    // Preserve the fast path for the overwhelmingly common case of ordinary code.
+    if state.0.is_empty() {
         match bytes
             .iter()
             .position(|&b| b == b'#' || b == b'\'' || b == b'"' || b == b'\\')
         {
-            None => return (None, None),
-            Some(pos) if bytes[pos] == b'#' => return (Some(pos), None),
-            _ => {} // quote or backslash found — need full parser
-        }
-    }
-
-    find_comment_start_slow(line, in_triple_quote)
-}
-
-/// Full string-aware comment finder. Handles triple-quoted strings, single-quoted
-/// strings, and escape sequences.
-fn find_comment_start_slow(
-    line: &str,
-    in_triple_quote: Option<char>,
-) -> (Option<usize>, Option<char>) {
-    let mut bytes = line.bytes().enumerate().peekable();
-    let mut triple_quote: Option<u8> = in_triple_quote.map(|c| c as u8);
-    let mut single_quote: Option<u8> = None;
-
-    while let Some((idx, b)) = bytes.next() {
-        if let Some(q) = triple_quote {
-            // Inside triple-quoted string.
-            if b == b'\\' {
-                bytes.next(); // Skip escaped character.
-            } else if b == q
-                && bytes.next_if(|&(_, next)| next == q).is_some()
-                && bytes.next_if(|&(_, next)| next == q).is_some()
-            {
-                triple_quote = None;
-            }
-            continue;
-        }
-
-        if let Some(q) = single_quote {
-            // Inside regular string.
-            if b == b'\\' {
-                bytes.next(); // Skip escaped character.
-            } else if b == q {
-                single_quote = None;
-            }
-            continue;
-        }
-
-        // Normal code.
-        match b {
-            b'"' | b'\'' => {
-                if bytes.next_if(|&(_, next)| next == b).is_some() {
-                    if bytes.next_if(|&(_, next)| next == b).is_some() {
-                        triple_quote = Some(b);
-                    }
-                    // else: empty string ("" or ''), both quotes already consumed.
-                } else {
-                    single_quote = Some(b);
-                }
-            }
-            b'#' => return (Some(idx), None),
+            None => return None,
+            Some(pos) if bytes[pos] == b'#' => return Some(pos),
             _ => {}
         }
     }
-    (None, triple_quote.map(|b| b as char))
+
+    let mut i = 0;
+    while i < bytes.len() {
+        match state.0.last().copied() {
+            None => match bytes[i] {
+                b'"' | b'\'' => {
+                    let quote = bytes[i];
+                    let triple =
+                        bytes.get(i + 1) == Some(&quote) && bytes.get(i + 2) == Some(&quote);
+                    state.0.push(Context::String(StringContext {
+                        quote,
+                        triple,
+                        interpolated: has_interpolated_prefix(bytes, i),
+                    }));
+                    i += if triple { 3 } else { 1 };
+                }
+                b'#' => return Some(i),
+                _ => i += 1,
+            },
+            Some(Context::String(string)) => {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                } else if bytes[i] == string.quote
+                    && (!string.triple
+                        || bytes.get(i + 1) == Some(&string.quote)
+                            && bytes.get(i + 2) == Some(&string.quote))
+                {
+                    state.0.pop();
+                    i += if string.triple { 3 } else { 1 };
+                } else if string.interpolated && bytes[i] == b'{' {
+                    if bytes.get(i + 1) == Some(&b'{') {
+                        i += 2;
+                    } else {
+                        state.0.push(Context::Interpolation { nesting: 0 });
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            Some(Context::FormatSpec) => match bytes[i] {
+                b'{' if bytes.get(i + 1) != Some(&b'{') => {
+                    state.0.push(Context::Interpolation { nesting: 0 });
+                    i += 1;
+                }
+                b'}' => {
+                    state.0.pop();
+                    i += 1;
+                }
+                b'{' => i += 2,
+                _ => i += 1,
+            },
+            Some(Context::Interpolation { nesting }) => match bytes[i] {
+                b'"' | b'\'' => {
+                    let quote = bytes[i];
+                    let triple =
+                        bytes.get(i + 1) == Some(&quote) && bytes.get(i + 2) == Some(&quote);
+                    state.0.push(Context::String(StringContext {
+                        quote,
+                        triple,
+                        interpolated: has_interpolated_prefix(bytes, i),
+                    }));
+                    i += if triple { 3 } else { 1 };
+                }
+                b'#' => {
+                    // Suppressions inside an f-string interpolation were historically
+                    // ignored. Stop at the Python comment without treating it as one.
+                    return None;
+                }
+                b'(' | b'[' | b'{' => {
+                    let last = state.0.len() - 1;
+                    state.0[last] = Context::Interpolation {
+                        nesting: nesting + 1,
+                    };
+                    i += 1;
+                }
+                b')' | b']' => {
+                    let last = state.0.len() - 1;
+                    state.0[last] = Context::Interpolation {
+                        nesting: nesting.saturating_sub(1),
+                    };
+                    i += 1;
+                }
+                b'}' => {
+                    if nesting == 0 {
+                        state.0.pop();
+                    } else {
+                        let last = state.0.len() - 1;
+                        state.0[last] = Context::Interpolation {
+                            nesting: nesting - 1,
+                        };
+                    }
+                    i += 1;
+                }
+                b':' if nesting == 0 => {
+                    let last = state.0.len() - 1;
+                    state.0[last] = Context::FormatSpec;
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+        }
+    }
+
+    // Ordinary unterminated single-quoted strings do not continue onto the next
+    // physical line. An interpolation can continue when it contains multiline code.
+    while matches!(
+        state.0.last(),
+        Some(Context::String(StringContext { triple: false, .. }))
+    ) {
+        state.0.pop();
+    }
+    None
 }
 
 /// Finds the byte offset of the first '#' character that starts a comment.
@@ -308,10 +429,9 @@ impl Ignore {
         // If we see a comment on a non-code line, apply it to the next non-comment line.
         let mut pending = Vec::new();
         let mut line = LineNumber::default();
-        let mut in_triple_quote = None;
+        let mut comment_state = CommentState::default();
         for (idx, line_str) in code.lines().enumerate() {
-            let (comment_start, new_state) = find_comment_start(line_str, in_triple_quote);
-            in_triple_quote = new_state;
+            let comment_start = find_comment_start_stateful(line_str, &mut comment_state);
             let is_comment_only_line = comment_start
                 .is_some_and(|comment_start| line_str[..comment_start].trim_start().is_empty());
             line = LineNumber::from_zero_indexed(idx as u32);
@@ -659,6 +779,18 @@ x = """
         "#,
             &[(Tool::Pyrefly, 3)],
         );
+        f(
+            r#"_ = f'start{"""message
+"""}end'
+y: int = "hello"  # pyrefly: ignore[bad-assignment]"#,
+            &[(Tool::Pyrefly, 3)],
+        );
+        f(
+            r#"_ = f'start{"""message
+"""}# pyrefly: ignore'
+y: int = "hello"  # pyrefly: ignore[bad-assignment]"#,
+            &[(Tool::Pyrefly, 3)],
+        );
         f("x = ''''''  # pyrefly: ignore", &[(Tool::Pyrefly, 1)]);
     }
 
@@ -774,6 +906,13 @@ x = """
 
         // Test multiple hashes
         assert_eq!(find_comment_start_in_line("# first # second"), Some(0));
+
+        // A '#' in an f-string format specifier is not a comment.
+        let format_spec = r##"x = f"{1:#x}"  # real"##;
+        assert_eq!(
+            find_comment_start_in_line(format_spec),
+            format_spec.rfind('#')
+        );
     }
 
     #[test]

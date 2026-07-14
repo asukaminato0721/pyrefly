@@ -266,6 +266,15 @@ result: {f'''
 );
 
 testcase!(
+    test_pyrefly_suppression_after_multiline_string_in_fstring,
+    r#"
+_ = f'start{"""message
+"""}end'
+y: int = "hello"  # pyrefly: ignore[bad-assignment]
+"#,
+);
+
+testcase!(
     test_pyrefly_suppression_consecutive_fstrings_above_first,
     r#"
 def foo():
