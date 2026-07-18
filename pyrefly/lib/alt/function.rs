@@ -708,6 +708,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // If the first parameter is variadic (e.g. *args), self is passed inside it,
         // so there is no separate implicit parameter to skip.
         let is_dunder_new = def.defining_cls.is_some() && stmt.name.id == dunder::NEW;
+        let mut metadata = def.metadata.clone();
+        if is_dunder_new && !has_return_annotation {
+            let binding = self.bindings().get(
+                self.bindings()
+                    .key_to_idx(&Key::ReturnType(ShortIdentifier::new(&stmt.name))),
+            );
+            if let Binding::ReturnType(return_type) = binding
+                && return_type.kind.should_infer_return()
+            {
+                metadata.flags.inferred_dunder_new_return = Some(Box::new(
+                    self.binding_to_type_return_type_inferred(return_type, errors),
+                ));
+            }
+        }
         let has_implicit_self_or_cls_param =
             def.defining_cls.is_some() && (!def.metadata.flags.is_staticmethod || is_dunder_new);
         for (i, p) in stmt.parameters.iter().enumerate() {
@@ -857,7 +871,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
         let mut ty = Forallable::Function(Function {
             signature: callable,
-            metadata: def.metadata.clone(),
+            metadata,
         })
         .forall(tparams);
         ty = self.move_return_tparams_of_type(ty);

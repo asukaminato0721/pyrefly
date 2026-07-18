@@ -3736,8 +3736,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     /// Handle `Binding::ReturnType` - compute the return type of a function.
     /// The `#[inline(never)]` annotation is intentional to reduce stack frame size.
     #[inline(never)]
-    fn binding_to_type_return_type(&self, x: &ReturnType, errors: &ErrorCollector) -> Type {
-        let ty = match &x.kind {
+    pub(crate) fn binding_to_type_return_type_inferred(
+        &self,
+        x: &ReturnType,
+        errors: &ErrorCollector,
+    ) -> Type {
+        match &x.kind {
             ReturnTypeKind::ShouldValidateAnnotation {
                 range,
                 annotation,
@@ -3852,7 +3856,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     return_ty
                 }
             }
-        };
+        }
+    }
+
+    fn binding_to_type_return_type(&self, x: &ReturnType, errors: &ErrorCollector) -> Type {
+        let ty = self.binding_to_type_return_type_inferred(x, errors);
         if let Some(class_key) = x.implicit_dunder_new_self {
             let class = &*self.get_idx(class_key);
             let Some(cls) = &class.0 else {

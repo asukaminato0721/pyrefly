@@ -3409,10 +3409,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // with a `cls` argument that differs from the class on which it is accessed, so we use a
         // quantified to capture `cls`. Note that `__new__` is the only method that needs this
         // special case because it's not legal to use `Self` in other static methods.
-        let self_quantified = if field_name == &dunder::NEW
-            && let ClassBase::ClassDef(cls) = cls
-        {
-            Some(self.get_self_quantified(cls.class_object(), self.heap.mk_class_type(cls.clone())))
+        let self_quantified = if field_name == &dunder::NEW {
+            match cls {
+                ClassBase::ClassDef(cls) | ClassBase::SelfType(cls) => {
+                    Some(self.get_self_quantified(
+                        cls.class_object(),
+                        self.heap.mk_class_type(cls.clone()),
+                    ))
+                }
+                _ => None,
+            }
         } else {
             None
         };

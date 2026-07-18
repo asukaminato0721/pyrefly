@@ -947,9 +947,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         }
         let mut dunder_new_ret = None;
+        let mut inferred_dunder_new_return = None;
         let preserve_self = constructor_kind == ConstructorKind::TypeOfSelf;
         let (overrides_new, dunder_new_has_errors) =
             if let Some(new_method) = self.get_dunder_new(&cls, preserve_self) {
+                inferred_dunder_new_return = new_method
+                    .visit_toplevel_func_metadata(&|metadata| {
+                        metadata.flags.inferred_dunder_new_return.clone()
+                    })
+                    .map(|ty| *ty);
                 let cls_ty = if preserve_self {
                     self.heap.mk_type_of(self.heap.mk_self_type(cls.clone()))
                 } else {
@@ -1019,7 +1025,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // If the class overrides `object.__new__` but not `object.__init__`, the `__init__` call
         // always succeeds at runtime, so we skip analyzing it.
         let get_object_init = !overrides_new;
-        if let Some(init_method) = self.get_dunder_init(&cls, get_object_init) {
+        // A union or different class may dispatch to a different `__init__` at runtime.
+        let can_determine_init_type = inferred_dunder_new_return.as_ref().is_none_or(|ty| {
+            matches!(
+                ty,
+                Type::SelfType(return_cls) | Type::ClassType(return_cls)
+                    if return_cls.class_object() == cls.class_object()
+            )
+        });
+        if can_determine_init_type
+            && let Some(init_method) = self.get_dunder_init(&cls, get_object_init)
+        {
             let dunder_init_errors = self.error_collector();
             self.call_infer(
                 self.as_call_target_or_error(

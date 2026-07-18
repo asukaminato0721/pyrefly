@@ -717,6 +717,10 @@ pub struct FuncFlags {
     /// which lets override-consistency logic relax inferred placeholder returns
     /// without overriding what the user explicitly declared.
     pub is_return_inferred: bool,
+    /// The body-inferred return of an unannotated `__new__`. The callable still
+    /// exposes `Self`, but constructor analysis uses this type to decide whether
+    /// the returned object's `__init__` can be determined statically.
+    pub inferred_dunder_new_return: Option<Box<Type>>,
     /// A function decorated with `typing.dataclass_transform(...)`, turning it into a
     /// `dataclasses.dataclass`-like decorator. Stores the keyword values passed to the
     /// `dataclass_transform` call. See

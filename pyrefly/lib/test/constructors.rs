@@ -297,6 +297,26 @@ C("5")  # E: Argument `Literal['5']` is not assignable to parameter `x` with typ
 );
 
 testcase!(
+    test_new_signature_precedes_init,
+    r#"
+class A:
+    def __new__(cls, a: int):
+        if cls is A:
+            return super().__new__(B)
+        else:
+            return super().__new__(cls)
+
+    def __init__(self) -> None: ...
+
+class B(A):
+    def __init__(self, a: int) -> None:
+        self.a = a
+
+A(1)
+    "#,
+);
+
+testcase!(
     test_new_and_inherited_init,
     r#"
 class Parent1:
