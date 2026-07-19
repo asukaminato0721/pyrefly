@@ -26,8 +26,10 @@ use anyhow::Context as _;
 use clap::Parser;
 use clap::ValueEnum;
 use dupe::Dupe as _;
+use lsp_types::Url;
 use percent_encoding::AsciiSet;
 use percent_encoding::CONTROLS;
+use percent_encoding::NON_ALPHANUMERIC;
 use percent_encoding::utf8_percent_encode;
 use pyrefly_build::handle::Handle;
 use pyrefly_config::args::ConfigOverrideArgs;
@@ -41,6 +43,7 @@ use pyrefly_config::migration::run::MigratedFromKind;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::ModuleNameWithKind;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_util::absolutize::Absolutize;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::args::clap_env;
 use pyrefly_util::demand_tree::DemandCollector;
@@ -438,6 +441,7 @@ fn write_errors_to_file(
         OutputFormat::Json => write_error_json_to_file(path, relative_to, errors),
         OutputFormat::Github => write_error_github_to_file(path, errors),
         OutputFormat::JunitXml => write_error_junit_xml_to_file(path, relative_to, errors),
+        OutputFormat::Sarif => write_error_sarif_to_file(path, relative_to, errors),
         OutputFormat::OmitErrors => Ok(()),
     }
 }
@@ -456,6 +460,7 @@ pub(crate) fn write_errors_to_console(
         OutputFormat::Json => write_error_json_to_console(relative_to, errors),
         OutputFormat::Github => write_error_github_to_console(errors),
         OutputFormat::JunitXml => write_error_junit_xml_to_console(relative_to, errors),
+        OutputFormat::Sarif => write_error_sarif_to_console(relative_to, errors),
         OutputFormat::OmitErrors => Ok(()),
     }
 }
@@ -723,6 +728,121 @@ fn write_error_junit_xml_to_file(
 
 fn write_error_junit_xml_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
     buffered_write_error_junit_xml(stdout(), relative_to, errors)
+}
+
+const SARIF_URI_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'/');
+
+fn severity_to_sarif_level(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Ignore => "none",
+        Severity::Info => "note",
+        Severity::Warn => "warning",
+        Severity::Error => "error",
+    }
+}
+
+/// Render diagnostics as a SARIF 2.1.0 log. Paths are relative to `%SRCROOT%`
+/// so consumers can associate results with repository files across machines.
+fn write_error_sarif<W: Write>(
+    mut writer: W,
+    relative_to: &Path,
+    errors: &[Error],
+) -> anyhow::Result<()> {
+    let mut error_kinds = errors.iter().map(Error::error_kind).collect::<Vec<_>>();
+    error_kinds.sort();
+    error_kinds.dedup();
+
+    let rules = error_kinds
+        .into_iter()
+        .map(|kind| {
+            serde_json::json!({
+                "id": kind.to_name(),
+                "helpUri": kind.docs_url(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = errors
+        .iter()
+        .map(|error| {
+            let range = error.display_range();
+            let path = error
+                .path()
+                .as_path()
+                .relativize_from(relative_to)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let uri = utf8_percent_encode(&path, SARIF_URI_ENCODE_SET).to_string();
+            serde_json::json!({
+                "ruleId": error.error_kind().to_name(),
+                "level": severity_to_sarif_level(error.severity()),
+                "message": {"text": error.msg()},
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": uri,
+                            "uriBaseId": "%SRCROOT%",
+                        },
+                        "region": {
+                            "startLine": range.start.line_within_file().get(),
+                            "startColumn": range.start.column().get(),
+                            "endLine": range.end.line_within_file().get(),
+                            "endColumn": range.end.column().get(),
+                        },
+                    },
+                }],
+            })
+        })
+        .collect::<Vec<_>>();
+    let root_uri = Url::from_directory_path(relative_to.absolutize())
+        .expect("absolute project root must be a valid file URL")
+        .to_string();
+    let sarif = serde_json::json!({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "Pyrefly",
+                "informationUri": "https://pyrefly.org/",
+                "rules": rules,
+            }},
+            "originalUriBaseIds": {
+                "%SRCROOT%": {"uri": root_uri},
+            },
+            "results": results,
+        }],
+    });
+    serde_json::to_writer_pretty(&mut writer, &sarif)?;
+    Ok(())
+}
+
+fn buffered_write_error_sarif(
+    writer: impl Write,
+    relative_to: &Path,
+    errors: &[Error],
+) -> anyhow::Result<()> {
+    let mut writer = BufWriter::new(writer);
+    write_error_sarif(&mut writer, relative_to, errors)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_error_sarif_to_file(
+    path: &Path,
+    relative_to: &Path,
+    errors: &[Error],
+) -> anyhow::Result<()> {
+    let file = File::create(path)?;
+    buffered_write_error_sarif(file, relative_to, errors)
+        .with_context(|| format!("while writing SARIF errors to `{}`", path.display()))
+}
+
+fn write_error_sarif_to_console(relative_to: &Path, errors: &[Error]) -> anyhow::Result<()> {
+    buffered_write_error_sarif(stdout(), relative_to, errors)
 }
 
 fn severity_to_github_command(severity: Severity) -> Option<&'static str> {
@@ -1685,6 +1805,54 @@ mod tests {
             output.ends_with("</testsuites>\n"),
             "missing closing tag: {output}"
         );
+    }
+
+    #[test]
+    fn sarif_output_format_writes_structured_results() {
+        let errors = vec![sample_error("bad assignment".into())];
+        let mut buf = Vec::new();
+        write_error_sarif(&mut buf, Path::new("/repo"), &errors).unwrap();
+        let output: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+
+        assert_eq!(output["version"], "2.1.0");
+        assert_eq!(output["runs"][0]["tool"]["driver"]["name"], "Pyrefly");
+        assert_eq!(
+            output["runs"][0]["tool"]["driver"]["rules"][0]["id"],
+            "bad-assignment"
+        );
+        let result = &output["runs"][0]["results"][0];
+        assert_eq!(result["ruleId"], "bad-assignment");
+        assert_eq!(result["level"], "error");
+        assert_eq!(result["message"]["text"], "bad assignment");
+        assert_eq!(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "foo.py"
+        );
+        assert_eq!(
+            result["locations"][0]["physicalLocation"]["region"],
+            serde_json::json!({
+                "startLine": 1,
+                "startColumn": 1,
+                "endLine": 1,
+                "endColumn": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn sarif_output_format_maps_severities() {
+        let errors = vec![
+            sample_error("info".into()).with_severity(Severity::Info),
+            sample_error("warning".into()).with_severity(Severity::Warn),
+            sample_error("error".into()),
+        ];
+        let mut buf = Vec::new();
+        write_error_sarif(&mut buf, Path::new("/repo"), &errors).unwrap();
+        let output: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        let results = output["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results[0]["level"], "note");
+        assert_eq!(results[1]["level"], "warning");
+        assert_eq!(results[2]["level"], "error");
     }
 
     #[test]

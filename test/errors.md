@@ -157,6 +157,65 @@ $ touch $TMPDIR/pyrefly.toml && \
 [1]
 ```
 
+## `--output-format sarif` emits SARIF 2.1.0
+
+```scrut {output_stream: stdout}
+$ touch $TMPDIR/pyrefly.toml && \
+> echo "x: str = 0" > $TMPDIR/bad.py && \
+> $PYREFLY check --output-format sarif --relative-to $TMPDIR $TMPDIR/bad.py 2>/dev/null
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "originalUriBaseIds": {
+        "%SRCROOT%": {
+          "uri": "file://*/" (glob)
+        }
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "bad.py",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "endColumn": 11,
+                  "endLine": 1,
+                  "startColumn": 10,
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "`Literal[0]` is not assignable to `str`"
+          },
+          "ruleId": "bad-assignment"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://pyrefly.org/",
+          "name": "Pyrefly",
+          "rules": [
+            {
+              "helpUri": "https://pyrefly.org/en/docs/error-kinds/#bad-assignment",
+              "id": "bad-assignment"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}
+[1]
+```
+
 ## `--output-format junit-xml` omits warnings unless `--min-severity=warn`
 
 Severity filtering happens before formatting, so by default a warning-level
