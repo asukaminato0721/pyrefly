@@ -300,6 +300,45 @@ takes(foo=1, bar="x", baz=None)
 }
 
 #[test]
+fn hover_shows_typed_dict_structure() {
+    let code = r#"
+from typing import TypedDict
+
+class OpenPayload(TypedDict):
+    foo: int
+    bar: str
+
+class ClosedPayload(TypedDict, closed=True):
+    foo: int
+    bar: str
+
+open_payload: OpenPayload = {"foo": 1, "bar": "x"}
+#^
+closed_payload: ClosedPayload = {"foo": 1, "bar": "x"}
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert_eq!(
+        r#"
+# main.py
+12 | open_payload: OpenPayload = {"foo": 1, "bar": "x"}
+      ^
+```python
+(variable) open_payload: {"foo": int, "bar": str, ...}
+```
+
+14 | closed_payload: ClosedPayload = {"foo": 1, "bar": "x"}
+      ^
+```python
+(variable) closed_payload: {"foo": int, "bar": str}
+```
+"#
+        .trim(),
+        report.trim(),
+    );
+}
+
+#[test]
 fn hover_on_callable_instance_uses_dunder_call_signature() {
     let code = r#"
 class Greeter:

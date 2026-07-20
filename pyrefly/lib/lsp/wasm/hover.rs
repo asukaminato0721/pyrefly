@@ -34,6 +34,7 @@ use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::display::LspDisplayMode;
 use pyrefly_types::type_var::Variance;
+use pyrefly_types::typed_dict::ExtraItems;
 use pyrefly_types::types::Type;
 use pyrefly_util::absolutize::Absolutize as _;
 use pyrefly_util::lined_buffer::LineNumber;
@@ -532,6 +533,36 @@ fn type_parameter_hover_display(
     ))
 }
 
+/// Show TypedDict values as their field structure instead of only their nominal class name.
+fn typed_dict_hover_display(
+    solver: &AnswersSolver<TransactionHandle<'_>>,
+    type_: &Type,
+) -> Option<String> {
+    let typed_dict = match type_ {
+        Type::TypedDict(typed_dict) | Type::PartialTypedDict(typed_dict) => typed_dict,
+        _ => return None,
+    };
+    let mut fields = solver
+        .type_order()
+        .typed_dict_fields(typed_dict)
+        .into_iter()
+        .map(|(name, field)| {
+            format!(
+                "{:?}: {}",
+                name.as_str(),
+                solver
+                    .for_display(field.ty)
+                    .as_lsp_string_with_fallback_name(None, LspDisplayMode::Hover)
+            )
+        })
+        .collect::<Vec<_>>();
+    match solver.type_order().typed_dict_extra_items(typed_dict) {
+        ExtraItems::Default | ExtraItems::Extra(_) => fields.push("...".to_owned()),
+        ExtraItems::Closed => {}
+    }
+    Some(format!("{{{}}}", fields.join(", ")))
+}
+
 fn class_hover_display(
     solver: &AnswersSolver<TransactionHandle<'_>>,
     type_: &Type,
@@ -849,6 +880,9 @@ pub fn get_hover(
             if let Some(owner) = &type_parameter_owner_class
                 && let Some(display) = type_parameter_hover_display(&solver, &cloned, owner)
             {
+                return display;
+            }
+            if let Some(display) = typed_dict_hover_display(&solver, &cloned) {
                 return display;
             }
             if show_constructor
