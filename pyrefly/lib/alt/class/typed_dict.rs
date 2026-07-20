@@ -986,6 +986,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 value: _,
                 annotation,
                 alias_of: _,
+                ..
             } => (annotation.as_ref(), false),
             _ => (None, false),
         };

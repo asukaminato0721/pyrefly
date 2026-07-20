@@ -1765,6 +1765,7 @@ impl Query {
                             value,
                             annotation,
                             alias_of: _,
+                            ..
                         } => {
                             annotation
                                 .and_then(|idx| answers.get_idx(idx))

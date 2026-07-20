@@ -3045,6 +3045,9 @@ pub enum ClassFieldDefinition {
     /// field in the same class (used for enum alias detection).
     AssignedInBody {
         value: Box<ExprOrBinding>,
+        /// Additional assignments through a class-method receiver that contribute to the inferred
+        /// type of an unannotated `None` sentinel.
+        additional_values: Vec<ExprOrBinding>,
         annotation: Option<Idx<KeyAnnotation>>,
         alias_of: Option<Name>,
     },

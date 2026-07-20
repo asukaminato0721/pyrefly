@@ -1115,11 +1115,13 @@ impl<'a> BindingsBuilder<'a> {
             let definition = match (member_value, force_class_initialization) {
                 (Some(value), _) => ClassFieldDefinition::AssignedInBody {
                     value: Box::new(value),
+                    additional_values: Vec::new(),
                     annotation,
                     alias_of: None,
                 },
                 (None, true) => ClassFieldDefinition::AssignedInBody {
                     value: Box::new(ExprOrBinding::Binding(Binding::Any(AnyStyle::Implicit))),
+                    additional_values: Vec::new(),
                     annotation,
                     alias_of: None,
                 },

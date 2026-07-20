@@ -2865,6 +2865,7 @@ impl Scopes {
                         }
                         ClassFieldDefinition::AssignedInBody {
                             value: Box::new(ExprOrBinding::Expr(e.clone())),
+                            additional_values: Vec::new(),
                             annotation: static_info.annotation(),
                             alias_of,
                         }
@@ -2918,6 +2919,20 @@ impl Scopes {
                             *existing_receiver = MethodSelfKind::Class;
                         }
                     }
+                } else if let Some((
+                    ClassFieldDefinition::AssignedInBody {
+                        value,
+                        additional_values,
+                        annotation: None,
+                        ..
+                    },
+                    _,
+                )) = field_definitions.get_mut(name.key())
+                    && matches!(receiver_kind, MethodSelfKind::Class)
+                    && annotation.is_none()
+                    && matches!(value.as_ref(), ExprOrBinding::Expr(Expr::NoneLiteral(_)))
+                {
+                    additional_values.extend(values);
                 } else if !field_definitions.contains_key_hashed(name.as_ref()) {
                     field_definitions.insert_hashed(
                         name,

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -1801,6 +1802,26 @@ def foo(x: int | str):
     y = 42
     assert_type(x, Literal[42])
     assert_type(y, Literal[42])
+    "#,
+);
+
+testcase!(
+    test_singleton_class_attribute,
+    TestEnv::new().enable_implicit_any_error(),
+    r#"
+from typing import assert_type
+
+class Test:
+    _instance = None
+
+    @classmethod
+    def instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+assert_type(Test._instance, Test | None)
+assert_type(Test.instance(), Test)
     "#,
 );
 

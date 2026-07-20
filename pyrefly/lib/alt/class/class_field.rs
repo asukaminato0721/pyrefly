@@ -1556,6 +1556,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             ClassFieldDefinition::AssignedInBody {
                 value,
+                additional_values,
                 annotation: annot,
                 ..
             } => {
@@ -1710,15 +1711,43 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 } else {
                     ClassFieldInitialization::ClassBody(None)
                 };
-                let (value_ty, annotation, is_inherited) = self.analyze_class_field_value(
-                    value,
-                    class,
-                    name,
-                    direct_annotation.as_ref(),
-                    false,
-                    range,
-                    errors,
-                );
+                let (value_ty, annotation, is_inherited) = if !additional_values.is_empty()
+                    && direct_annotation.is_none()
+                    && self
+                        .get_inherited_type_and_annotation(class, name)
+                        .1
+                        .is_none()
+                {
+                    let mut types = vec![self.heap.mk_none()];
+                    let mut is_inherited = IsInherited::No;
+                    for additional_value in additional_values {
+                        let (additional_ty, _, additional_is_inherited) = self
+                            .analyze_class_field_value(
+                                additional_value,
+                                class,
+                                name,
+                                None,
+                                false,
+                                range,
+                                errors,
+                            );
+                        types.push(additional_ty);
+                        if matches!(additional_is_inherited, IsInherited::Maybe) {
+                            is_inherited = IsInherited::Maybe;
+                        }
+                    }
+                    (unions(types, self.heap), None, is_inherited)
+                } else {
+                    self.analyze_class_field_value(
+                        value,
+                        class,
+                        name,
+                        direct_annotation.as_ref(),
+                        false,
+                        range,
+                        errors,
+                    )
+                };
                 (
                     initialization,
                     false,
