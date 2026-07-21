@@ -3681,18 +3681,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             return false;
         }
 
-        // TODO(grievejia): In principle we should not really skip `__call__`. But the reality is that
-        // there are too many classes on typeshed whose `__call__` are marked as follows:
-        // ```
-        // def __call__(self, *args: Any, **kwds: Any) -> Any: ...
-        // ```
-        // If we follow our pre-existing subtyping rule, this kind of signature would be non-overridable
-        // -- any overrider must be able to take ANY arguments which can't be practical. We need to either
-        // special-case typeshed or special-case callable subtyping to make `__call__` override check more usable.
-        if field_name == &dunder::CALL {
-            return false;
-        }
-
         // Private attributes should not participate in override checks
         if Ast::is_mangled_attr(field_name) {
             return false;
@@ -3738,6 +3726,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) {
         let is_explicit_override = class_field.is_override();
         if matches!(class_field.1, IsInherited::No) && !is_explicit_override {
+            return;
+        }
+        // A valid proxy annotation is represented by `ProxyMethod`; a raw proxy type here means
+        // annotation validation already failed, so do not cascade with an override error.
+        if matches!(
+            &class_field.0,
+            ClassFieldInner::ClassAttribute { ty, .. } if Self::is_proxy_method_type(ty)
+        ) {
             return;
         }
         let metadata = self.get_metadata_for_class(cls);

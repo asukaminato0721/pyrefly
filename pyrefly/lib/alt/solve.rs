@@ -2796,13 +2796,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // Skip special methods that don't participate in override checks:
             // - Object construction: __new__, __init__, __init_subclass__
             // - __hash__ (often overridden to None)
-            // - __call__ (too many typeshed issues)
             // - Private/mangled attributes (start with __ but don't end with __)
             if field_name == &dunder::NEW
                 || field_name == &dunder::INIT
                 || field_name == &dunder::INIT_SUBCLASS
                 || field_name == &dunder::HASH
-                || field_name == &dunder::CALL
                 || Ast::is_mangled_attr(field_name)
             {
                 continue;

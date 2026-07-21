@@ -824,9 +824,10 @@ class C:
 );
 
 testcase!(
-    bug = "We currently skip checking overrides of `__call__`, which is a soundness hole",
     test_override_dunder_call,
     r#"
+from typing import Any, Protocol
+
 class Base: pass
 class Derived(Base): pass
 
@@ -834,7 +835,20 @@ class UseBase:
     def __call__(self) -> list[Base]: ...
 
 class UseDerived(UseBase):
-    def __call__(self) -> list[Derived]: ...
+    def __call__(self) -> list[Derived]: ...  # E: `UseDerived.__call__` overrides parent class `UseBase` in an inconsistent manner
+
+class Callback(Protocol):
+    def __call__(self, value: str) -> None: ...
+
+class Implementation(Callback):
+    def __call__(self, value: int) -> None: ...  # E: `Implementation.__call__` overrides parent class `Callback` in an inconsistent manner
+
+# The gradual form remains compatible with a specific override.
+class Gradual:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+class Specific(Gradual):
+    def __call__(self, value: int) -> str: ...
     "#,
 );
 
