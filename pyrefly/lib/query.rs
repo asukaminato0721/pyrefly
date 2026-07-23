@@ -586,7 +586,11 @@ fn type_shape_kind(context: &TypeShapeContext, ty: &Type) -> TypeShapeKind {
         }
         Type::Annotated(inner, metadata) => {
             let mut args = vec![type_to_shape(context, inner)];
-            args.extend(metadata.iter().map(|ty| type_to_shape(context, ty)));
+            args.extend(
+                metadata
+                    .iter()
+                    .map(|metadata| type_to_shape(context, &metadata.ty)),
+            );
             named_type_shape_kind("typing.Annotated", args)
         }
         Type::Unpack(inner) => {
