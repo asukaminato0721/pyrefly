@@ -1073,6 +1073,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         base: &Type,
         facet: &FacetKind,
         op: &AtomicNarrowOp,
+        allow_never_collapse: bool,
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
@@ -1157,9 +1158,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     }
                 }))
             }
-            // Only filter members of a union to avoid inferring `Never` excessively
+            // If `allow_never_collapse` is not set, we only filter members of a union
+            // to avoid inferring `Never` excessively
             AtomicNarrowOp::IsInstance(_, _) | AtomicNarrowOp::IsNotInstance(_, _)
-                if base.is_union() =>
+                if base.is_union() || allow_never_collapse =>
             {
                 let suppress_errors = self.error_swallower();
                 Some(self.distribute_over_union(base, |t| {
@@ -2036,6 +2038,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 &base_ty,
                                 last,
                                 &op_for_narrow,
+                                facet_subject.allow_never_collapse,
                                 range,
                                 errors,
                             ) && narrowed_ty != base_ty
@@ -2054,6 +2057,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 base_ty,
                                 last,
                                 &op_for_narrow,
+                                facet_subject.allow_never_collapse,
                                 range,
                                 errors,
                             ) && narrowed_ty != *base_ty

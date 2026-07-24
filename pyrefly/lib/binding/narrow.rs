@@ -409,6 +409,10 @@ pub enum FacetOrigin {
 pub struct FacetSubject {
     pub chain: UnresolvedFacetChain,
     pub origin: FacetOrigin,
+    /// When true, narrowing this facet may collapse a non-union base to `Never`.
+    /// Set only for match-pattern subtraction (the negation of a fully-characterized
+    /// arm), where subtracting a fully-matched member is sound.
+    pub allow_never_collapse: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -431,6 +435,7 @@ impl NarrowingSubject {
                 FacetSubject {
                     chain: UnresolvedFacetChain::new(Vec1::new(prop)),
                     origin: FacetOrigin::Direct,
+                    allow_never_collapse: false,
                 },
             ),
             Self::Facets(name, facets) => {
@@ -440,6 +445,7 @@ impl NarrowingSubject {
                     FacetSubject {
                         chain: UnresolvedFacetChain::new(props),
                         origin: facets.origin,
+                        allow_never_collapse: facets.allow_never_collapse,
                     },
                 )
             }
@@ -495,6 +501,21 @@ impl NarrowOp {
             Self::Atomic(attr, op) => Self::Atomic(attr.clone(), op.negate()),
             Self::And(ops) => Self::Or(ops.map(|op| op.negate())),
             Self::Or(ops) => Self::And(ops.map(|op| op.negate())),
+        }
+    }
+
+    /// Mark every facet subject in this op tree as allowed to collapse a non-union
+    /// base to `Never`. Used on the negation of a match arm so that subtracting a
+    /// fully-matched member soundly reduces the subject (see `FacetSubject`).
+    pub fn set_allow_never_collapse(&mut self) {
+        match self {
+            Self::Atomic(Some(facet_subject), _) => facet_subject.allow_never_collapse = true,
+            Self::Atomic(None, _) => {}
+            Self::And(ops) | Self::Or(ops) => {
+                for op in ops.iter_mut() {
+                    op.set_allow_never_collapse();
+                }
+            }
         }
     }
 
@@ -557,6 +578,9 @@ impl NarrowOp {
             FacetSubject {
                 chain: UnresolvedFacetChain::new(chain),
                 origin,
+                // Unlike `rebase_facet_subject`, this operation composes 2 narrows so we
+                // conservatively set the flag if either narrow does
+                allow_never_collapse: base.allow_never_collapse || extra.allow_never_collapse,
             }
         }
 
@@ -632,6 +656,10 @@ impl NarrowOp {
                 Some(Some(FacetSubject {
                     chain: UnresolvedFacetChain::new(chain),
                     origin: extra.origin,
+                    // Base's facet chain is the prefix we are stripping from extra's facet chain;
+                    // the resulting op is the same as `extra` just w/o the prefix, so we take
+                    // the `allow_never_collapse` from `extra` only.
+                    allow_never_collapse: extra.allow_never_collapse,
                 }))
             } else {
                 Some(None)
@@ -709,6 +737,12 @@ impl NarrowOps {
                 .map(|(name, (op, range))| (name.clone(), (op.negate(), *range)))
                 .collect(),
         )
+    }
+
+    pub fn set_allow_never_collapse(&mut self) {
+        for (op, _) in self.0.values_mut() {
+            op.set_allow_never_collapse();
+        }
     }
 
     fn get_or_placeholder(&mut self, name: Name, range: TextRange) -> &mut NarrowOp {
@@ -1451,6 +1485,7 @@ fn dict_get_subject_for_call_expr(call_expr: &ExprCall) -> Option<NarrowingSubje
                 FacetSubject {
                     chain: UnresolvedFacetChain::new(props),
                     origin: FacetOrigin::GetMethod,
+                    allow_never_collapse: false,
                 },
             ));
         } else if let Expr::Name(name) = &*attr.value {
@@ -1460,6 +1495,7 @@ fn dict_get_subject_for_call_expr(call_expr: &ExprCall) -> Option<NarrowingSubje
                 FacetSubject {
                     chain: UnresolvedFacetChain::new(Vec1::new(UnresolvedFacetKind::Key(key))),
                     origin: FacetOrigin::GetMethod,
+                    allow_never_collapse: false,
                 },
             ));
         }
@@ -1478,6 +1514,7 @@ pub fn expr_to_subjects(expr: &Expr) -> Vec<NarrowingSubject> {
                         FacetSubject {
                             chain: facets,
                             origin: FacetOrigin::Direct,
+                            allow_never_collapse: false,
                         },
                     ));
                 }

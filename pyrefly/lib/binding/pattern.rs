@@ -315,6 +315,7 @@ impl<'a> BindingsBuilder<'a> {
                                         UnresolvedFacetKind::Index(i as i64),
                                     )),
                                     origin: FacetOrigin::Direct,
+                                    allow_never_collapse: false,
                                 }),
                                 atomic,
                             ));
@@ -878,6 +879,7 @@ impl<'a> BindingsBuilder<'a> {
                     },
                 );
             }
+            let has_guard = guard.is_some();
             if let Some(mut guard) = guard {
                 self.ensure_expr(&mut guard, &mut Usage::NonPinningValue(None));
                 let guard_narrow_ops = NarrowOps::from_expr(self, Some(guard.as_ref()));
@@ -904,7 +906,16 @@ impl<'a> BindingsBuilder<'a> {
                     .as_ref()
                     .is_some_and(|s| name == s.name())
             });
-            let negated_new_narrow_ops = new_narrow_ops.negate();
+            let mut negated_new_narrow_ops = new_narrow_ops.negate();
+            // The negation of an unguarded match arm subtracts the members it covered;
+            // when the arm fully characterizes its member, this subtraction may soundly
+            // reduce a non-union subject to `Never` (needed for exhaustiveness across cases).
+            if !has_guard {
+                negated_new_narrow_ops.scope.set_allow_never_collapse();
+                if let Some((op, _)) = negated_new_narrow_ops.subject.as_mut() {
+                    op.set_allow_never_collapse();
+                }
+            }
             negated_prev_ops.and_all(negated_new_narrow_ops.scope);
             if let Some((new_op, new_range)) = negated_new_narrow_ops.subject {
                 negated_prev_subject = Some(match negated_prev_subject {
