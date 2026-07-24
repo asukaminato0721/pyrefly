@@ -84,6 +84,14 @@ pub struct HoverValue {
     pub show_go_to_links: bool,
 }
 
+/// Hover contents and whether another verbosity request can reveal more detail.
+///
+/// Hover verbosity currently has two states: named nested unions or fully expanded unions.
+pub struct HoverResult {
+    pub hover: Hover,
+    pub can_increase_verbosity: bool,
+}
+
 impl HoverValue {
     #[cfg(not(target_arch = "wasm32"))]
     fn format_symbol_def_locations(t: &Type) -> Option<String> {
@@ -534,11 +542,7 @@ fn type_parameter_hover_display(
     ))
 }
 
-fn class_hover_display(
-    solver: &AnswersSolver<TransactionHandle<'_>>,
-    type_: &Type,
-    name_for_display: Option<&str>,
-) -> Option<String> {
+fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Type) -> Option<Type> {
     let enum_class = match type_ {
         Type::ClassDef(cls) => Some(cls),
         Type::ClassType(cls) => Some(cls.class_object()),
@@ -556,15 +560,11 @@ fn class_hover_display(
             .into_iter()
             .map(|lit| lit.to_implicit_type())
             .collect();
-        let enum_display_type = if members.is_empty() {
+        return Some(if members.is_empty() {
             type_.clone()
         } else {
             solver.heap.mk_union(members)
-        };
-        return Some(
-            enum_display_type
-                .as_lsp_string_with_fallback_name(name_for_display, LspDisplayMode::Hover),
-        );
+        });
     }
 
     let mut constructor = match type_ {
@@ -580,8 +580,7 @@ fn class_hover_display(
         _ => None,
     }?;
     constructor.transform_toplevel_callable(|c| expand_callable_kwargs_for_hover(solver, c));
-    constructor = solver.for_display(constructor);
-    Some(constructor.as_lsp_string_with_fallback_name(name_for_display, LspDisplayMode::Hover))
+    Some(solver.for_display(constructor))
 }
 
 fn parameter_documentation_for_callee(
@@ -692,6 +691,18 @@ pub fn get_hover(
     position: TextSize,
     show_go_to_links: bool,
 ) -> Option<Hover> {
+    get_hover_with_verbosity(transaction, handle, position, show_go_to_links, 0)
+        .map(|result| result.hover)
+}
+
+/// Build hover contents and report whether the compact type display can be expanded.
+pub fn get_hover_with_verbosity(
+    transaction: &Transaction<'_>,
+    handle: &Handle,
+    position: TextSize,
+    show_go_to_links: bool,
+    verbosity_level: usize,
+) -> Option<HoverResult> {
     let module_info = transaction.get_module_info(handle);
 
     // Handle hovering over an ignore comment
@@ -719,7 +730,10 @@ pub fn get_hover(
                     suppression_line,
                     module.ignore(),
                 );
-                return Some(format_suppressed_errors_hover(suppressed_errors));
+                return Some(HoverResult {
+                    hover: format_suppressed_errors_hover(suppressed_errors),
+                    can_increase_verbosity: false,
+                });
             }
         }
     }
@@ -734,15 +748,18 @@ pub fn get_hover(
         && let Some(iterable_type) =
             transaction.get_type_at_for_display(handle, iterable_range.start())
     {
-        return Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: format!(
-                    "```python\n(keyword) in\n```\n---\nIteration over `{}`",
-                    iterable_type
-                ),
-            }),
-            range: None,
+        return Some(HoverResult {
+            hover: Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: format!(
+                        "```python\n(keyword) in\n```\n---\nIteration over `{}`",
+                        iterable_type
+                    ),
+                }),
+                range: None,
+            },
+            can_increase_verbosity: false,
         });
     }
 
@@ -865,27 +882,47 @@ pub fn get_hover(
         && hover_identifier
             .as_ref()
             .is_some_and(|id| !matches!(id.context, IdentifierContext::ClassDef { .. }));
-    let type_display = transaction.ad_hoc_solve(handle, "hover_display", {
-        let mut cloned = type_.clone();
-        move |solver| {
-            if let Some(owner) = &type_parameter_owner_class
-                && let Some(display) = type_parameter_hover_display(&solver, &cloned, owner)
-            {
-                return display;
+    let (type_display, can_increase_verbosity) =
+        match transaction.ad_hoc_solve(handle, "hover_display", {
+            let mut cloned = type_.clone();
+            move |solver| {
+                let unions_expanded = verbosity_level > 0;
+                if let Some(owner) = &type_parameter_owner_class
+                    && let Some(display) = type_parameter_hover_display(&solver, &cloned, owner)
+                {
+                    // Type parameter displays (e.g. `T@Foo (covariant)`) never contain unions.
+                    return (display, false);
+                }
+                // Named unions can be surfaced by the class/kwargs transforms, so pick the
+                // type we're about to render first.
+                let display_type = if show_constructor
+                    && let Some(class_type) = class_display_type(&solver, &cloned)
+                {
+                    class_type
+                } else {
+                    cloned.transform_toplevel_callable(|c| {
+                        expand_callable_kwargs_for_hover(&solver, c)
+                    });
+                    cloned
+                };
+                let render = |expand| {
+                    display_type.as_lsp_string_with_fallback_name_and_expanded_unions(
+                        name_for_display.as_deref(),
+                        LspDisplayMode::Hover,
+                        expand,
+                    )
+                };
+                let rendered = render(unions_expanded);
+                // Offer "+" only when expanding actually changes the rendered type. Deriving
+                // this from the renderer itself (rather than a structural type walk) means the
+                // affordance can never advertise an expansion that produces identical output.
+                let can_increase_verbosity = !unions_expanded && rendered != render(true);
+                (rendered, can_increase_verbosity)
             }
-            if show_constructor
-                && let Some(display) =
-                    class_hover_display(&solver, &cloned, name_for_display.as_deref())
-            {
-                return display;
-            }
-            cloned.transform_toplevel_callable(|c| expand_callable_kwargs_for_hover(&solver, c));
-            cloned.as_lsp_string_with_fallback_name(
-                name_for_display.as_deref(),
-                LspDisplayMode::Hover,
-            )
-        }
-    });
+        }) {
+            Some((display, can_increase)) => (Some(display), can_increase),
+            None => (None, false),
+        };
 
     let docstring = if let (Some(docstring), Some(module)) = (docstring_range, module) {
         Some(Docstring(docstring, module))
@@ -918,8 +955,8 @@ pub fn get_hover(
         }
     }
 
-    Some(
-        HoverValue {
+    Some(HoverResult {
+        hover: HoverValue {
             kind,
             name,
             type_,
@@ -931,7 +968,8 @@ pub fn get_hover(
             show_go_to_links,
         }
         .format(transaction, handle),
-    )
+        can_increase_verbosity,
+    })
 }
 
 #[cfg(test)]

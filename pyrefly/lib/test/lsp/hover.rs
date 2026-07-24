@@ -14,6 +14,7 @@ use pyrefly_build::handle::Handle;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::get_hover;
+use crate::lsp::wasm::hover::get_hover_with_verbosity;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
@@ -29,6 +30,103 @@ fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String
         }) => markup.value,
         _ => "None".to_owned(),
     }
+}
+
+fn get_test_report_at_verbosity(
+    state: &State,
+    handle: &Handle,
+    position: TextSize,
+    verbosity_level: usize,
+) -> (String, bool) {
+    match get_hover_with_verbosity(
+        &state.transaction(),
+        handle,
+        position,
+        true,
+        verbosity_level,
+    ) {
+        Some(result) => match result.hover {
+            Hover {
+                contents: HoverContents::Markup(markup),
+                ..
+            } => (markup.value, result.can_increase_verbosity),
+            _ => ("None".to_owned(), false),
+        },
+        _ => ("None".to_owned(), false),
+    }
+}
+
+#[test]
+fn hover_verbosity_expands_named_unions() {
+    let code = r#"
+type A = int | str
+x: list[A] = []
+#^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+
+    let (compact, compact_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 0);
+    let (expanded, expanded_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 1);
+
+    assert!(compact.contains("x: list[A]"), "got: {compact}");
+    assert!(compact_can_increase);
+    assert!(expanded.contains("x: list[int | str]"), "got: {expanded}");
+    assert!(!expanded_can_increase);
+}
+
+#[test]
+fn hover_verbosity_expands_named_unions_in_constructor() {
+    // The named union appears only in the constructor signature, not the bare
+    // class type, so expandability must be computed on the rendered constructor.
+    let code = r#"
+type A = int | str
+class C:
+    def __init__(self, x: A) -> None: ...
+value = C
+#       ^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+
+    let (compact, compact_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 0);
+    let (expanded, expanded_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 1);
+
+    assert!(compact.contains("x: A"), "got: {compact}");
+    assert!(compact_can_increase);
+    assert!(expanded.contains("x: int | str"), "got: {expanded}");
+    assert!(!expanded_can_increase);
+}
+
+#[test]
+fn hover_verbosity_hides_plus_without_named_union() {
+    // No named union to reveal, so compact and expanded renders are identical and
+    // the "+" affordance must not be offered.
+    let code = r#"
+x: int = 0
+#^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+
+    let (compact, compact_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 0);
+
+    assert!(compact.contains("x: int"), "got: {compact}");
+    assert!(!compact_can_increase);
 }
 
 fn assert_sphinx_resolved_as_link(report: &str, role: &str, target: &str) {
