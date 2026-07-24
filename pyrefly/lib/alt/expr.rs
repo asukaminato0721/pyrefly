@@ -130,13 +130,16 @@ pub enum TypeOrExpr<'a> {
 
 pub(crate) enum PreparedExprCall {
     Resolved(Type),
-    Callee(Type),
+    Callee {
+        ty: Type,
+        direct_class_specialization: bool,
+    },
 }
 
 impl PreparedExprCall {
     pub(crate) fn callee(&self) -> Option<&Type> {
         match self {
-            Self::Callee(callee) => Some(callee),
+            Self::Callee { ty, .. } => Some(ty),
             Self::Resolved(_) => None,
         }
     }
@@ -939,7 +942,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // Infer a method call's receiver once. A Polars column-algebra transform is a
         // pure function of the receiver schema and is dispatched here; any other
         // receiver is reused for ordinary callee inference rather than inferred again.
-        let callee_ty = if let Expr::Attribute(func) = &*x.func {
+        let (callee_ty, direct_class_specialization) = if let Expr::Attribute(func) = &*x.func {
             let base = self.expr_infer_impl(&func.value, None, errors);
             if let Some(ty) = self.polars_select(base.ty(), func, &x.arguments, errors) {
                 return PreparedExprCall::Resolved(ty);
@@ -961,11 +964,27 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             // and deprecation check here as that path would for any other expression.
             self.check_for_deprecated_call(attr.ty(), func.range(), errors);
             self.record_type_trace(func.range(), attr.ty());
-            attr.into_ty()
+            (attr.into_ty(), false)
+        } else if let Expr::Subscript(func) = &*x.func {
+            let base = self.expr_infer_impl(&func.value, None, errors);
+            let callee = self.subscript_infer(&base, &func.slice, func.range(), errors);
+            let direct_class_specialization = matches!(
+                base.ty(),
+                Type::ClassDef(cls) if !self.get_class_tparams(cls).is_empty()
+            ) && matches!(
+                callee.ty(),
+                Type::Type(inner) if matches!(&**inner, Type::ClassType(_))
+            );
+            self.check_for_deprecated_call(callee.ty(), func.range(), errors);
+            self.record_type_trace(func.range(), callee.ty());
+            (callee.into_ty(), direct_class_specialization)
         } else {
-            self.expr_infer(&x.func, errors)
+            (self.expr_infer(&x.func, errors), false)
         };
-        PreparedExprCall::Callee(callee_ty)
+        PreparedExprCall::Callee {
+            ty: callee_ty,
+            direct_class_specialization,
+        }
     }
 
     pub(crate) fn finish_prepared_expr_call(
@@ -975,9 +994,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Type {
-        let callee_ty = match prepared {
+        let (callee_ty, direct_class_specialization) = match prepared {
             PreparedExprCall::Resolved(ty) => return ty,
-            PreparedExprCall::Callee(callee_ty) => callee_ty,
+            PreparedExprCall::Callee {
+                ty,
+                direct_class_specialization,
+            } => (ty, direct_class_specialization),
         };
 
         self.check_pytorch_tensor_item_call(x, &callee_ty, errors);
@@ -1022,12 +1044,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             } else {
                 obj_ty
                     .at_facet(&facet, || {
-                        self.expr_call_infer(x, callee_ty.clone(), hint, errors)
+                        self.expr_call_infer(
+                            x,
+                            callee_ty.clone(),
+                            direct_class_specialization,
+                            hint,
+                            errors,
+                        )
                     })
                     .into_ty()
             }
         } else {
-            self.expr_call_infer(x, callee_ty, hint, errors)
+            self.expr_call_infer(x, callee_ty, direct_class_specialization, hint, errors)
         }
     }
 
