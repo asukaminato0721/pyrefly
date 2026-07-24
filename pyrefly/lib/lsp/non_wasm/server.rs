@@ -331,6 +331,7 @@ use crate::lsp::non_wasm::workspace::Workspace;
 use crate::lsp::non_wasm::workspace::Workspaces;
 use crate::lsp::wasm::completion::CompletionOptions as CompletionRequestOptions;
 use crate::lsp::wasm::completion::supports_snippet_completions;
+use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::HoverResult;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
 use crate::lsp::wasm::notebook::DidChangeNotebookDocument;
@@ -5200,8 +5201,10 @@ impl Server {
             transaction,
             &handle,
             position,
-            show_go_to_links,
-            verbosity_level,
+            HoverOptions {
+                show_go_to_links,
+                verbosity_level,
+            },
         ))
     }
 

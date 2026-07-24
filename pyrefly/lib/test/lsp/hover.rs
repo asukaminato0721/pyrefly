@@ -13,6 +13,7 @@ use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use ruff_text_size::TextSize;
 
+use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
 use crate::state::require::Require;
@@ -42,8 +43,10 @@ fn get_test_report_at_verbosity(
         &state.transaction(),
         handle,
         position,
-        true,
-        verbosity_level,
+        HoverOptions {
+            show_go_to_links: true,
+            verbosity_level,
+        },
     ) {
         Some(result) => match result.hover {
             Hover {
