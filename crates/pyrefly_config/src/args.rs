@@ -353,6 +353,15 @@ pub struct ConfigOverrideArgs {
         num_args = 0..=1
     )]
     spec_compliant_overloads: Option<bool>,
+    /// Whether to expand union arguments to narrow an already-matched overloaded call.
+    /// Off by default.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    legacy_overload_expansion: Option<bool>,
 }
 
 impl ConfigOverrideArgs {
@@ -503,6 +512,9 @@ impl ConfigOverrideArgs {
         }
         if let Some(x) = &self.spec_compliant_overloads {
             config.root.spec_compliant_overloads = Some(*x);
+        }
+        if let Some(x) = &self.legacy_overload_expansion {
+            config.root.legacy_overload_expansion = Some(*x);
         }
         let apply_error_settings = |error_config: &mut ErrorDisplayConfig| {
             for error_kind in &self.error {

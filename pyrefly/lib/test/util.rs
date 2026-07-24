@@ -128,6 +128,7 @@ pub struct TestEnv {
     strict_callable_subtyping: bool,
     strict_partial_subtyping: bool,
     spec_compliant_overloads: bool,
+    legacy_overload_expansion: bool,
     no_any_return_error: bool,
     no_any_return_explicit_error: bool,
     no_any_return_implicit_error: bool,
@@ -177,6 +178,7 @@ impl TestEnv {
             strict_callable_subtyping: false,
             strict_partial_subtyping: false,
             spec_compliant_overloads: false,
+            legacy_overload_expansion: false,
             no_any_return_error: false,
             no_any_return_explicit_error: false,
             no_any_return_implicit_error: false,
@@ -387,6 +389,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_legacy_overload_expansion(mut self) -> Self {
+        self.legacy_overload_expansion = true;
+        self
+    }
+
     pub fn enable_no_any_return_error(mut self) -> Self {
         self.no_any_return_error = true;
         self
@@ -520,6 +527,7 @@ impl TestEnv {
         config.root.strict_callable_subtyping = Some(self.strict_callable_subtyping);
         config.root.strict_partial_subtyping = Some(self.strict_partial_subtyping);
         config.root.spec_compliant_overloads = Some(self.spec_compliant_overloads);
+        config.root.legacy_overload_expansion = Some(self.legacy_overload_expansion);
         if config.root.errors.is_none() {
             config.root.errors = Some(ErrorDisplayConfig::new(HashMap::new()));
         };

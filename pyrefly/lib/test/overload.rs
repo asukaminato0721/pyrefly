@@ -1267,6 +1267,92 @@ def g(x: tuple[int, bool]):
 );
 
 testcase!(
+    test_expand_refines_generic_match_dropping_never,
+    TestEnv::new().enable_legacy_overload_expansion(),
+    r#"
+from typing import assert_type, overload, NoReturn, TypeVar
+T = TypeVar("T")
+
+@overload
+def not_none(x: None) -> NoReturn: ...
+@overload
+def not_none(x: T) -> T: ...
+def not_none(x: T | None) -> T:
+    raise NotImplementedError
+
+def g(x: int | None):
+    assert_type(not_none(x), int)
+    "#,
+);
+
+testcase!(
+    test_no_refine_matched_overload_by_default,
+    r#"
+from typing import assert_type, overload, NoReturn, TypeVar
+T = TypeVar("T")
+
+@overload
+def not_none(x: None) -> NoReturn: ...
+@overload
+def not_none(x: T) -> T: ...
+def not_none(x: T | None) -> T:
+    raise NotImplementedError
+
+def g(x: int | None):
+    assert_type(not_none(x), int | None)
+    "#,
+);
+
+testcase!(
+    test_expand_refines_when_unrelated_arg_expands_first,
+    TestEnv::new().enable_legacy_overload_expansion(),
+    r#"
+from typing import assert_type, Never, overload, TypeVar
+T = TypeVar("T")
+@overload
+def f(x: object, y: None) -> Never: ...
+@overload
+def f(x: object, y: T) -> T: ...
+def f(x: object, y: T | None) -> T:
+    if y is None:
+        raise AssertionError
+    return y
+def test(x: int | str, y: int | None) -> None:
+    # `x` expands first without dropping an arm; refinement must keep going to `y`.
+    assert_type(f(x, y), int)
+    "#,
+);
+
+testcase!(
+    test_expand_refine_only_does_not_broaden,
+    TestEnv::new().enable_legacy_overload_expansion(),
+    r#"
+from typing import assert_type, overload
+
+@overload
+def f(x: int) -> bytes: ...
+@overload
+def f(x: object) -> str: ...
+def f(x: object) -> bytes | str:
+    raise NotImplementedError
+
+def g(x: int | str):
+    assert_type(f(x), str)
+    "#,
+);
+
+testcase!(
+    test_expand_no_refine_without_uninhabited_arm,
+    TestEnv::new().enable_legacy_overload_expansion(),
+    r#"
+from typing import assert_type
+
+def f(a: list[int] | list[str], b: list[bytes]):
+    assert_type(zip(a, b), zip[tuple[int | str, bytes]])
+    "#,
+);
+
+testcase!(
     test_wrong_arity,
     r#"
 from typing import overload

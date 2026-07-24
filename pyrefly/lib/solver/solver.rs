@@ -187,7 +187,7 @@ mod tests {
     use super::*;
 
     fn solver_with_answer(answer: Type) -> (Solver, Var) {
-        let solver = Solver::new(false, true, false, false, false);
+        let solver = Solver::new(false, true, false, false, false, false);
         let uniques = UniqueFactory::new();
         let var = Var::new(&uniques);
         solver
@@ -639,7 +639,7 @@ mod tests {
         ];
         for (index, (v1_quantified, k1, r1, v2_quantified, k2, r2)) in cases.into_iter().enumerate()
         {
-            let solver = Solver::new(false, true, false, false, false);
+            let solver = Solver::new(false, true, false, false, false, false);
             let uniques = UniqueFactory::new();
             let v1 = Var::new(&uniques);
             let v2 = Var::new(&uniques);
@@ -1042,6 +1042,7 @@ pub struct Solver {
     pub strict_callable_subtyping: bool,
     pub strict_partial_subtyping: bool,
     pub spec_compliant_overloads: bool,
+    pub legacy_overload_expansion: bool,
 }
 
 impl Display for Solver {
@@ -1100,6 +1101,7 @@ impl Solver {
         strict_callable_subtyping: bool,
         strict_partial_subtyping: bool,
         spec_compliant_overloads: bool,
+        legacy_overload_expansion: bool,
     ) -> Self {
         Self {
             variables: Default::default(),
@@ -1112,6 +1114,7 @@ impl Solver {
             strict_callable_subtyping,
             strict_partial_subtyping,
             spec_compliant_overloads,
+            legacy_overload_expansion,
         }
     }
 

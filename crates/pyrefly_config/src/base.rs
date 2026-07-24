@@ -169,6 +169,7 @@ impl Preset {
                     errors: Some(ErrorDisplayConfig::new(errors)),
                     check_unannotated_defs: Some(false),
                     infer_return_types: Some(InferReturnTypes::Never),
+                    legacy_overload_expansion: Some(true),
                     ..Default::default()
                 }
             }
@@ -320,6 +321,11 @@ pub struct ConfigBase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec_compliant_overloads: Option<bool>,
 
+    /// Whether to expand union arguments to narrow an already-matched overloaded call.
+    /// Off by default; enabled by the `legacy` preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_overload_expansion: Option<bool>,
+
     /// Any unknown config items
     #[serde(default, flatten)]
     pub(crate) extras: ExtraConfigs,
@@ -431,6 +437,10 @@ impl ConfigBase {
 
     pub fn get_spec_compliant_overloads(base: &Self) -> Option<bool> {
         base.spec_compliant_overloads
+    }
+
+    pub fn get_legacy_overload_expansion(base: &Self) -> Option<bool> {
+        base.legacy_overload_expansion
     }
 }
 

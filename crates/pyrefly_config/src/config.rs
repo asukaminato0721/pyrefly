@@ -1061,6 +1061,14 @@ impl ConfigFile {
                  self.root.spec_compliant_overloads.unwrap())
     }
 
+    pub fn legacy_overload_expansion(&self, path: &Path) -> bool {
+        self.get_from_sub_configs(ConfigBase::get_legacy_overload_expansion, path)
+            .unwrap_or_else(||
+                 // we can use unwrap here, because the value in the root config must
+                 // be set in `ConfigFile::configure()`.
+                 self.root.legacy_overload_expansion.unwrap())
+    }
+
     pub fn enabled_ignores(&self, path: &Path) -> &SmallSet<Tool> {
         self.get_from_sub_configs(ConfigBase::get_enabled_ignores, path)
             .unwrap_or_else(||
@@ -1392,6 +1400,7 @@ impl ConfigFile {
             apply_preset_default!(strict_callable_subtyping);
             apply_preset_default!(strict_partial_subtyping);
             apply_preset_default!(spec_compliant_overloads);
+            apply_preset_default!(legacy_overload_expansion);
             apply_preset_default!(ignore_errors_in_generated_code);
             apply_preset_default!(permissive_ignores);
         }
@@ -1456,6 +1465,10 @@ impl ConfigFile {
 
         if self.root.spec_compliant_overloads.is_none() {
             self.root.spec_compliant_overloads = Some(false);
+        }
+
+        if self.root.legacy_overload_expansion.is_none() {
+            self.root.legacy_overload_expansion = Some(false);
         }
 
         let tools_from_permissive_ignores = match self.root.permissive_ignores {
@@ -1962,6 +1975,7 @@ mod tests {
                     recursion_depth_limit: None,
                     recursion_overflow_handler: None,
                     spec_compliant_overloads: None,
+                    legacy_overload_expansion: None,
                 },
                 source_db: Default::default(),
                 sub_configs: vec![SubConfig {
@@ -1988,6 +2002,7 @@ mod tests {
                         recursion_depth_limit: None,
                         recursion_overflow_handler: None,
                         spec_compliant_overloads: None,
+                        legacy_overload_expansion: None,
                     }
                 }],
                 coverage: CoverageConfig {
@@ -2566,6 +2581,7 @@ output-format = "omit-errors"
                 recursion_depth_limit: None,
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
+                legacy_overload_expansion: None,
             },
             sub_configs: vec![
                 SubConfig {
@@ -3430,6 +3446,7 @@ output-format = "omit-errors"
                 recursion_depth_limit: None,
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
+                legacy_overload_expansion: None,
             },
             sub_configs: vec![],
             ..Default::default()
@@ -3470,6 +3487,7 @@ output-format = "omit-errors"
                 recursion_depth_limit: None,
                 recursion_overflow_handler: None,
                 spec_compliant_overloads: None,
+                legacy_overload_expansion: None,
             },
             sub_configs: vec![],
             ..Default::default()

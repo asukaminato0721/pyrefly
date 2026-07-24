@@ -319,10 +319,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     &ctor_targs,
                 );
 
-                // Step 3: perform argument type expansion.
+                // Step 3: argument type expansion. When the mypy-compatibility flag is on, we also
+                // use it to narrow an already-matched call to a more precise return type.
+                let refine = matched
+                    && self.solver().legacy_overload_expansion
+                    && matches!(&closest_overload.res, Type::Union(_));
                 let mut args_expander = ArgsExpander::new(args.clone(), keywords.clone(), self);
                 let owner = Owner::new();
-                'outer: while !matched && let Some(arg_lists) = args_expander.expand(errors, &owner)
+                'outer: while (!matched || refine)
+                    && let Some(arg_lists) = args_expander.expand(errors, &owner)
                 {
                     // Expand by one argument (for example, try splitting up union types), and try the call with each
                     // resulting arguments list.
@@ -348,7 +353,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         }
                         matched_overloads.push(cur_closest);
                     }
-                    if let Some(first_overload) = matched_overloads.first() {
+                    if !matched_overloads.is_empty() {
+                        if matched {
+                            // Adopt only when an expanded member hit a `Never` overload, dropping it
+                            // from the union; otherwise try the next argument rather than give up.
+                            let dropped_arm = matched_overloads.iter().any(|o| o.res.is_never());
+                            let expanded_res = self.unions(matched_overloads.into_map(|o| o.res));
+                            if dropped_arm
+                                && self.is_subset_eq(&expanded_res, &closest_overload.res)
+                                && !self.is_equivalent(&expanded_res, &closest_overload.res)
+                            {
+                                closest_overload.res = expanded_res;
+                                break;
+                            }
+                            continue 'outer;
+                        }
+                        let first_overload = &matched_overloads[0];
                         let func = first_overload.func;
                         let ctor_targs = first_overload.ctor_targs.clone();
                         let argmap = first_overload.argmap.clone();
