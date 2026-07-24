@@ -25,7 +25,6 @@
 //! Run with buck: `buck run @fbcode//mode/opt fbcode//pyrefly/pyrefly:micro_bench -- --bench`
 
 use std::fmt::Write as _;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -47,11 +46,15 @@ use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_python::sys_info::SysInfo;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::thread_pool::ThreadCount;
+use pyrefly_util::timer::set_timing_enabled;
 
 const BENCH_FILE: &str = "bench.py";
 
 /// Single-threaded state with stdlib pre-initialized.
 static SHARED_STATE: LazyLock<State> = LazyLock::new(|| {
+    // Disable the type checker's profiling timers: each `Instant::now()` is a
+    // `clock_gettime` syscall under instrumentation and the benchmark doesn't need them.
+    set_timing_enabled(false);
     let sys_info = SysInfo::new(PythonVersion::default(), PythonPlatform::default());
     let config = {
         let mut c = ConfigFile::default();
@@ -65,7 +68,9 @@ static SHARED_STATE: LazyLock<State> = LazyLock::new(|| {
         ArcId::new(c)
     };
     let finder = ConfigFinder::new_constant(config);
-    let state = State::new(finder, ThreadCount::NumThreads(NonZeroUsize::MIN));
+    // Inline (no rayon pool): a pooled run would block this thread on a `futex`
+    // while a worker does the check. Inline keeps the whole check on this thread.
+    let state = State::new(finder, ThreadCount::Inline);
     // Force stdlib init by running an empty module.
     let h = Handle::new(
         ModuleName::from_str("_bench_init"),
