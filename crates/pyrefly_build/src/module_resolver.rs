@@ -13,13 +13,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Instant;
 
 use pyrefly_python::COMPILED_FILE_SUFFIXES;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::module_path::ModuleStyle;
 use pyrefly_util::locked_map::LockedMap;
+use pyrefly_util::timer::Timer;
 use regex::Regex;
 use starlark_map::small_map::SmallMap;
 use vec1::Vec1;
@@ -35,9 +35,9 @@ fn timed_stat(observer: Option<&dyn ModuleResolutionObserver>, f: impl FnOnce() 
     match observer {
         None => f(),
         Some(observer) => {
-            let start = Instant::now();
+            let start = Timer::start();
             let result = f();
-            observer.observe_stat(start.elapsed().as_nanos() as u64);
+            observer.observe_stat(start.elapsed_nanos());
             result
         }
     }
@@ -64,7 +64,7 @@ static PKGUTIL_EXTEND_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn is_pkgutil_namespace(init_path: &Path, observer: Option<&dyn ModuleResolutionObserver>) -> bool {
-    let start = observer.map(|_| Instant::now());
+    let start = observer.map(|_| Timer::start());
     let Ok(mut file) = std::fs::File::open(init_path) else {
         return false;
     };
@@ -78,7 +78,7 @@ fn is_pkgutil_namespace(init_path: &Path, observer: Option<&dyn ModuleResolution
         }
     }
     if let Some(observer) = observer {
-        observer.observe_read(start.unwrap().elapsed().as_nanos() as u64);
+        observer.observe_read(start.unwrap().elapsed_nanos());
     }
     let contents = String::from_utf8_lossy(&buf[..total]);
     PKGUTIL_EXTEND_PATH_PATTERN.is_match(&contents)
