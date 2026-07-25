@@ -271,6 +271,24 @@ class B(A):
 );
 
 testcase!(
+    test_super_with_self_type_args,
+    r#"
+class Base:
+    def __init_subclass__(cls) -> None:
+        super().__init_subclass__()
+        cls.parent_value = getattr(super(cls, cls), "value", None)
+
+class Parent(Base):
+    value = "parent"
+
+class Child(Parent):
+    value = "child"
+
+assert Child.parent_value == "parent"
+    "#,
+);
+
+testcase!(
     test_super_new_return,
     r#"
 from typing import Self

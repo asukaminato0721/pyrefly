@@ -3254,63 +3254,65 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     ) -> Type {
         match style {
             SuperStyle::ExplicitArgs(cls_binding, obj_binding) => {
-                match self.get_idx(*cls_binding).ty() {
-                    Type::Any(style) => style.propagate(),
-                    cls_type @ Type::ClassDef(cls) => {
-                        let heap = self.heap;
-                        let make_super_instance = |obj_cls, super_obj: &dyn Fn() -> SuperObj| {
-                            let lookup_cls = self.get_super_lookup_class(cls, obj_cls);
-                            lookup_cls.map_or_else (
-                                || {
-                                    let cls_type = self.for_display(cls_type.clone());
-                                    self.error(
-                                        errors,
-                                        range,
-                                        ErrorKind::InvalidSuperCall,
-                                        format!(
-                                            "Illegal `super({cls_type}, {obj_cls})` call: `{obj_cls}` is not an instance or subclass of `{cls_type}`"
-                                        ),
-                                    )
-                                },
-                                |lookup_cls| {
-                                    heap.mk_super_instance(lookup_cls, super_obj())
-                                }
+                let cls_binding_type = self.get_idx(*cls_binding);
+                let cls_type = cls_binding_type.ty();
+                let cls = match cls_type {
+                    Type::Any(style) => return style.propagate(),
+                    Type::ClassDef(cls) => cls,
+                    Type::Type(f) if let Type::SelfType(cls) = &**f => cls.class_object(),
+                    t => {
+                        return self.error(
+                            errors,
+                            range,
+                            ErrorKind::InvalidArgument,
+                            format!(
+                                "Expected first argument to `super` to be a class object, got `{}`",
+                                self.for_display(t.clone())
+                            ),
+                        );
+                    }
+                };
+                let heap = self.heap;
+                let make_super_instance = |obj_cls, super_obj: &dyn Fn() -> SuperObj| {
+                    let lookup_cls = self.get_super_lookup_class(cls, obj_cls);
+                    lookup_cls.map_or_else (
+                        || {
+                            let cls_type = self.for_display(cls_type.clone());
+                            self.error(
+                                errors,
+                                range,
+                                ErrorKind::InvalidSuperCall,
+                                format!(
+                                    "Illegal `super({cls_type}, {obj_cls})` call: `{obj_cls}` is not an instance or subclass of `{cls_type}`"
+                                ),
                             )
-                        };
-                        match self.get_idx(*obj_binding).ty() {
-                            Type::Any(style) => style.propagate(),
-                            Type::ClassType(obj_cls) => make_super_instance(obj_cls, &|| SuperObj::Instance(obj_cls.clone())),
-                            Type::Type(f) if let Type::ClassType(obj_cls) = &**f => {
-                                make_super_instance(obj_cls, &|| SuperObj::Class(obj_cls.clone()))
-                            }
-                            Type::ClassDef(obj_cls) => {
-                                let obj_type = self.type_order().as_class_type_unchecked(obj_cls);
-                                make_super_instance(&obj_type, &|| SuperObj::Class(obj_type.clone()))
-                            }
-                            Type::SelfType(obj_cls) => {
-                                make_super_instance(obj_cls, &|| SuperObj::Instance(obj_cls.clone()))
-                            }
-                            Type::Type(f) if let Type::SelfType(obj_cls) = &**f => {
-                                make_super_instance(obj_cls, &|| SuperObj::Class(obj_cls.clone()))
-                            }
-                            t => {
-                                self.error(
-                                    errors,
-                                    range,
-                                    ErrorKind::InvalidArgument,
-                                    format!("Expected second argument to `super` to be a class object or instance, got `{}`", self.for_display(t.clone())),
-                                )
-                            }
+                        },
+                        |lookup_cls| {
+                            heap.mk_super_instance(lookup_cls, super_obj())
                         }
+                    )
+                };
+                match self.get_idx(*obj_binding).ty() {
+                    Type::Any(style) => style.propagate(),
+                    Type::ClassType(obj_cls) => make_super_instance(obj_cls, &|| SuperObj::Instance(obj_cls.clone())),
+                    Type::Type(f) if let Type::ClassType(obj_cls) = &**f => {
+                        make_super_instance(obj_cls, &|| SuperObj::Class(obj_cls.clone()))
+                    }
+                    Type::ClassDef(obj_cls) => {
+                        let obj_type = self.type_order().as_class_type_unchecked(obj_cls);
+                        make_super_instance(&obj_type, &|| SuperObj::Class(obj_type.clone()))
+                    }
+                    Type::SelfType(obj_cls) => {
+                        make_super_instance(obj_cls, &|| SuperObj::Instance(obj_cls.clone()))
+                    }
+                    Type::Type(f) if let Type::SelfType(obj_cls) = &**f => {
+                        make_super_instance(obj_cls, &|| SuperObj::Class(obj_cls.clone()))
                     }
                     t => self.error(
                         errors,
                         range,
                         ErrorKind::InvalidArgument,
-                        format!(
-                            "Expected first argument to `super` to be a class object, got `{}`",
-                            self.for_display(t.clone())
-                        ),
+                        format!("Expected second argument to `super` to be a class object or instance, got `{}`", self.for_display(t.clone())),
                     ),
                 }
             }
