@@ -1997,6 +1997,43 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 _ => {}
             };
         }
+        if matches!(initialization, ClassFieldInitialization::ClassBody(Some(_)))
+            && let ClassFieldDefinition::AssignedInBody { value, .. } = field_definition
+            && let ExprOrBinding::Expr(expr @ Expr::Call(call)) = value.as_ref()
+            && let Some(default) = call.arguments.find_keyword("default")
+        {
+            // A field specifier whose signature accepts `Any` cannot report this mistake as an
+            // ordinary argument type error. Only add the targeted hint when the call is otherwise
+            // valid and invoking the callable would produce the declared field type.
+            let call_errors = self.error_collector();
+            self.attribute_expr_infer(expr, annotation.as_ref(), name, &call_errors);
+            if call_errors.is_empty() {
+                let ignore = self.error_swallower();
+                let default_ty = self.expr_infer(&default.value, &ignore);
+                let callable = self
+                    .constructor_to_callable_distributed(&default_ty)
+                    .unwrap_or_else(|| default_ty.clone());
+                let expected_ty = descriptor
+                    .as_ref()
+                    .and_then(|descriptor| {
+                        self.resolve_descriptor_setter(name, descriptor, &ignore)
+                    })
+                    .map(|setter| ClassField::get_descriptor_setter_value(self.heap, &setter))
+                    .unwrap_or_else(|| ty.clone());
+                if !self.is_subset_eq(&default_ty, &expected_ty)
+                    && callable
+                        .callable_return_type(self.heap)
+                        .is_some_and(|ty| self.is_subset_eq(&ty, &expected_ty))
+                {
+                    self.error(
+                        errors,
+                        default.value.range(),
+                        ErrorKind::BadAssignment,
+                        "Use `default_factory` for a callable default".to_owned(),
+                    );
+                }
+            }
+        }
         // Check if this is a Django ForeignKey or OneToOneField
         let is_foreign_key = metadata.is_django_model()
             && matches!(&ty, Type::ClassType(cls) if self.is_foreign_key_like_field(cls.class_object()));

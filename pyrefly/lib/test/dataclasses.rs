@@ -1391,6 +1391,10 @@ C2(x=1)  # OK
 class C3:
     x: int = field(default="oops")  # E: `str` is not assignable to `int`
     y: str = field(default_factory=factory)  # E: `int` is not assignable to `str`
+
+@dataclass
+class C4:
+    x: str = field(default=lambda: "")  # E: `() -> str` is not assignable to `str`
     "#,
 );
 

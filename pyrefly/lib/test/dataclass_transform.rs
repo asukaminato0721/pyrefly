@@ -451,6 +451,30 @@ C()  # OK because `factory` gives `x` a default
 );
 
 testcase!(
+    test_callable_default,
+    r#"
+from typing import Any, Callable, dataclass_transform
+
+class Mapped[T]:
+    def __get__(self, instance: object, owner: type) -> T: ...
+    def __set__(self, instance: object, value: T) -> None: ...
+
+def mapped_column(**kwargs: Any) -> Any: ...
+
+@dataclass_transform(field_specifiers=(mapped_column,))
+class ModelMeta(type): ...
+
+class ModelBase(metaclass=ModelMeta): ...
+
+class Model(ModelBase):
+    value: Mapped[str] = mapped_column(default=lambda: "default")  # E: Use `default_factory` for a callable default
+    plain_value: str = mapped_column(default=lambda: "default")  # E: Use `default_factory` for a callable default
+    factory_value: Mapped[str] = mapped_column(default_factory=lambda: "default")
+    callback: Mapped[Callable[[], str]] = mapped_column(default=lambda: "default")
+    "#,
+);
+
+testcase!(
     test_alias,
     r#"
 from typing import dataclass_transform, Any, assert_type
