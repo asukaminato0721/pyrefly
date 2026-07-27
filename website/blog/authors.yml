@@ -6,6 +6,18 @@ abbym:
   name: Abby Mitchell
   url: https://github.com/javabster
 
+connernilsen:
+  name: Conner Nilsen
+  url: https://github.com/connernilsen
+
+avikchaudhuri:
+  name: Avik Chaudhuri
+  url: https://github.com/avikchaudhuri
+
+yangdanny:
+  name: Danny Yang
+  url: https://github.com/yangdanny97
+
 kylei:
   name: Kyle Into
   url: https://www.kylei.dev/
@@ -22,6 +34,26 @@ rebeccachen:
   name: Rebecca Chen
   url: https://github.com/rchen152
 
+johnvs:
+  name: John Van Schultz
+  url: https://github.com/jvansch1
+
+jiachen:
+  name: Jia Chen
+  url: https://github.com/grievejia
+
+stroxler:
+  name: Steven Troxler
+  url: https://github.com/stroxler
+
 pyreflyteam:
   name: Pyrefly Team
   url: https://github.com/facebook/pyrefly
+
+asukaminato:
+  name: Asuka Minato
+  url: https://asukaminato.eu.org/
+
+shobhitm:
+  name: Shobhit Mehrotra
+  url: https://github.com/shobhitmehro

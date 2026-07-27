@@ -47,7 +47,9 @@ class TestFlags:
     run_fmt: bool
     run_lint: bool
     run_test: bool
+    run_tensor_shapes: bool
     run_conformance: bool
+    run_jsonschema: bool
 
 
 def print_running(msg: str) -> None:
@@ -116,7 +118,15 @@ class Executor(abc.ABC):
         raise NotImplementedError()
 
     @abc.abstractmethod
+    def tensor_shapes(self) -> None:
+        raise NotImplementedError()
+
+    @abc.abstractmethod
     def conformance(self) -> None:
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    def jsonschema(self) -> None:
         raise NotImplementedError()
 
 
@@ -128,7 +138,21 @@ class CargoExecutor(Executor):
         os.chdir(str(script_dir))
 
     def rustfmt(self) -> None:
-        run(["cargo", "fmt"])
+        # rustfmt.toml's import options are nightly-only; use nightly when present to
+        # apply them and avoid stable rustfmt's "unstable features" warnings.
+        try:
+            # @lint-ignore FIXIT1 NoUnsafeExecRule
+            has_nightly = (
+                subprocess.run(
+                    ["cargo", "+nightly", "fmt", "--version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ).returncode
+                == 0
+            )
+        except OSError:
+            has_nightly = False
+        run(["cargo", "+nightly", "fmt"] if has_nightly else ["cargo", "fmt"])
 
     def clippy(self) -> None:
         run(["cargo", "clippy"])
@@ -136,29 +160,43 @@ class CargoExecutor(Executor):
     def test(self) -> None:
         run(["cargo", "build"])
         run(["cargo", "test"])
-        script_dir = SCRIPT_PATH.absolute()
         scrut_path = shutil.which("scrut")
-        jq_path = shutil.which("jq")
-        if scrut_path is not None:
-            run(
-                [scrut_path, "test", "test"],
-                env={
-                    "PYREFLY": str(script_dir / "target" / "debug" / "pyrefly"),
-                    "TYPESHED_ROOT": str(
-                        script_dir / "crates" / "pyrefly_bundled" / "third_party"
-                    ),
-                    "JQ": jq_path if jq_path else "",
-                    "TEST_PY": str(script_dir / "test.py"),
-                    "PYREFLY_PY": str(script_dir / "pyrefly" / "python"),
-                    "PATH": os.environ.get("PATH", ""),
-                },
-            )
-        else:
+        if scrut_path is None:
             print(
                 Colors.WARNING.value
                 + "Scrut is not installed, skipping scrut tests."
                 + Colors.ENDC.value
             )
+            return
+        script_dir = SCRIPT_PATH.absolute()
+        cargo_target_dir = Path(
+            os.environ.get("CARGO_TARGET_DIR", script_dir / "target")
+        )
+        pyrefly = (
+            cargo_target_dir
+            / "debug"
+            / ("pyrefly.exe" if os.name == "nt" else "pyrefly")
+        )
+        jq_path = shutil.which("jq")
+        run(
+            [scrut_path, "test", "test"],
+            env={
+                "PYREFLY": str(pyrefly),
+                "TYPESHED_ROOT": str(
+                    script_dir / "crates" / "pyrefly_bundled" / "third_party"
+                ),
+                "JQ": jq_path if jq_path else "",
+                "TEST_PY": str(script_dir / "test.py"),
+                "PYREFLY_PY": str(script_dir / "pyrefly" / "python"),
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+
+    def tensor_shapes(self) -> None:
+        run(["cargo", "build"])
+        # The runners resolve the debug pyrefly themselves, so we don't pass `--pyrefly`.
+        run([sys.executable, "tensor-shapes/pyrefly-torch-stubs/run_pyrefly.py"])
+        run([sys.executable, "tensor-shapes/pyrefly-numpy-stubs/run_pyrefly.py"])
 
     def conformance(self) -> None:
         cargo_target_dir = os.environ.get("CARGO_TARGET_DIR", "target")
@@ -171,6 +209,9 @@ class CargoExecutor(Executor):
                 f"{cargo_target_dir}/debug/pyrefly",
             ]
         )
+
+    def jsonschema(self) -> None:
+        run(["python3", "schemas/validate_schemas.py"])
 
 
 @final
@@ -204,11 +245,45 @@ class BuckExecutor(Executor):
             ],
             capture_output=True,
         )
-        tests = [line.strip() for line in res.stdout.splitlines()] + ["test:"]
+        tests = [line.strip() for line in res.stdout.splitlines()] + [
+            "test/...",
+        ]
         run(
             ["buck2", "test"]
             + tests
             + ["--", "--run-disabled", "--return-zero-on-skips"]
+        )
+
+    def tensor_shapes(self) -> None:
+        if "SANDCASTLE_NONCE" in os.environ:
+            print(
+                "Skipping tensor shape tests on CI because they're already scheduled."
+            )
+            return
+        run(
+            [
+                "buck2",
+                "test",
+                "tensor-shapes/pyrefly-torch-stubs/examples:torch_examples_test",
+                "tensor-shapes/pyrefly-torch-stubs/test:tensor_shapes_all_test",
+                "tensor-shapes/pyrefly-torch-stubs/test:tensor_shapes_error_test",
+                "tensor-shapes/pyrefly-torch-stubs/test:tensor_shapes_jaxtyping_test",
+                "tensor-shapes/pyrefly-torch-stubs/test:tensor_shapes_jaxtyping_error_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_arithmetic_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_broadcasting_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_creation_basics_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_dtype_properties_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_examples_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_indexing_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_linalg_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_math_ufuncs_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_random_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_reductions_static_test",
+                "tensor-shapes/pyrefly-numpy-stubs:numpy_runtime_test",
+                "--",
+                "--run-disabled",
+                "--return-zero-on-skips",
+            ]
         )
 
     def conformance(self) -> None:
@@ -219,6 +294,16 @@ class BuckExecutor(Executor):
                 "conformance:conformance_output_script",
                 "--",
                 "./conformance/third_party",
+            ]
+        )
+
+    def jsonschema(self) -> None:
+        run(
+            [
+                "buck2",
+                "test",
+                "--reuse-current-config",
+                "schemas:test",
             ]
         )
 
@@ -239,10 +324,20 @@ def run_tests(executor: Executor, test_flags: TestFlags) -> None:
         with timing():
             executor.test()
 
+    if test_flags.run_tensor_shapes:
+        print_running("tensor shape tests")
+        with timing():
+            executor.tensor_shapes()
+
     if test_flags.run_conformance:
         print_running("conformance tests")
         with timing():
             executor.conformance()
+
+    if test_flags.run_jsonschema:
+        print_running("jsonschema tests")
+        with timing():
+            executor.jsonschema()
 
 
 def get_executor(mode: str) -> Executor:
@@ -289,10 +384,22 @@ def invoke_main() -> None:
         help="Whether to run testing or not",
     )
     parser.add_argument(
+        "--tensor-shapes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Whether to run tensor shape tests or not",
+    )
+    parser.add_argument(
         "--conformance",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether to run conformance test or not",
+    )
+    parser.add_argument(
+        "--jsonschema",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to run jsonschema test or not",
     )
     args = parser.parse_args()
     try:
@@ -302,7 +409,9 @@ def invoke_main() -> None:
                 run_fmt=args.fmt,
                 run_lint=args.lint,
                 run_test=args.test,
+                run_tensor_shapes=args.tensor_shapes,
                 run_conformance=args.conformance,
+                run_jsonschema=args.jsonschema,
             ),
         )
     except KeyboardInterrupt:

@@ -6,17 +6,19 @@
  */
 
 use lsp_types::Url;
+use pyrefly_lsp_test::IndexingMode;
+use pyrefly_lsp_test::LspArgs;
+use pyrefly_lsp_test::object_model::InitializeSettings;
+use pyrefly_lsp_test::object_model::LspInteraction;
+use pyrefly_lsp_test::object_model::LspInteractionArgs;
 use serde_json::json;
 
-use crate::commands::lsp::IndexingMode;
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 
 #[test]
 fn test_will_rename_files_changes_open_files_when_indexing_disabled() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::None);
+    let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings::default())
@@ -62,7 +64,13 @@ fn test_will_rename_files_changes_open_files_when_indexing_disabled() {
 #[test]
 fn test_will_rename_files_with_marker_file_no_config() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
     let root_path = root.path().join("marker_file_no_config");
     let scope_uri = Url::from_file_path(&root_path).unwrap();
 
@@ -116,7 +124,7 @@ fn test_will_rename_files_with_marker_file_no_config() {
 #[test]
 fn test_will_rename_files_changes_folder() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::None);
+    let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings::default())
@@ -162,7 +170,13 @@ fn test_will_rename_files_changes_folder() {
 #[test]
 fn test_will_rename_files_changes_nothing_when_no_files_open() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings::default())
@@ -184,7 +198,13 @@ fn test_will_rename_files_changes_nothing_when_no_files_open() {
 #[test]
 fn test_will_rename_files_changes_everything_when_indexed() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings::default())
@@ -200,9 +220,13 @@ fn test_will_rename_files_changes_everything_when_indexed() {
     let various_imports_path = root
         .path()
         .join("tests_requiring_config/various_imports.py");
+    let notebook_refs_path = root
+        .path()
+        .join("tests_requiring_config/notebook_refs.ipynb");
 
     // Send will_rename_files request to rename bar.py to baz.py
-    // Expect a response with edits to update imports in foo.py, with_synthetic_bindings.py, and various_imports.py using "changes" format
+    // Expect a response with edits to update imports in foo.py, with_synthetic_bindings.py,
+    // various_imports.py, and the indexed notebook using "changes" format
     interaction
         .client
         .will_rename_files(bar, "tests_requiring_config/baz.py")
@@ -221,6 +245,15 @@ fn test_will_rename_files_changes_everything_when_indexed() {
                         "range": {
                             "start": {"line": 6, "character": 5},
                             "end": {"line": 6, "character": 8}
+                        }
+                    }
+                ],
+                Url::from_file_path(&notebook_refs_path).unwrap().to_string(): [
+                    {
+                        "newText": "baz",
+                        "range": {
+                            "start": {"line": 0, "character": 5},
+                            "end": {"line": 0, "character": 8}
                         }
                     }
                 ],
@@ -252,7 +285,7 @@ fn test_will_rename_files_changes_everything_when_indexed() {
 #[test]
 fn test_will_rename_files_without_config() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::None);
+    let mut interaction = LspInteraction::new();
     interaction.set_root(root.path().join("basic"));
     interaction
         .initialize(InitializeSettings::default())
@@ -296,7 +329,13 @@ fn test_will_rename_files_without_config() {
 #[test]
 fn test_will_rename_files_without_config_with_workspace_folder() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
     let root_path = root.path().join("basic");
     let scope_uri = Url::from_file_path(&root_path).unwrap();
 
@@ -353,7 +392,13 @@ fn test_will_rename_files_without_config_with_workspace_folder() {
 #[test]
 fn test_will_rename_files_document_changes() {
     let root = get_test_files_root();
-    let mut interaction = LspInteraction::new_with_indexing_mode(IndexingMode::LazyBlocking);
+    let mut interaction = LspInteraction::new_with_args(LspInteractionArgs {
+        args: LspArgs {
+            indexing_mode: IndexingMode::LazyBlocking,
+            ..LspInteractionArgs::default().args
+        },
+        ..Default::default()
+    });
     interaction.set_root(root.path().to_path_buf());
 
     let settings = InitializeSettings {
@@ -372,6 +417,9 @@ fn test_will_rename_files_document_changes() {
     interaction.client.did_open(bar);
 
     let foo_path = root.path().join("tests_requiring_config/foo.py");
+    let notebook_refs_path = root
+        .path()
+        .join("tests_requiring_config/notebook_refs.ipynb");
     let with_synthetic_bindings_path = root
         .path()
         .join("tests_requiring_config/with_synthetic_bindings.py");
@@ -380,7 +428,8 @@ fn test_will_rename_files_document_changes() {
         .join("tests_requiring_config/various_imports.py");
 
     // Send will_rename_files request to rename bar.py to baz.py
-    // Expect a response with edits to update imports in foo.py, various_imports.py, and with_synthetic_bindings.py using "documentChanges" format
+    // Expect a response with edits to update imports in foo.py, notebook_refs.ipynb,
+    // various_imports.py, and with_synthetic_bindings.py using "documentChanges" format
     // Files are returned in alphabetical order by URI
     interaction
         .client
@@ -405,6 +454,21 @@ fn test_will_rename_files_document_changes() {
                             "range": {
                                 "start": {"line": 6, "character": 5},
                                 "end": {"line": 6, "character": 8}
+                            }
+                        }
+                    ]
+                },
+                {
+                    "textDocument": {
+                        "uri": Url::from_file_path(&notebook_refs_path).unwrap().to_string(),
+                        "version": null
+                    },
+                    "edits": [
+                        {
+                            "newText": "baz",
+                            "range": {
+                                "start": {"line": 0, "character": 5},
+                                "end": {"line": 0, "character": 8}
                             }
                         }
                     ]

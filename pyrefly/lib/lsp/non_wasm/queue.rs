@@ -7,6 +7,7 @@
 
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::time::Instant;
 
 use crossbeam_channel::Receiver;
@@ -17,15 +18,15 @@ use crossbeam_channel::Sender;
 use lsp_server::RequestId;
 use lsp_types::DidChangeConfigurationParams;
 use lsp_types::DidChangeTextDocumentParams;
-use lsp_types::DidChangeWatchedFilesParams;
 use lsp_types::DidChangeWorkspaceFoldersParams;
 use lsp_types::DidCloseTextDocumentParams;
 use lsp_types::DidOpenTextDocumentParams;
 use lsp_types::DidSaveTextDocumentParams;
+use pyrefly_util::lock::Mutex;
+use pyrefly_util::telemetry::QueueName;
 use pyrefly_util::telemetry::Telemetry;
 use pyrefly_util::telemetry::TelemetryEvent;
 use pyrefly_util::telemetry::TelemetryEventKind;
-use pyrefly_util::telemetry::TelemetryTaskId;
 use tracing::debug;
 use tracing::info;
 
@@ -51,7 +52,7 @@ pub enum LspEvent {
     DidChangeTextDocument(DidChangeTextDocumentParams),
     DidCloseTextDocument(DidCloseTextDocumentParams),
     DidSaveTextDocument(DidSaveTextDocumentParams),
-    DidChangeWatchedFiles(DidChangeWatchedFilesParams),
+    DrainWatchedFileChanges,
     DidChangeWorkspaceFolders(DidChangeWorkspaceFoldersParams),
     DidChangeConfiguration(DidChangeConfigurationParams),
     DidOpenNotebookDocument(DidOpenNotebookDocumentParams),
@@ -76,7 +77,7 @@ impl LspEvent {
             Self::DidChangeTextDocument(_) => "DidChangeTextDocument".to_owned(),
             Self::DidCloseTextDocument(_) => "DidCloseTextDocument".to_owned(),
             Self::DidSaveTextDocument(_) => "DidSaveTextDocument".to_owned(),
-            Self::DidChangeWatchedFiles(_) => "DidChangeWatchedFiles".to_owned(),
+            Self::DrainWatchedFileChanges => "DidChangeWatchedFiles".to_owned(),
             Self::DidChangeWorkspaceFolders(_) => "DidChangeWorkspaceFolders".to_owned(),
             Self::DidChangeConfiguration(_) => "DidChangeConfiguration".to_owned(),
             Self::DidOpenNotebookDocument(_) => "DidOpenNotebookDocument".to_owned(),
@@ -98,6 +99,19 @@ enum LspEventKind {
 }
 
 impl LspEvent {
+    /// Whether this event is an in-editor edit to a document's content, i.e. the
+    /// kind of change that should reset the inlay-hint debounce window. Opens,
+    /// saves, closes, config/workspace-folder changes, watched-file drains, and
+    /// client responses are deliberately excluded: they aren't the user typing,
+    /// so they must not hold inlay hints back (otherwise background file churn
+    /// could defer hints indefinitely while the user sits idle).
+    fn is_edit(&self) -> bool {
+        matches!(
+            self,
+            Self::DidChangeTextDocument(_) | Self::DidChangeNotebookDocument(_)
+        )
+    }
+
     fn kind(&self) -> LspEventKind {
         match self {
             Self::RecheckFinished | Self::CancelRequest(_) => LspEventKind::Priority,
@@ -105,7 +119,7 @@ impl LspEvent {
             | Self::DidChangeTextDocument(_)
             | Self::DidCloseTextDocument(_)
             | Self::DidSaveTextDocument(_)
-            | Self::DidChangeWatchedFiles(_)
+            | Self::DrainWatchedFileChanges
             | Self::DidChangeWorkspaceFolders(_)
             | Self::DidChangeConfiguration(_)
             | Self::LspResponse(_)
@@ -125,6 +139,20 @@ pub struct LspQueue {
     id: AtomicUsize,
     /// The index of the last event we are aware of that is a mutation. 0 = unknown.
     last_mutation: AtomicUsize,
+    /// When the most recent document edit was enqueued, or `None` if no edit has
+    /// happened yet. Used to debounce queries (e.g. inlay hints) that shouldn't
+    /// recompute on every keystroke. Only genuine edits bump this (see
+    /// [`LspEvent::is_edit`]), not every mutation, so non-typing activity doesn't
+    /// hold debounced queries back. `None` means there's nothing to debounce
+    /// against, so queries run immediately (e.g. right after server startup).
+    last_edit_time: Mutex<Option<Instant>>,
+    /// A single query request (an inlay hint) held back to debounce it, paired
+    /// with the instant it becomes ready and the instant it was enqueued. `recv`
+    /// delivers it once the ready instant passes if nothing else arrives first,
+    /// reporting the enqueue instant as its queue time so queue-latency metrics
+    /// reflect the full debounce wait (matching how `send` timestamps events).
+    /// Only one is held at a time; see [`LspQueue::send_delayed`].
+    delayed: Mutex<Option<(Request, Instant, Instant)>>,
     normal: (
         Sender<(usize, LspEvent, Instant)>,
         Receiver<(usize, LspEvent, Instant)>,
@@ -140,6 +168,8 @@ impl LspQueue {
         Self {
             id: AtomicUsize::new(1),
             last_mutation: AtomicUsize::new(0),
+            last_edit_time: Mutex::new(None),
+            delayed: Mutex::new(None),
             normal: crossbeam_channel::unbounded(),
             priority: crossbeam_channel::unbounded(),
         }
@@ -153,6 +183,9 @@ impl LspQueue {
             // This is gently dubious, as we might race condition and it might not really be the last
             // mutation. But it's good enough for now.
             self.last_mutation.store(id, Ordering::Relaxed);
+        }
+        if x.is_edit() {
+            *self.last_edit_time.lock() = Some(Instant::now());
         }
         if kind == LspEventKind::Priority {
             self.priority
@@ -173,13 +206,43 @@ impl LspQueue {
     /// Due to race conditions, we might say false when there is a subsequent mutation,
     /// but we will never say true when there is not.
     pub fn recv(&self) -> Result<(bool, LspEvent, Instant), RecvError> {
+        // If a delayed request is held, wake once its window expires so we can
+        // deliver it. The slot is only written by the same thread that calls
+        // `recv` (via `send_delayed` during event processing), so it can't change
+        // while we block here.
+        let deadline = self
+            .delayed
+            .lock()
+            .as_ref()
+            .map(|(_, ready_at, _)| *ready_at);
+
         let mut event_receiver_selector = Select::new_biased();
         // Biased selector will pick the receiver with lower index over higher ones,
         // so we register priority_events_receiver first.
         let priority_receiver_index = event_receiver_selector.recv(&self.priority.1);
         let queued_events_receiver_index = event_receiver_selector.recv(&self.normal.1);
 
-        let selected = event_receiver_selector.select();
+        let selected = match deadline {
+            Some(deadline) => match event_receiver_selector.select_deadline(deadline) {
+                Ok(selected) => selected,
+                Err(_) => {
+                    let (request, _ready_at, enqueued_at) = self
+                        .delayed
+                        .lock()
+                        .take()
+                        .expect("a deadline is only set while a delayed request is held");
+                    let last_mutation = self.last_mutation.load(Ordering::Relaxed);
+                    // Report the enqueue instant (not `ready_at`) as the queue
+                    // time so downstream latency metrics see the full wait.
+                    return Ok((
+                        last_mutation != 0,
+                        LspEvent::LspRequest(request),
+                        enqueued_at,
+                    ));
+                }
+            },
+            None => event_receiver_selector.select(),
+        };
         let (id, x, queue_time) = match selected.index() {
             i if i == priority_receiver_index => selected.recv(&self.priority.1)?,
             i if i == queued_events_receiver_index => selected.recv(&self.normal.1)?,
@@ -192,26 +255,34 @@ impl LspQueue {
         }
         Ok((last_mutation != 0, x, queue_time))
     }
+
+    /// Hold `request` until `ready_at`, after which `recv` delivers it. This
+    /// debounces queries (inlay hints) that shouldn't recompute on every
+    /// keystroke. The current instant is recorded as the request's enqueue time
+    /// so it is reported as the queue time on delivery. At most one request is
+    /// held; a second call displaces and returns the previous one so the caller
+    /// can respond to the now-superseded request.
+    pub fn send_delayed(&self, request: Request, ready_at: Instant) -> Option<Request> {
+        self.delayed
+            .lock()
+            .replace((request, ready_at, Instant::now()))
+            .map(|(request, ..)| request)
+    }
+
+    /// How long since the most recent document edit was enqueued, or `None` if
+    /// no edit has happened yet.
+    pub fn time_since_last_edit(&self) -> Option<Duration> {
+        self.last_edit_time.lock().map(|t| t.elapsed())
+    }
 }
 
 pub struct HeavyTask(
-    Box<
-        dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, Option<&TelemetryTaskId>)
-            + Send
-            + Sync
-            + 'static,
-    >,
+    Box<dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent) + Send + Sync + 'static>,
 );
 
 impl HeavyTask {
-    fn run(
-        self,
-        server: &Server,
-        telemetry: &impl Telemetry,
-        telemetry_event: &mut TelemetryEvent,
-        task_stats: Option<&TelemetryTaskId>,
-    ) {
-        self.0(server, telemetry, telemetry_event, task_stats);
+    fn run(self, server: &Server, telemetry: &dyn Telemetry, telemetry_event: &mut TelemetryEvent) {
+        self.0(server, telemetry, telemetry_event);
     }
 }
 
@@ -221,12 +292,12 @@ pub struct HeavyTaskQueue {
     task_receiver: Receiver<(HeavyTask, TelemetryEventKind, Instant)>,
     stop_sender: Sender<()>,
     stop_receiver: Receiver<()>,
-    queue_name: &'static str,
+    queue_name: QueueName,
     next_task_id: AtomicUsize,
 }
 
 impl HeavyTaskQueue {
-    pub fn new(queue_name: &'static str) -> Self {
+    pub fn new(queue_name: QueueName) -> Self {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded();
         let (stop_sender, stop_receiver) = crossbeam_channel::unbounded();
         Self {
@@ -242,12 +313,7 @@ impl HeavyTaskQueue {
     pub fn queue_task(
         &self,
         kind: TelemetryEventKind,
-        f: Box<
-            dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent, Option<&TelemetryTaskId>)
-                + Send
-                + Sync
-                + 'static,
-        >,
+        f: Box<dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent) + Send + Sync + 'static>,
     ) {
         self.task_sender
             .send((HeavyTask(f), kind, Instant::now()))
@@ -255,7 +321,7 @@ impl HeavyTaskQueue {
         debug!("Enqueued task on {} heavy task queue", self.queue_name);
     }
 
-    pub fn run_until_stopped(&self, server: &Server, telemetry: &impl Telemetry) {
+    pub fn run_until_stopped(&self, server: &Server, telemetry: &dyn Telemetry) {
         let mut receiver_selector = Select::new_biased();
         // Biased selector will pick the receiver with lower index over higher ones,
         // so we register priority_events_receiver first.
@@ -275,14 +341,15 @@ impl HeavyTaskQueue {
                         .recv(&self.task_receiver)
                         .expect("Failed to receive heavy task");
                     debug!("Dequeued task on {} heavy task queue", self.queue_name);
-                    let (mut telemetry_event, queue_duration) =
-                        TelemetryEvent::new_dequeued(kind, enqueued, server.telemetry_state());
-                    let task_stats = TelemetryTaskId::new(
+                    let task_id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
+                    let (mut telemetry_event, queue_duration) = TelemetryEvent::new_dequeued(
+                        kind,
+                        enqueued,
+                        server.telemetry_state(),
                         self.queue_name,
-                        Some(self.next_task_id.fetch_add(1, Ordering::Relaxed)),
+                        task_id,
                     );
-                    task.run(server, telemetry, &mut telemetry_event, Some(&task_stats));
-                    telemetry_event.set_task_stats(task_stats);
+                    task.run(server, telemetry, &mut telemetry_event);
                     let process_duration = telemetry_event.finish_and_record(telemetry, None);
                     info!(
                         "Ran task on {} heavy task queue. Queue time: {:.2}, task time: {:.2}",
@@ -299,5 +366,66 @@ impl HeavyTaskQueue {
     /// Make `run_until_stopped` exit after finishing the current task.
     pub fn stop(&self) {
         self.stop_sender.send(()).expect("Failed to stop the queue");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lsp_types::Url;
+    use lsp_types::VersionedTextDocumentIdentifier;
+
+    use super::*;
+
+    fn edit() -> LspEvent {
+        LspEvent::DidChangeTextDocument(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: Url::parse("file:///test.py").unwrap(),
+                version: 1,
+            },
+            content_changes: Vec::new(),
+        })
+    }
+
+    fn non_edit() -> LspEvent {
+        LspEvent::DidChangeConfiguration(DidChangeConfigurationParams {
+            settings: serde_json::Value::Null,
+        })
+    }
+
+    #[test]
+    fn test_time_since_last_edit_resets_only_on_edit() {
+        let queue = LspQueue::new();
+
+        // No edit has happened yet, so there is nothing to debounce against.
+        assert_eq!(
+            queue.time_since_last_edit(),
+            None,
+            "the debounce clock must be unset until the first edit"
+        );
+
+        queue.send(edit()).unwrap();
+
+        std::thread::sleep(Duration::from_millis(30));
+        let elapsed = queue.time_since_last_edit().expect("an edit was enqueued");
+        assert!(
+            elapsed >= Duration::from_millis(25),
+            "clock should grow between edits, got {elapsed:?}"
+        );
+
+        // A non-edit mutation (config change, save, watched-file drain, ...) must
+        // NOT reset the debounce clock, otherwise background activity could hold
+        // inlay hints back while the user is idle.
+        queue.send(non_edit()).unwrap();
+        assert!(
+            queue.time_since_last_edit().expect("still have an edit") >= elapsed,
+            "a non-edit event must not reset the debounce clock"
+        );
+
+        // A fresh edit resets the clock back towards zero.
+        queue.send(edit()).unwrap();
+        assert!(
+            queue.time_since_last_edit().expect("edit was enqueued") < elapsed,
+            "a new edit should reset the debounce clock"
+        );
     }
 }

@@ -28,6 +28,7 @@ use ruff_python_ast::visitor::Visitor;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use vec1::Vec1;
 
 use super::extract_shared::MethodInfo;
 use super::extract_shared::code_at_range;
@@ -39,6 +40,7 @@ use super::extract_shared::split_selection;
 use super::extract_shared::unique_name;
 use super::extract_shared::validate_non_empty_selection;
 use super::types::LocalRefactorCodeAction;
+use crate::module::module_info::ModuleInfo;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::Transaction;
 
@@ -74,9 +76,9 @@ struct ExpressionTemplate {
 }
 
 #[derive(Clone, Debug)]
-struct ArgReplacement {
+struct ArgReplacement<'a> {
     text: String,
-    needs_parens: bool,
+    expr: &'a Expr,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +142,7 @@ pub(crate) fn introduce_parameter_code_actions(
     let call_edits = build_callsite_edits(
         transaction,
         handle,
+        ast.as_ref(),
         &module_info,
         &param_info,
         &template,
@@ -327,7 +330,10 @@ fn expression_uses_local_names(
         if param_names.contains(name) {
             continue;
         }
-        let defs = transaction.find_definition(handle, range.start(), FindPreference::default());
+        let defs = transaction
+            .find_definition(handle, range.start(), FindPreference::default())
+            .map(Vec1::into_vec)
+            .unwrap_or_default();
         if defs.iter().any(|def| {
             def.module.path() == module_path
                 && function_def.range().contains_range(def.definition_range)
@@ -472,7 +478,8 @@ fn collect_matching_expression_ranges(
 fn build_callsite_edits(
     transaction: &Transaction<'_>,
     handle: &Handle,
-    module_info: &crate::module::module_info::ModuleInfo,
+    defining_ast: &ModModule,
+    module_info: &ModuleInfo,
     param_info: &ParamInfo,
     template: &ExpressionTemplate,
     new_param_name: &str,
@@ -485,6 +492,8 @@ fn build_callsite_edits(
             function_ctx.function_def.name.range.start(),
             FindPreference::default(),
         )
+        .map(Vec1::into_vec)
+        .unwrap_or_default()
         .into_iter()
         .find(|def| {
             def.module.path() == module_info.path()
@@ -503,6 +512,7 @@ fn build_callsite_edits(
             definition.metadata.clone(),
             definition.definition_range,
             &definition.module,
+            true,
         ) else {
             continue;
         };
@@ -529,6 +539,7 @@ fn build_callsite_edits(
                 return;
             }
             let Some(argument_text) = build_argument_expression_for_call(
+                defining_ast,
                 call,
                 other_module_info.contents(),
                 param_info,
@@ -559,6 +570,7 @@ fn build_callsite_edits(
 }
 
 fn build_argument_expression_for_call(
+    defining_ast: &ModModule,
     call: &ExprCall,
     source: &str,
     param_info: &ParamInfo,
@@ -569,15 +581,15 @@ fn build_argument_expression_for_call(
     if template.param_names_used.is_empty() {
         return Some(template.text.clone());
     }
-    build_argument_expression(template, &replacements)
+    build_argument_expression(defining_ast, template, &replacements)
 }
 
-fn build_param_replacements(
-    call: &ExprCall,
+fn build_param_replacements<'a>(
+    call: &'a ExprCall,
     source: &str,
     param_info: &ParamInfo,
     method_ctx: Option<&MethodContext>,
-) -> Option<HashMap<String, ArgReplacement>> {
+) -> Option<HashMap<String, ArgReplacement<'a>>> {
     let mut keyword_args: HashMap<String, &Expr> = HashMap::new();
     for kw in &call.arguments.keywords {
         let Some(arg) = &kw.arg else {
@@ -619,7 +631,7 @@ fn build_param_replacements(
 
 fn bound_method_receiver<'a>(
     call: &'a ExprCall,
-    method_ctx: Option<&'a MethodContext>,
+    method_ctx: Option<&MethodContext>,
 ) -> Option<(Option<(String, &'a Expr)>, usize)> {
     let Some(ctx) = method_ctx else {
         return Some((None, 0));
@@ -642,16 +654,16 @@ fn bound_method_receiver<'a>(
     ))
 }
 
-fn build_replacement_from_expr(expr: &Expr, source: &str) -> ArgReplacement {
+fn build_replacement_from_expr<'a>(expr: &'a Expr, source: &str) -> ArgReplacement<'a> {
     let range = expr.range();
     let text = code_at_range(source, range)
         .map(|s| s.to_owned())
         .unwrap_or_default();
-    let needs_parens = !matches!(expr, Expr::Name(_) | Expr::Attribute(_));
-    ArgReplacement { text, needs_parens }
+    ArgReplacement { text, expr }
 }
 
 fn build_argument_expression(
+    defining_ast: &ModModule,
     template: &ExpressionTemplate,
     replacements: &HashMap<String, ArgReplacement>,
 ) -> Option<String> {
@@ -670,7 +682,8 @@ fn build_argument_expression(
     occurrences.sort_by_key(|(range, _)| range.start());
     for (range, name) in occurrences.into_iter().rev() {
         let replacement = replacements.get(&name)?;
-        let replacement_text = if replacement.needs_parens {
+        let parent = Ast::parent_node(defining_ast, range);
+        let replacement_text = if Ast::needs_brackets(parent, replacement.expr) {
             format!("({})", replacement.text)
         } else {
             replacement.text.clone()

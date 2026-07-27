@@ -60,6 +60,48 @@ b: type[B] = A  # E: `type[A]` is not assignable to `type[B]`
 );
 
 testcase!(
+    test_metaclass_instance_not_subtype_of_specific_type,
+    r#"
+from typing import Any
+class Meta(type): pass
+class A(metaclass=Meta): pass
+
+def f(x: Meta):
+    a: type[A] = x  # E: `Meta` is not assignable to `type[A]`
+    any_cls: type[Any] = x
+    o: type[object] = x
+    union_with_object: type[int | object] = x
+    union_without_object: type[int | str] = x  # E: `Meta` is not assignable to `type[int | str]`
+"#,
+);
+
+testcase!(
+    test_concrete_metaclass_class_object_subtyping,
+    r#"
+class Meta(type): pass
+class Base(metaclass=Meta):
+    def only_on_base(self) -> str:
+        return "base"
+class Child(Base): pass
+
+def needs_base_class(cls: type[Base]) -> str:
+    return cls().only_on_base()
+
+def make[T: Base](cls: type[T]) -> T:
+    return cls()
+
+cls = Child
+needs_base_class(Child)
+needs_base_class(cls)
+child: Child = make(Child)
+
+def f(x: Meta):
+    unsafe: type[Base] = x  # E: `Meta` is not assignable to `type[Base]`
+    make(x)  # E: Argument `Meta` is not assignable to parameter `cls`
+"#,
+);
+
+testcase!(
     test_generic_class_object_subtyping,
     r#"
 class A[T]: pass
@@ -172,7 +214,8 @@ testcase!(
     r#"
 class A(type): pass
 def test(a: A):
-    x: type[int] = a
+    x: type[int] = a  # E: `A` is not assignable to `type[int]`
+    y: type[object] = a
 "#,
 );
 
@@ -226,30 +269,27 @@ x: PyO3Enum = PyO3Enum.Variant0()
 // dealing with C extensions.
 
 testcase!(
-    bug = "We probably need to be able to handle `type(...)` as a base class better than we do.",
     test_type_function_in_base_class_list_v0,
     r#"
 class A:
     pass
 a = A()
-class B(type(a)):  # E: Invalid expression form for base class: `type(a)`
+class B(type(a)):
     pass
     "#,
 );
 
 testcase!(
-    bug = "We probably need to be able to handle `type(...)` as a base class better than we do.",
     test_type_function_in_base_class_list_v1,
     r#"
 class A:
     pass
-class B(type(A)):  # E: Invalid expression form for base class: `type(A)`
+class B(type(A)):
     pass
     "#,
 );
 
 testcase!(
-    bug = "We probably need to be able to handle `type(...)` as a base class better than we do.",
     test_type_function_in_base_class_list_v2,
     r#"
 from typing import assert_type, ClassVar, Any
@@ -257,9 +297,32 @@ class M(type):
     x: ClassVar[int] = 42
 class A(metaclass=M):
     pass
-class B(type(A)):  # E: Invalid expression form for base class: `type(A)`
+class B(type(A)):
     pass
-assert_type(B.x, Any)
+assert_type(B.x, int)
+    "#,
+);
+
+testcase!(
+    test_type_function_in_base_class_list_self_cycle,
+    r#"
+from typing import assert_type
+class B(type(B)):
+    pass
+# B references itself in its base class via type(B).
+# The cycle is detected and resolved: type(B) degrades
+# to `type` (the default metaclass), so B inherits from `type`.
+x: type = B
+    "#,
+);
+
+testcase!(
+    test_type_function_in_base_class_list_mutual_cycle,
+    r#"
+class C(type(D)):
+    pass
+class D(type(C)):
+    pass
     "#,
 );
 

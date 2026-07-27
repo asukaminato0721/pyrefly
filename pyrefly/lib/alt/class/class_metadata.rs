@@ -5,15 +5,20 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::iter;
 use std::sync::Arc;
 
 use dupe::Dupe;
+use dupe::IterDupedExt;
 use itertools::Either;
 use itertools::Itertools;
 use pyrefly_graph::index::Idx;
+use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_types::annotation::Annotation;
+use pyrefly_types::callable::Params;
+use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_types::typed_dict::ExtraItem;
@@ -27,44 +32,57 @@ use ruff_python_ast::Expr;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use starlark_map::Hashed;
 use starlark_map::ordered_map::OrderedMap;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
+use crate::alt::class::attrs::is_attrs_setters_frozen;
+use crate::alt::class::django::is_django_choices_subclass;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::abstract_class::AbstractClassMembers;
+use crate::alt::types::class_metadata::ClassDisjointBase;
 use crate::alt::types::class_metadata::ClassMetadata;
 use crate::alt::types::class_metadata::ClassMro;
+use crate::alt::types::class_metadata::DataclassKind;
 use crate::alt::types::class_metadata::DataclassMetadata;
 use crate::alt::types::class_metadata::DjangoModelMetadata;
 use crate::alt::types::class_metadata::EnumMetadata;
+use crate::alt::types::class_metadata::ExplicitSlots;
 use crate::alt::types::class_metadata::InitDefaults;
 use crate::alt::types::class_metadata::Metaclass;
 use crate::alt::types::class_metadata::NamedTupleMetadata;
 use crate::alt::types::class_metadata::ProtocolMetadata;
+use crate::alt::types::class_metadata::SlotsInfo;
 use crate::alt::types::class_metadata::TotalOrderingMetadata;
 use crate::alt::types::class_metadata::TypedDictMetadata;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::types::pydantic::PydanticConfig;
+use crate::alt::types::pydantic::PydanticModelKind;
 use crate::binding::base_class::BaseClass;
 use crate::binding::base_class::BaseClassExpr;
 use crate::binding::base_class::BaseClassGeneric;
 use crate::binding::base_class::BaseClassGenericKind;
+use crate::binding::binding::BindingShapedArrayMetadata;
+use crate::binding::binding::ClassFieldDefinition;
+use crate::binding::binding::ExprOrBinding;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyAnnotation;
+use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::django::DjangoFieldInfo;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::pydantic::VALIDATION_ALIAS;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
-use crate::error::context::ErrorInfo;
 use crate::error::style::ErrorStyle;
 use crate::types::callable::FunctionKind;
 use crate::types::class::Class;
 use crate::types::class::ClassKind;
 use crate::types::class::ClassType;
+use crate::types::display::ClassDisplayContext;
 use crate::types::keywords::DataclassFieldKeywords;
 use crate::types::keywords::DataclassKeywords;
 use crate::types::keywords::DataclassTransformMetadata;
@@ -110,6 +128,16 @@ impl BaseClassParseResult {
     }
 }
 
+/// The dataclass configuration derived from a `@dataclass_transform` decorator or an inherited
+/// transform base.
+pub(crate) struct TransformDataclass {
+    keywords: DataclassKeywords,
+    /// Callees recognized as field specifiers (PEP 681), e.g. `attrs.field`.
+    pub(crate) field_specifiers: Vec<CalleeKind>,
+    /// attrs' `hash=`/`unsafe_hash=` argument; `None` for non-attrs classes or when unset.
+    attrs_hash: Option<bool>,
+}
+
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     pub fn class_metadata_of(
         &self,
@@ -119,7 +147,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         decorators: &[Idx<KeyDecorator>],
         is_new_type: bool,
         pydantic_config_dict: &PydanticConfigDict,
+        pydantic_before_validator_fields: &[Name],
         django_field_info: &DjangoFieldInfo,
+        capture_init: Option<&[Name]>,
+        shaped_array_metadata: Option<&BindingShapedArrayMetadata>,
         errors: &ErrorCollector,
     ) -> ClassMetadata {
         // Get class decorators.
@@ -131,7 +162,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         });
 
         // Compute data that depends on the `BaseClass` representation of base classes.
-        let initial_protocol_metadata = Self::initial_protocol_metadata(cls, bases);
+        let initial_protocol_metadata = self.initial_protocol_metadata(cls, bases);
         let has_generic_base_class = bases.iter().any(|x| x.is_generic());
         let has_typed_dict_base_class = bases.iter().any(|x| x.is_typed_dict());
 
@@ -163,29 +194,58 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .iter()
             .filter_map(|(b, metadata)| metadata.custom_metaclass().map(|m| (b.name(), m)))
             .collect::<Vec<_>>();
-        let calculated_metaclass = self.calculate_metaclass(
+        let mut calculated_metaclass = self.calculate_metaclass(
             cls,
             metaclasses.into_iter().next(),
             &base_metaclasses,
             errors,
         );
-        let metaclass = calculated_metaclass.get();
-        if let Some(metaclass) = &metaclass {
+        if let Some(metaclass) = calculated_metaclass.get() {
             self.check_base_class_metaclasses(cls, metaclass, &base_metaclasses, errors);
             if metaclass
                 .targs()
                 .as_slice()
                 .iter()
-                .any(|targ| targ.any(|ty| ty.is_raw_legacy_type_variable()))
+                .any(|targ| targ.contains_type_variable())
             {
                 self.error(
                     errors,
                     cls.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                    ErrorKind::InvalidInheritance,
                     "Metaclass may not be an unbound generic".to_owned(),
                 );
             }
         }
+        // If the metaclass has unresolved type variables, replace them with their
+        // gradual types (e.g. Any) to avoid cascading errors from bare TypeVars.
+        // We do a targeted substitution inside each targ so that e.g. Meta[list[T]]
+        // becomes Meta[list[Any]] rather than Meta[Any].
+        if let Some(metaclass) = calculated_metaclass.get_mut() {
+            for targ in metaclass.targs_mut().as_mut().iter_mut() {
+                if targ.contains_type_variable() {
+                    targ.transform_mut(&mut |ty| match ty {
+                        Type::Quantified(q) => *ty = q.as_gradual_type(),
+                        Type::TypeVar(t) => {
+                            *ty = Quantified::as_gradual_type_helper(t.kind(), t.default())
+                        }
+                        Type::TypeVarTuple(t) => {
+                            *ty = Quantified::as_gradual_type_helper(
+                                QuantifiedKind::TypeVarTuple,
+                                t.default(),
+                            )
+                        }
+                        Type::ParamSpec(p) => {
+                            *ty = Quantified::as_gradual_type_helper(
+                                QuantifiedKind::ParamSpec,
+                                p.default(),
+                            )
+                        }
+                        _ => {}
+                    });
+                }
+            }
+        }
+        let metaclass = calculated_metaclass.get();
 
         let mut directly_inherits_model = false;
         let mut inherited_django_metadata: Option<&DjangoModelMetadata> = None;
@@ -197,7 +257,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
 
             if let Some(dm) = metadata.django_model_metadata() {
-                inherited_django_metadata = Some(dm);
+                // Prefer the base that has a custom primary key field,
+                // so a later base without one doesn't overwrite it.
+                if inherited_django_metadata
+                    .is_none_or(|prev| prev.custom_primary_key_field.is_none())
+                {
+                    inherited_django_metadata = Some(dm);
+                }
             }
         }
 
@@ -208,7 +274,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 custom_primary_key_field: django_field_info.primary_key_field.clone().or_else(
                     || inherited_django_metadata.and_then(|dm| dm.custom_primary_key_field.clone()),
                 ),
-                foreign_key_fields: django_field_info.foreign_key_fields.clone(),
+                foreign_key_like_fields: django_field_info.foreign_key_like_fields.clone(),
                 fields_with_choices: django_field_info.fields_with_choices.clone(),
             })
         } else {
@@ -225,18 +291,45 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         || metadata.is_marshmallow_schema()
                 });
 
+        let is_factory_boy_factory =
+            bases_with_metadata
+                .iter()
+                .any(|(base_class_object, metadata)| {
+                    base_class_object
+                        .has_toplevel_qname(ModuleName::factory_base().as_str(), "Factory")
+                        || metadata.is_factory_boy_factory()
+                });
+
+        let is_metaclass = bases_with_metadata
+            .iter()
+            .any(|(base_class_object, metadata)| {
+                base_class_object.is_builtin("type") || metadata.is_metaclass()
+            });
+
         // Compute various pieces of special metadata.
         let has_base_any = contains_base_class_any
             || bases_with_metadata
                 .iter()
                 .any(|(_, metadata)| metadata.has_base_any());
 
-        let named_tuple_metadata = self.named_tuple_metadata(cls, &bases_with_metadata, errors);
-        if named_tuple_metadata.is_some() && bases_with_metadata.len() > 1 {
+        let named_tuple_metadata =
+            self.named_tuple_metadata(cls, bases, &bases_with_metadata, errors);
+        // Only `class X(NamedTuple, ...)` is rejected at runtime. Subclassing
+        // a concrete NamedTuple alongside other bases is allowed.
+        let directly_defines_named_tuple = bases
+            .iter()
+            .any(|base| matches!(base, BaseClass::NamedTuple(..)));
+        if directly_defines_named_tuple
+            && bases_with_metadata.len() > 1
+            && !cls.module().path().is_interface()
+        {
+            // Typeshed models some stdlib namedtuple result objects, such as urllib.parse.ParseResult,
+            // by mixing methods into a NamedTuple subclass inside a `.pyi`. Keep rejecting this in
+            // user code, but allow it in stubs so we can type-check those result objects precisely.
             self.error(
                 errors,
                 cls.range(),
-                ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                ErrorKind::InvalidInheritance,
                 "Named tuples do not support multiple inheritance".to_owned(),
             );
         }
@@ -259,7 +352,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         {
             self.error(errors,
                 cls.range(),
-                ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                ErrorKind::InvalidInheritance,
                 format!("`{}` is not a typed dictionary. Typed dictionary definitions may only extend other typed dictionaries.", bad.0.name()),
             );
         }
@@ -269,7 +362,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             self.error(
                 errors,
                 cls.range(),
-                ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                ErrorKind::InvalidInheritance,
                 "Typed dictionary definitions may not specify a metaclass".to_owned(),
             );
         }
@@ -282,10 +375,39 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let deprecation = decorators
             .iter()
             .find_map(|(decorator, _)| decorator.deprecation.clone());
-        let is_disjoint_base = decorators.iter().any(|(decorator, _)| {
-            decorator.ty.callee_kind() == Some(CalleeKind::Function(FunctionKind::DisjointBase))
-        });
 
+        let explicit_slots = self.explicit_slots(cls);
+        let has_nonempty_explicit_slots = explicit_slots
+            .slots_info()
+            .is_some_and(|slots| !slots.names.is_empty());
+        // PEP 800: `@disjoint_base` is only valid on nominal classes. Marking
+        // an invalid TypedDict/Protocol target as disjoint would let narrowing
+        // incorrectly intersect it to Never.
+        let has_valid_disjoint_base_decorator = decorators.iter().any(|(decorator, range)| {
+            if decorator.ty.callee_kind() != Some(CalleeKind::Function(FunctionKind::DisjointBase))
+            {
+                return false;
+            }
+            if is_typed_dict {
+                self.error(
+                    errors,
+                    *range,
+                    ErrorKind::BadClassDefinition,
+                    "`@disjoint_base` cannot be applied to a TypedDict".to_owned(),
+                );
+                false
+            } else if protocol_metadata.is_some() {
+                self.error(
+                    errors,
+                    *range,
+                    ErrorKind::BadClassDefinition,
+                    "`@disjoint_base` cannot be applied to a Protocol".to_owned(),
+                );
+                false
+            } else {
+                true
+            }
+        });
         let total_ordering_metadata = decorators.iter().find_map(|(decorator, decorator_range)| {
             decorator.ty.callee_kind().and_then(|kind| {
                 if kind == CalleeKind::Function(FunctionKind::TotalOrdering) {
@@ -298,33 +420,64 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             })
         });
 
-        // If this class inherits from a dataclass_transform-ed class, record the defaults that we
-        // should use for dataclass parameters.
+        // If this class inherits from a dataclass_transform-ed class or uses a metaclass decorated
+        // with @dataclass_transform, record the defaults that we should use for dataclass parameters.
         let dataclass_defaults_from_base_class = bases_with_metadata
             .iter()
-            .find_map(|(_, metadata)| metadata.dataclass_transform_metadata().cloned());
+            .find_map(|(_, metadata)| metadata.dataclass_transform_metadata().cloned())
+            .or_else(|| {
+                metaclass.and_then(|c| {
+                    self.get_metadata_for_class(c.class_object())
+                        .dataclass_transform_metadata()
+                        .cloned()
+                })
+            });
         let dataclass_transform_metadata = self.dataclass_transform_metadata(
+            &keywords,
             &decorators,
             metaclass,
             dataclass_defaults_from_base_class.clone(),
         );
         let dataclass_from_dataclass_transform = self.dataclass_from_dataclass_transform(
+            cls,
             &keywords,
             &decorators,
             dataclass_defaults_from_base_class,
             pydantic_config.as_ref(),
+            errors,
         );
-        let dataclass_metadata = self.dataclass_metadata(
+        let is_attrs_class =
+            self.is_attrs_class(&dataclass_from_dataclass_transform, &bases_with_metadata);
+        let is_from_dataclass_transform = dataclass_from_dataclass_transform.is_some();
+        let (dataclass_metadata, has_fresh_local_slots_decorator) = self.dataclass_metadata(
             cls,
             &decorators,
             &bases_with_metadata,
             dataclass_from_dataclass_transform,
             pydantic_config.as_ref(),
+            pydantic_before_validator_fields,
+            is_attrs_class,
+            protocol_metadata.is_some(),
+            enum_metadata.is_some(),
+            is_typed_dict,
+            named_tuple_metadata.is_some(),
+            errors,
         );
+        // Store only local class-body disjointness here; generated dataclass
+        // slots and inherited representatives need the MRO and are resolved by
+        // `KeyClassDisjointBase`.
+        let is_local_disjoint_base = has_valid_disjoint_base_decorator
+            || (!is_typed_dict && protocol_metadata.is_none() && has_nonempty_explicit_slots);
         if let Some(dm) = dataclass_metadata.as_ref()
             && pydantic_config.is_none()
         {
-            self.validate_frozen_dataclass_inheritance(cls, dm, &bases_with_metadata, errors);
+            self.validate_frozen_dataclass_inheritance(
+                cls,
+                dm,
+                &bases_with_metadata,
+                is_from_dataclass_transform,
+                errors,
+            );
         }
         let extends_abc = self.extends_abc(&bases_with_metadata, metaclass);
 
@@ -344,13 +497,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
 
         // Get types of class keywords.
-        let keywords =
-            keywords.into_map(|(name, annot)| (name, annot.ty.unwrap_or_else(Type::any_implicit)));
+        let keywords = keywords.into_map(|(name, annot)| {
+            (
+                name,
+                annot.ty.unwrap_or_else(|| self.heap.mk_any_implicit()),
+            )
+        });
 
         // get pydantic model info. A root model is by default also a base model, while not every base model is a root model
         let pydantic_model_kind = pydantic_config
             .as_ref()
             .map(|m| m.pydantic_model_kind.clone());
+
+        let shaped_array_shape = self.shaped_array_shape(cls, shaped_array_metadata, errors);
 
         ClassMetadata::new(
             bases,
@@ -367,16 +526,101 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             is_new_type,
             is_final,
             deprecation,
-            is_disjoint_base,
+            is_local_disjoint_base,
+            has_fresh_local_slots_decorator,
             total_ordering_metadata,
             dataclass_transform_metadata,
             pydantic_model_kind,
+            is_attrs_class,
             django_model_metadata,
             is_marshmallow_schema,
+            is_factory_boy_factory,
+            is_metaclass,
+            explicit_slots,
+            capture_init.map(|names| names.to_vec()),
+            shaped_array_shape,
         )
     }
 
-    fn initial_protocol_metadata(cls: &Class, bases: &[BaseClass]) -> Option<ProtocolMetadata> {
+    fn shaped_array_shape(
+        &self,
+        cls: &Class,
+        metadata: Option<&BindingShapedArrayMetadata>,
+        errors: &ErrorCollector,
+    ) -> Option<Quantified> {
+        let BindingShapedArrayMetadata { shape_name, range } = metadata?;
+        let tparams = self.get_class_tparams(cls);
+        match tparams.iter().find(|param| param.name() == shape_name) {
+            Some(param) if param.is_type_var() => Some(param.clone()),
+            Some(param) => {
+                self.error(
+                    errors,
+                    *range,
+                    ErrorKind::InvalidAnnotation,
+                    format!(
+                        "Shape parameter `{}` must be a `TypeVar` or `IntVar`, got `{}`",
+                        shape_name, param.kind
+                    ),
+                );
+                None
+            }
+            None => {
+                self.error(
+                    errors,
+                    *range,
+                    ErrorKind::InvalidAnnotation,
+                    format!(
+                        "Shape parameter `{}` is not a type parameter of class `{}`",
+                        shape_name,
+                        cls.name()
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    fn explicit_slots(&self, cls: &Class) -> ExplicitSlots {
+        let key = KeyClassField(cls.index(), dunder::SLOTS.clone());
+        let Some(idx) = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
+            return ExplicitSlots::Absent;
+        };
+        let binding = self.bindings().get::<KeyClassField>(idx);
+        let ClassFieldDefinition::AssignedInBody { value, .. } = &binding.definition else {
+            return ExplicitSlots::Unknown;
+        };
+        let ExprOrBinding::Expr(expr) = value.as_ref() else {
+            return ExplicitSlots::Unknown;
+        };
+
+        fn name_of(expr: &Expr) -> Option<Name> {
+            match expr {
+                Expr::StringLiteral(s) => Some(Name::new(s.value.to_str())),
+                _ => None,
+            }
+        }
+        let names: Option<SmallSet<Name>> = match expr {
+            Expr::Tuple(t) => t.elts.iter().map(name_of).collect(),
+            Expr::List(l) => l.elts.iter().map(name_of).collect(),
+            Expr::Dict(d) => d
+                .items
+                .iter()
+                .map(|item| item.key.as_ref().and_then(name_of))
+                .collect(),
+            Expr::StringLiteral(s) => Some(iter::once(Name::new(s.value.to_str())).collect()),
+            _ => return ExplicitSlots::Unknown,
+        };
+        match names {
+            Some(names) => ExplicitSlots::Known(SlotsInfo { names }),
+            None => ExplicitSlots::Unknown,
+        }
+    }
+
+    fn initial_protocol_metadata(
+        &self,
+        cls: &Class,
+        bases: &[BaseClass],
+    ) -> Option<ProtocolMetadata> {
         if bases.iter().any(|x| {
             matches!(
                 x,
@@ -387,7 +631,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             )
         }) {
             Some(ProtocolMetadata {
-                members: cls.fields().cloned().collect(),
+                members: self
+                    .get_class_fields(cls)
+                    .map(|f| f.class_body_fields().cloned().collect())
+                    .unwrap_or_default(),
                 is_runtime_checkable: false,
             })
         } else {
@@ -418,7 +665,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     } else {
                         self.error(errors,
                             *range,
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             "If `Protocol` is included as a base class, all other bases must be protocols".to_owned(),
                         );
                     }
@@ -434,7 +681,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             *range,
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::BadClassDefinition,
                             "@runtime_checkable can only be applied to Protocol classes".to_owned(),
                         );
                     }
@@ -448,9 +695,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     fn named_tuple_metadata(
         &self,
         cls: &Class,
+        bases: &[BaseClass],
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
         errors: &ErrorCollector,
     ) -> Option<NamedTupleMetadata> {
+        // Check if any base is a NamedTuple with dynamic fields
+        let has_dynamic_fields = bases
+            .iter()
+            .any(|b| matches!(b, BaseClass::NamedTuple(_, true)));
+
         bases_with_metadata
             .iter()
             .find_map(|(base_class_object, metadata)| {
@@ -460,9 +713,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 ) {
                     Some(NamedTupleMetadata {
                         elements: self.get_named_tuple_elements(cls, errors),
+                        has_dynamic_fields,
+                        directly_extends_named_tuple: true,
                     })
                 } else {
-                    metadata.named_tuple_metadata().cloned()
+                    metadata
+                        .named_tuple_metadata()
+                        .map(|nt| NamedTupleMetadata {
+                            elements: nt.elements.clone(),
+                            has_dynamic_fields: nt.has_dynamic_fields,
+                            directly_extends_named_tuple: false,
+                        })
                 }
             })
     }
@@ -488,7 +749,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             cls.range(),
-                            ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                            ErrorKind::BadTypedDict,
                             "TypedDict keywords `closed` and `extra_items` cannot be used together"
                                 .to_owned(),
                         );
@@ -507,7 +768,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             self.error(
                                 errors,
                                 cls.range(),
-                                ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                                ErrorKind::BadTypedDict,
                                 format!("Expected `extra_items` to be a type form, got instance of `{}`", self.for_display(value_ty.clone())),
                             )
                         });
@@ -518,7 +779,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             cls.range(),
-                            ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                            ErrorKind::BadTypedDict,
                             format!(
                                 "Expected literal True or False for keyword `{}`, got instance of `{}`",
                                 name,
@@ -530,7 +791,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             cls.range(),
-                            ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                            ErrorKind::BadTypedDict,
                             format!(
                                 "TypedDict does not support keyword argument `{}`",
                                 name.as_str()
@@ -585,7 +846,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                    ErrorKind::BadTypedDict,
                     format!("Non-closed TypedDict cannot inherit from {base}"),
                 );
             }
@@ -598,7 +859,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                    ErrorKind::BadTypedDict,
                     format!("Closed TypedDict cannot inherit from TypedDict `{}` with non-read-only extra items", base_typed_dict.name()),
                 );
             }
@@ -612,7 +873,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     range,
-                    ErrorInfo::Kind(ErrorKind::BadTypedDict),
+                    ErrorKind::BadTypedDict,
                     format!(
                         "Cannot change the non-read-only extra items type of TypedDict `{}`",
                         base_typed_dict.name()
@@ -631,40 +892,31 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
         errors: &ErrorCollector,
     ) -> Option<EnumMetadata> {
-        let is_django = bases_with_metadata.iter().any(|(base, base_meta)| {
-            base.has_toplevel_qname(ModuleName::django_models_enums().as_str(), "Choices")
-                || base_meta
-                    .enum_metadata()
-                    .as_ref()
-                    .is_some_and(|meta| meta.is_django)
-        });
+        let is_django = is_django_choices_subclass(bases_with_metadata);
 
-        if let Some(metaclass) = metaclass
-            && self
-                .as_superclass(metaclass, self.stdlib.enum_meta().class_object())
+        let metaclass_is_enum = metaclass.is_some_and(|m| {
+            self.as_superclass(m, self.stdlib.enum_meta().class_object())
                 .is_some()
-        {
+        });
+        let base_is_enum = bases_with_metadata.iter().any(|(_, meta)| meta.is_enum());
+
+        if metaclass_is_enum || base_is_enum {
             // NOTE(grievejia): This may create potential cycle if metaclass is generic. Need to look into
             // whether it can be removed or not.
             if !self.get_class_tparams(cls).is_empty() {
                 self.error(
                     errors,
                     cls.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                    ErrorKind::InvalidInheritance,
                     "Enums may not be generic".to_owned(),
                 );
             }
             Some(EnumMetadata {
                 // A generic enum is an error, but we create Any type args anyway to handle it gracefully.
                 cls: self.promote_nontypeddict_silently_to_classtype(cls),
-                has_value: bases_with_metadata
-                    .iter()
-                    .any(|(base, _)| base.contains(&Name::new_static("_value_"))),
-                is_flag: bases_with_metadata.iter().any(|(base, _)| {
-                    self.is_subset_eq(
-                        &Type::ClassType(self.promote_nontypeddict_silently_to_classtype(base)),
-                        &Type::ClassType(self.stdlib.enum_flag().clone()),
-                    )
+                has_value: bases_with_metadata.iter().any(|(base, _)| {
+                    self.get_class_fields(base)
+                        .is_some_and(|f| f.contains(&Name::new_static("_value_")))
                 }),
                 is_django,
             })
@@ -675,6 +927,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
     fn dataclass_transform_metadata(
         &self,
+        keywords: &[(Name, Annotation)],
         decorators: &[(Arc<Decorator>, TextRange)],
         metaclass: Option<&ClassType>,
         dataclass_defaults_from_base_class: Option<DataclassTransformMetadata>,
@@ -682,14 +935,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // This is set when a class is decorated with `@typing.dataclass_transform(...)`. Note that
         // this does not turn the class into a dataclass! Instead, it becomes a special base class
         // (or metaclass) that turns child classes into dataclasses.
+        // `dataclass_defaults_from_base_class` already falls back to the metaclass's transform
+        // metadata, so prefer it here: a base's accumulated keyword defaults (folded below) must
+        // propagate down the whole subtree rather than being reset to the metaclass's raw defaults.
         let mut dataclass_transform_metadata = dataclass_defaults_from_base_class;
-        if let Some(c) = metaclass
-            && let Some(m) = self
-                .get_metadata_for_class(c.class_object())
-                .dataclass_transform_metadata()
-        {
-            dataclass_transform_metadata = Some(m.clone());
-        }
         for (decorator, _) in decorators {
             // `@dataclass_transform(...)`
             if let Type::KwCall(call) = &decorator.ty
@@ -699,16 +948,38 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     Some(DataclassTransformMetadata::from_type_map(&call.keywords));
             }
         }
+        // A metaclass-based dataclass_transform (e.g. SQLAlchemy's `DCTransformDeclarative`)
+        // re-applies its dataclass keywords to every subclass
+        let metaclass_is_transform = metaclass.is_some_and(|c| {
+            self.get_metadata_for_class(c.class_object())
+                .dataclass_transform_metadata()
+                .is_some()
+        });
+        if metaclass_is_transform && let Some(metadata) = &mut dataclass_transform_metadata {
+            for (name, annot) in keywords {
+                let Some(value) = annot.get_type().as_bool() else {
+                    continue;
+                };
+                match name.as_str() {
+                    "kw_only" => metadata.kw_only_default = value,
+                    "eq" => metadata.eq_default = value,
+                    "order" => metadata.order_default = value,
+                    _ => {}
+                }
+            }
+        }
         dataclass_transform_metadata
     }
 
     fn dataclass_from_dataclass_transform(
         &self,
+        cls: &Class,
         keywords: &[(Name, Annotation)],
         decorators: &[(Arc<Decorator>, TextRange)],
         dataclass_defaults_from_base_class: Option<DataclassTransformMetadata>,
         pydantic_config: Option<&PydanticConfig>,
-    ) -> Option<(DataclassKeywords, Vec<CalleeKind>)> {
+        errors: &ErrorCollector,
+    ) -> Option<TransformDataclass> {
         // This is set when we should apply dataclass-like transformations to the class. The class
         // should be transformed if:
         // - it inherits from a base class decorated with `dataclass_transform(...)`, or
@@ -723,12 +994,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         if let Some(defaults) = dataclass_defaults_from_base_class {
             // This class inherits from a dataclass_transform-ed base class, so its keywords are
             // interpreted as dataclass keywords.
-            let map = keywords
-                .iter()
-                .map(|(name, annot)| (name.clone(), annot.get_type().clone()))
-                .collect::<OrderedMap<_, _>>();
-            let mut kws =
-                DataclassKeywords::from_type_map(&TypeMap(map), &defaults, strict_default);
+            let map = TypeMap(
+                keywords
+                    .iter()
+                    .map(|(name, annot)| (name.clone(), annot.get_type().clone()))
+                    .collect::<OrderedMap<_, _>>(),
+            );
+            let mut kws = DataclassKeywords::from_type_map(&map, &defaults, strict_default);
 
             // Inject pydantic model configuration from ConfigDict.
             // This path is for pydantic models (BaseModel, etc.), not pydantic dataclasses.
@@ -744,25 +1016,207 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
             }
 
-            dataclass_from_dataclass_transform = Some((kws, defaults.field_specifiers));
+            kws.attrs_setattr_frozen = map
+                .0
+                .get(&DataclassFieldKeywords::ON_SETATTR)
+                .is_some_and(is_attrs_setters_frozen);
+            dataclass_from_dataclass_transform = Some(TransformDataclass {
+                keywords: kws,
+                field_specifiers: defaults.field_specifiers,
+                attrs_hash: None,
+            });
         }
-        for (decorator, _) in decorators {
+        for (decorator, decorator_range) in decorators {
             // `@foo` where `foo` is decorated with `@dataclass_transform(...)`
             if let Some(defaults) = decorator.ty.dataclass_transform_metadata() {
-                let kws =
+                let mut kws =
                     DataclassKeywords::from_type_map(&TypeMap::new(), defaults, strict_default);
-                dataclass_from_dataclass_transform = Some((kws, defaults.field_specifiers.clone()));
+                if kws.auto_attribs.is_none() {
+                    kws.auto_attribs = Some(self.attrs_default_auto_attribs(
+                        cls,
+                        *decorator_range,
+                        defaults.order_default,
+                    ));
+                }
+                dataclass_from_dataclass_transform = Some(TransformDataclass {
+                    keywords: kws,
+                    field_specifiers: defaults.field_specifiers.clone(),
+                    attrs_hash: None,
+                });
             }
             // `@foo(...)` where `foo` is decorated with `@dataclass_transform(...)`
             else if let Type::KwCall(call) = &decorator.ty
                 && let Some(defaults) = &call.func_metadata.flags.dataclass_transform_metadata
             {
-                let kws =
+                let mut kws =
                     DataclassKeywords::from_type_map(&call.keywords, defaults, strict_default);
-                dataclass_from_dataclass_transform = Some((kws, defaults.field_specifiers.clone()));
+                if kws.auto_attribs.is_none() {
+                    kws.auto_attribs = Some(self.attrs_default_auto_attribs(
+                        cls,
+                        *decorator_range,
+                        defaults.order_default,
+                    ));
+                }
+                kws.attrs_setattr_frozen = call
+                    .keywords
+                    .0
+                    .get(&DataclassFieldKeywords::ON_SETATTR)
+                    .is_some_and(is_attrs_setters_frozen);
+                let attrs_hash =
+                    if Self::field_specifiers_reference_attrs(&defaults.field_specifiers) {
+                        self.validate_attrs_eq_order_cmp(&call.keywords, *decorator_range, errors);
+                        DataclassKeywords::attrs_hash_from_map(&call.keywords)
+                    } else {
+                        None
+                    };
+                dataclass_from_dataclass_transform = Some(TransformDataclass {
+                    keywords: kws,
+                    field_specifiers: defaults.field_specifiers.clone(),
+                    attrs_hash,
+                });
             }
         }
         dataclass_from_dataclass_transform
+    }
+
+    /// Single annotation walk returning local
+    /// `(instance, pseudo_overrides, pydantic_privates)` — pairwise disjoint;
+    /// together they cover every annotated body field. `pseudo_overrides`
+    /// (`ClassVar`/`InitVar`/`KW_ONLY`) replace the matching inherited
+    /// dataclass entry per CPython `_process_class`; pydantic privates are
+    /// non-overriding non-instance fields that still belong in
+    /// `DataclassMetadata.pseudo_fields`. Cycle-safe: must not call helpers
+    /// that consume solved class fields.
+    fn local_dataclass_field_classification(
+        &self,
+        cls: &Class,
+        pydantic_config: Option<&PydanticConfig>,
+    ) -> (SmallSet<Name>, SmallSet<Name>, SmallSet<Name>) {
+        let mut instance = SmallSet::new();
+        let mut pseudo_overrides = SmallSet::new();
+        let mut pydantic_privates = SmallSet::new();
+        let Some(class_fields) = self.get_class_fields(cls) else {
+            return (instance, pseudo_overrides, pydantic_privates);
+        };
+        let pydantic_drops_private = pydantic_config.is_some_and(|pydantic| {
+            matches!(
+                pydantic.pydantic_model_kind,
+                PydanticModelKind::BaseModel
+                    | PydanticModelKind::RootModel
+                    | PydanticModelKind::BaseSettings
+            )
+        });
+        for name in class_fields.class_body_fields() {
+            if !class_fields.is_field_annotated(name) {
+                continue;
+            }
+            if pydantic_drops_private && name.as_str().starts_with('_') {
+                pydantic_privates.insert(name.clone());
+                continue;
+            }
+            let key = KeyClassField(cls.index(), name.clone());
+            let Some(field_idx) = self.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
+                continue;
+            };
+            let binding = self.bindings().get::<KeyClassField>(field_idx);
+            let annotation_key: Idx<KeyAnnotation> = match &binding.definition {
+                ClassFieldDefinition::DeclaredByAnnotation { annotation, .. } => *annotation,
+                ClassFieldDefinition::AssignedInBody {
+                    annotation: Some(annotation),
+                    ..
+                } => *annotation,
+                _ => continue,
+            };
+            let annotation = &self.get_idx(annotation_key).annotation;
+            if annotation.is_class_var()
+                || annotation.is_init_var()
+                || matches!(annotation.get_type(), Type::ClassType(c) if c.has_qname("dataclasses", "KW_ONLY"))
+            {
+                pseudo_overrides.insert(name.clone());
+                continue;
+            }
+            instance.insert(name.clone());
+        }
+        (instance, pseudo_overrides, pydantic_privates)
+    }
+
+    /// Populates `DataclassMetadata.pseudo_field_names`.
+    fn get_dataclass_pseudo_field_names(
+        &self,
+        cls: &Class,
+        bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
+        pydantic_config: Option<&PydanticConfig>,
+    ) -> SmallSet<Name> {
+        let (local_instance, local_pseudo_overrides, local_pydantic_privates) =
+            self.local_dataclass_field_classification(cls, pydantic_config);
+        let mut pseudo_field_names = SmallSet::new();
+        for (_, metadata) in bases_with_metadata.iter().rev() {
+            if let Some(dm) = metadata.dataclass_metadata() {
+                for name in &dm.pseudo_field_names {
+                    // A local instance annotation overrides an inherited pseudo entry.
+                    if !local_instance.contains(name) {
+                        pseudo_field_names.insert(name.clone());
+                    }
+                }
+            }
+        }
+        pseudo_field_names.extend(local_pseudo_overrides);
+        pseudo_field_names.extend(local_pydantic_privates);
+        pseudo_field_names
+    }
+
+    /// Report the "`@dataclass` cannot be applied to X" diagnostics for the class
+    /// kinds dataclass rejects. Shared by the decorator path (`dataclass_metadata`)
+    /// and the call form `dataclass(C)` so both reject the same kinds with the same
+    /// messages. `Protocol` is a soft reject (diagnostic only; it still becomes a
+    /// dataclass at runtime); `Enum`/`TypedDict`/`NamedTuple` are hard rejects.
+    /// Returns `true` on a hard reject so the decorator path can abort metadata.
+    pub fn report_forbidden_dataclass_target(
+        &self,
+        name: &Name,
+        is_protocol: bool,
+        is_enum: bool,
+        is_typed_dict: bool,
+        is_named_tuple: bool,
+        range: TextRange,
+        errors: &ErrorCollector,
+    ) -> bool {
+        if is_protocol {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadClassDefinition,
+                format!("`@dataclass` cannot be applied to Protocol `{}`", name),
+            );
+        }
+        if is_enum {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadClassDefinition,
+                format!("Cannot apply `@dataclass` to Enum `{}`", name),
+            );
+            return true;
+        }
+        if is_typed_dict {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadClassDefinition,
+                format!("Cannot apply `@dataclass` to TypedDict `{}`", name),
+            );
+            return true;
+        }
+        if is_named_tuple {
+            self.error(
+                errors,
+                range,
+                ErrorKind::BadClassDefinition,
+                format!("Cannot apply `@dataclass` to NamedTuple `{}`", name),
+            );
+            return true;
+        }
+        false
     }
 
     fn dataclass_metadata(
@@ -770,9 +1224,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         cls: &Class,
         decorators: &[(Arc<Decorator>, TextRange)],
         bases_with_metadata: &[(Class, Arc<ClassMetadata>)],
-        dataclass_from_dataclass_transform: Option<(DataclassKeywords, Vec<CalleeKind>)>,
+        dataclass_from_dataclass_transform: Option<TransformDataclass>,
         pydantic_config: Option<&PydanticConfig>,
-    ) -> Option<DataclassMetadata> {
+        pydantic_before_validator_fields: &[Name],
+        is_attrs_class: bool,
+        is_protocol: bool,
+        is_enum: bool,
+        is_typed_dict: bool,
+        is_named_tuple: bool,
+        errors: &ErrorCollector,
+    ) -> (Option<DataclassMetadata>, bool) {
         // If we inherit from a dataclass, inherit its metadata. Note that if this class is
         // itself decorated with @dataclass, we'll compute new metadata and overwrite this.
         let mut dataclass_metadata = bases_with_metadata.iter().find_map(|(_, metadata)| {
@@ -781,71 +1242,148 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             m.kws.init = false;
             Some(m)
         });
+        let mut has_fresh_local_slots_decorator = false;
 
         let init_defaults = pydantic_config
             .map(|pyd| InitDefaults {
                 init_by_name: pyd.validation_flags.validate_by_name,
                 init_by_alias: pyd.validation_flags.validate_by_alias,
+                alias_generator: pyd.validation_alias_generator.clone(),
             })
             .unwrap_or_default();
-        let default_can_be_positional = pydantic_config.is_some();
+        let default_can_be_positional = pydantic_config.is_some() || is_attrs_class;
 
         let mut alias_keyword = DataclassFieldKeywords::ALIAS;
         if pydantic_config.is_some() {
             alias_keyword = VALIDATION_ALIAS;
         }
+        let mut has_dataclass_decorator = false;
         for (decorator, _) in decorators {
             match decorator.ty.callee_kind() {
                 // `@dataclass`
                 Some(CalleeKind::Function(FunctionKind::Dataclass)) => {
-                    let dataclass_fields = self.get_dataclass_fields(cls, bases_with_metadata);
-                    dataclass_metadata = Some(DataclassMetadata {
-                        fields: dataclass_fields,
-                        kws: DataclassKeywords::new(),
+                    has_dataclass_decorator = true;
+                    let kind = DataclassKind::Dataclass {
                         field_specifiers: vec![
                             CalleeKind::Function(FunctionKind::DataclassField),
                             CalleeKind::Class(ClassKind::DataclassField),
                         ],
+                    };
+                    let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
+                    let pseudo_field_names = self.get_dataclass_pseudo_field_names(
+                        cls,
+                        bases_with_metadata,
+                        pydantic_config,
+                    );
+                    let kws = DataclassKeywords::new();
+                    // Bare `@dataclass` never sets slots.
+                    has_fresh_local_slots_decorator = false;
+                    dataclass_metadata = Some(DataclassMetadata {
+                        fields,
+                        pseudo_field_names,
+                        kws,
                         alias_keyword: alias_keyword.clone(),
                         init_defaults: init_defaults.clone(),
                         default_can_be_positional,
+                        pydantic_before_validator_fields: SmallSet::new(),
+                        kind,
                     });
                 }
                 // `@dataclass(...)`
                 _ if let Type::KwCall(call) = &decorator.ty
                     && call.has_function_kind(FunctionKind::Dataclass) =>
                 {
-                    let dataclass_fields = self.get_dataclass_fields(cls, bases_with_metadata);
-                    dataclass_metadata = Some(DataclassMetadata {
-                        fields: dataclass_fields,
-                        kws: DataclassKeywords::from_type_map(
-                            &call.keywords,
-                            &DataclassTransformMetadata::new(),
-                            true, // Regular dataclasses are always strict
-                        ),
+                    has_dataclass_decorator = true;
+                    let kind = DataclassKind::Dataclass {
                         field_specifiers: vec![
                             CalleeKind::Function(FunctionKind::DataclassField),
                             CalleeKind::Class(ClassKind::DataclassField),
                         ],
+                    };
+                    let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
+                    let pseudo_field_names = self.get_dataclass_pseudo_field_names(
+                        cls,
+                        bases_with_metadata,
+                        pydantic_config,
+                    );
+                    let kws = DataclassKeywords::from_type_map(
+                        &call.keywords,
+                        &DataclassTransformMetadata::new(),
+                        true, // Regular dataclasses are always strict
+                    );
+                    has_fresh_local_slots_decorator = kws.slots;
+                    dataclass_metadata = Some(DataclassMetadata {
+                        fields,
+                        pseudo_field_names,
+                        kws,
                         alias_keyword: alias_keyword.clone(),
                         init_defaults: init_defaults.clone(),
                         default_can_be_positional,
+                        pydantic_before_validator_fields: SmallSet::new(),
+                        kind,
                     });
                 }
                 _ => {}
             }
         }
-        if let Some((kws, field_specifiers)) = dataclass_from_dataclass_transform {
+        // @dataclass cannot be applied to Protocol, Enum, TypedDict, or NamedTuple classes.
+        // Protocols still become dataclasses at runtime, so preserve their metadata; the
+        // hard-reject kinds have no useful dataclass runtime behavior to model, so abort.
+        if has_dataclass_decorator
+            && self.report_forbidden_dataclass_target(
+                cls.name(),
+                is_protocol,
+                is_enum,
+                is_typed_dict,
+                is_named_tuple,
+                cls.range(),
+                errors,
+            )
+        {
+            return (None, false);
+        }
+        if let Some(TransformDataclass {
+            keywords: kws,
+            field_specifiers,
+            attrs_hash,
+        }) = dataclass_from_dataclass_transform
+        {
+            // Inherit before-validator fields from base pydantic models, then add our own.
+            let mut inherited_before_validator_fields: SmallSet<Name> = bases_with_metadata
+                .iter()
+                .filter(|(_, metadata)| metadata.is_pydantic_model())
+                .filter_map(|(_, metadata)| metadata.dataclass_metadata())
+                .flat_map(|dm| dm.pydantic_before_validator_fields.iter().cloned())
+                .collect();
+            inherited_before_validator_fields
+                .extend(pydantic_before_validator_fields.iter().cloned());
+            // TODO: a transform-derived spec silently drops the explicit
+            // `@dataclass(...)` kws from the loop above. Needs a merge policy.
+            has_fresh_local_slots_decorator = kws.slots;
+            let kind = if is_attrs_class {
+                DataclassKind::Attrs {
+                    auto_attribs: kws.auto_attribs,
+                    hash: attrs_hash,
+                    field_specifiers,
+                }
+            } else {
+                DataclassKind::Dataclass { field_specifiers }
+            };
+            let fields = self.get_dataclass_fields(cls, bases_with_metadata, &kind);
+            let pseudo_field_names =
+                self.get_dataclass_pseudo_field_names(cls, bases_with_metadata, pydantic_config);
             dataclass_metadata = Some(DataclassMetadata {
-                fields: self.get_dataclass_fields(cls, bases_with_metadata),
+                fields,
+                pseudo_field_names,
                 kws,
-                field_specifiers,
                 alias_keyword,
                 init_defaults,
                 default_can_be_positional,
+                pydantic_before_validator_fields: inherited_before_validator_fields,
+                kind,
             });
         }
-        dataclass_metadata
+        (dataclass_metadata, has_fresh_local_slots_decorator)
     }
 
     // To avoid circular computation on targs, we have a special version of `expr_infer` that does not look into any subscript of any expr
@@ -873,16 +1411,32 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // ```
                 // In this case, we can be sure that `Foo[B]` would be the same as `B`, so we inspect the subscript.
                 // This does create a potential cycle (e.g. `class A(Foo["A"])`), but not supporting it ended up breaking some important use cases.
+                // The alias body is `type[T]` for bare aliases and `Annotated[T]` for Annotated aliases;
+                // we must handle both.
                 match &ty {
                     Type::Forall(forall)
                         if forall.tparams.len() == 1
                             && let Forallable::TypeAlias(type_alias) = &forall.body
-                            && let Type::Type(box Type::Quantified(quantified)) =
-                                type_alias.as_type()
-                            && quantified.kind() == QuantifiedKind::TypeVar
+                            && let quantified = match self.get_type_alias(type_alias).as_type() {
+                                Type::Type(f) if matches!(&*f, Type::Quantified(_)) => {
+                                    let Type::Quantified(q) = *f else {
+                                        unreachable!("guarded by matches! above")
+                                    };
+                                    Some(q)
+                                }
+                                Type::Annotated(f, _) if matches!(&*f, Type::Quantified(_)) => {
+                                    let Type::Quantified(q) = *f else {
+                                        unreachable!("guarded by matches! above")
+                                    };
+                                    Some(q)
+                                }
+                                _ => None,
+                            }
+                            && let Some(quantified) = quantified
+                            && quantified.is_type_var()
                             && matches!(quantified.restriction(), Restriction::Unrestricted)
                             && let Some(tparam) = forall.tparams.as_vec().first()
-                            && *quantified == tparam.quantified
+                            && *quantified == *tparam
                             && let Some(subscript_base_expr) = BaseClassExpr::from_expr(slice) =>
                     {
                         self.base_class_expr_infer_for_metadata(&subscript_base_expr, errors)
@@ -920,7 +1474,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
             Type::TypedDict(typed_dict) => {
                 if is_new_type {
-                    BaseClassParseResult::InvalidType(typed_dict.to_type(), range)
+                    BaseClassParseResult::InvalidType(typed_dict.to_type(self.heap), range)
                 } else {
                     match typed_dict {
                         TypedDict::TypedDict(inner) => {
@@ -935,12 +1489,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             })
                         }
                         TypedDict::Anonymous(_) => {
-                            BaseClassParseResult::InvalidType(typed_dict.to_type(), range)
+                            BaseClassParseResult::InvalidType(typed_dict.to_type(self.heap), range)
                         }
                     }
                 }
             }
-            Type::Type(box Type::Any(_)) => {
+            Type::None if is_new_type => {
+                let base_cls = self.stdlib.none_type().class_object();
+                let metadata = self.get_metadata_for_class(base_cls);
+                BaseClassParseResult::Parsed({
+                    ParsedBaseClass {
+                        class_object: base_cls.dupe(),
+                        range,
+                        metadata,
+                    }
+                })
+            }
+            Type::Type(f) if f.is_any() => {
                 // `type[Any]` is equivalent to `type` or `Type`
                 let type_obj = self.stdlib.builtins_type().class_object();
                 let metadata = self.get_metadata_for_class(type_obj);
@@ -965,13 +1530,70 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 // Ignore all type errors here since they'll be reported in `class_bases_of` anyway
                 let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
                 let ty = self.base_class_expr_infer_for_metadata(x, &errors);
+                // The value `None` has type `Type::None`, which `untype_opt` passes
+                // through because `None` is both a value and a type. But as a NewType
+                // base, the value `None` is not valid — only the class `NoneType` is.
+                // Reject it here before `untype_opt` erases the distinction.
+                if is_new_type && matches!(&ty, Type::None) {
+                    return BaseClassParseResult::InvalidType(ty, x.range());
+                }
                 match self.untype_opt(ty.clone(), x.range(), &errors) {
                     None => BaseClassParseResult::InvalidType(ty, x.range()),
                     Some(ty) => parse_base_class_type(ty),
                 }
             }
-            BaseClass::NamedTuple(..) => {
-                parse_base_class_type(self.stdlib.named_tuple_fallback().clone().to_type())
+            BaseClass::NamedTuple(..) => parse_base_class_type(
+                self.heap
+                    .mk_class_type(self.stdlib.named_tuple_fallback().clone()),
+            ),
+            BaseClass::SynthesizedBase(class_idx, _) => {
+                match &self.get_idx(*class_idx).as_ref().0 {
+                    Some(cls) => {
+                        // At the moment we never synthesize a typed dict, so this is safe
+                        let ct = self.promote_nontypeddict_silently_to_classtype(cls);
+                        parse_base_class_type(self.heap.mk_class_type(ct))
+                    }
+                    None => BaseClassParseResult::InvalidBase(base.range()),
+                }
+            }
+            BaseClass::TypeOf(inner_expr, _) => {
+                // Ignore all type errors here since they'll be reported in `class_bases_of` anyway
+                let errors = ErrorCollector::new(self.module().dupe(), ErrorStyle::Never);
+                let ty = self.base_class_expr_infer_for_metadata(inner_expr, &errors);
+                // Determine what class `type(X)` resolves to:
+                // - If X is a class (type is type[C]), type(X) = C's metaclass
+                // - If X is an instance (type is C), type(X) = C
+                match self.untype_opt(ty.clone(), inner_expr.range(), &errors) {
+                    Some(Type::ClassType(c)) => {
+                        // X is a class C. type(C) = metaclass of C.
+                        let class_obj = c.class_object();
+                        let inner_metadata = self.get_metadata_for_class(class_obj);
+                        let metaclass_ct = inner_metadata.metaclass(self.stdlib);
+                        let metaclass_class = metaclass_ct.class_object();
+                        let metaclass_metadata = self.get_metadata_for_class(metaclass_class);
+                        BaseClassParseResult::Parsed(ParsedBaseClass {
+                            class_object: metaclass_class.dupe(),
+                            range,
+                            metadata: metaclass_metadata,
+                        })
+                    }
+                    Some(_) => BaseClassParseResult::InvalidType(ty, range),
+                    None => {
+                        // X is an instance of class C. type(X) = C.
+                        match &ty {
+                            Type::ClassType(c) => {
+                                let class_obj = c.class_object();
+                                let metadata = self.get_metadata_for_class(class_obj);
+                                BaseClassParseResult::Parsed(ParsedBaseClass {
+                                    class_object: class_obj.dupe(),
+                                    range,
+                                    metadata,
+                                })
+                            }
+                            _ => BaseClassParseResult::InvalidType(ty, range),
+                        }
+                    }
+                }
             }
             BaseClass::TypedDict(..) | BaseClass::Generic(..) => {
                 if is_new_type {
@@ -998,7 +1620,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "Second argument to NewType is invalid".to_owned(),
                         );
                     }
@@ -1009,14 +1631,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             expr.range(),
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "Second argument to NewType is invalid".to_owned(),
                         );
                     } else {
                         self.error(
                             errors,
                             expr.range(),
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             format!(
                                 "Invalid expression form for base class: `{}`",
                                 expr.display_with(self.module())
@@ -1030,14 +1652,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                            ErrorKind::InvalidArgument,
                             "Second argument to NewType is invalid".to_owned(),
                         );
                     } else {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             format!("Invalid base class: `{}`", self.for_display(ty)),
                         );
                     }
@@ -1048,13 +1670,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     range,
                     metadata,
                 }) => {
-                    if metadata.is_final()
-                        || (metadata.is_enum() && !self.get_enum_members(&class_object).is_empty())
+                    if !is_new_type
+                        && (metadata.is_final()
+                            || (metadata.is_enum()
+                                && !self.get_enum_members(&class_object).is_empty()))
                     {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             format!("Cannot extend final class `{}`", class_object.name()),
                         );
                     }
@@ -1064,7 +1688,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             self.error(
                                 errors,
                                 range,
-                                ErrorInfo::Kind(ErrorKind::InvalidArgument),
+                                ErrorKind::InvalidArgument,
                                 "Second argument to NewType cannot be a protocol".to_owned(),
                             );
                             return None;
@@ -1075,7 +1699,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         self.error(
                             errors,
                             range,
-                            ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                            ErrorKind::InvalidInheritance,
                             "Subclassing a NewType not allowed".to_owned(),
                         );
                     }
@@ -1097,9 +1721,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 all_fields.extend(td.fields.clone());
             }
         }
-        for name in cls.fields() {
-            if cls.is_field_annotated(name) {
-                all_fields.insert(name.clone(), is_total);
+        if let Some(class_fields) = self.get_class_fields(cls) {
+            for name in class_fields.names() {
+                if class_fields.is_field_annotated(name) {
+                    all_fields.insert(name.clone(), is_total);
+                }
             }
         }
         all_fields
@@ -1123,8 +1749,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 let accept_m = match &inherited_meta {
                     None => true,
                     Some(inherited) => self.is_subset_eq(
-                        &Type::ClassType(m.clone()),
-                        &Type::ClassType(inherited.clone()),
+                        &self.heap.mk_class_type(m.clone()),
+                        &self.heap.mk_class_type(inherited.clone()),
                     ),
                 };
                 if accept_m {
@@ -1147,13 +1773,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         // It is a runtime error to define a class whose metaclass (whether
         // specified directly or through inheritance) is not a subtype of all
         // base class metaclasses.
-        let metaclass_type = Type::ClassType(metaclass.clone());
+        let metaclass_type = self.heap.mk_class_type(metaclass.clone());
         for (base_name, m) in base_metaclasses {
-            let base_metaclass_type = Type::ClassType((*m).clone());
+            let base_metaclass_type = self.heap.mk_class_type((*m).clone());
             if !self.is_subset_eq(&metaclass_type, &base_metaclass_type) {
                 self.error(errors,
                     cls.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                    ErrorKind::InvalidInheritance,
                     format!(
                         "Class `{}` has metaclass `{}` which is not a subclass of metaclass `{}` from base class `{}`",
                         cls.name(),
@@ -1175,19 +1801,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         match self.expr_untype(raw_metaclass, TypeFormContext::BaseClassList, errors) {
             Type::ClassType(meta) => {
                 if self.is_subset_eq(
-                    &Type::ClassType(meta.clone()),
-                    &Type::ClassType(self.stdlib.builtins_type().clone()),
+                    &self.heap.mk_class_type(meta.clone()),
+                    &self.heap.mk_class_type(self.stdlib.builtins_type().clone()),
                 ) {
                     Some(meta)
                 } else {
                     self.error(
                         errors,
                         raw_metaclass.range(),
-                        ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                        ErrorKind::InvalidInheritance,
                         format!(
                             "Metaclass of `{}` has type `{}` which is not a subclass of `type`",
                             cls.name(),
-                            self.for_display(Type::ClassType(meta)),
+                            self.for_display(self.heap.mk_class_type(meta)),
                         ),
                     );
                     None
@@ -1197,7 +1823,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.error(
                     errors,
                     cls.range(),
-                    ErrorInfo::Kind(ErrorKind::InvalidInheritance),
+                    ErrorKind::InvalidInheritance,
                     format!(
                         "Metaclass of `{}` has type `{}` that is not a simple class type",
                         cls.name(),
@@ -1211,7 +1837,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
     pub fn calculate_class_mro(&self, cls: &Class, errors: &ErrorCollector) -> ClassMro {
         let bases = self.get_base_types_for_class(cls);
-        let bases_with_mros = bases
+        let bases_with_mros: Vec<_> = bases
             .iter()
             .map(|base| {
                 let mro = self.get_mro_for_class(base.class_object());
@@ -1221,11 +1847,130 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         ClassMro::new(cls, bases_with_mros, errors)
     }
 
+    /// Resolve `cls`'s disjoint-base representative.
+    ///
+    /// This is the first point where both metadata and MRO are available, so
+    /// generated dataclass slots are handled here rather than in `ClassMetadata`.
+    pub fn calculate_class_disjoint_base(
+        &self,
+        cls: &Class,
+        errors: &ErrorCollector,
+    ) -> ClassDisjointBase {
+        let bases = self.get_base_types_for_class(cls);
+        // A cyclic direct base has no representative, but other bases can
+        // still be checked against each other.
+        let mut survivors: Vec<Class> = Vec::new();
+        for base in bases.iter() {
+            let mro = self.get_mro_for_class(base.class_object());
+            if matches!(&*mro, ClassMro::Cyclic) {
+                continue;
+            }
+            let base_disjoint = self.get_disjoint_base_for_class(base.class_object());
+            let Some(candidate) = base_disjoint.representative() else {
+                continue;
+            };
+            // A more-specific (or equal) base already survives, drop this one.
+            if survivors
+                .iter()
+                .any(|survivor| self.has_superclass(survivor, candidate))
+            {
+                continue;
+            }
+            // Otherwise drop any less-specific survivors and keep `candidate`.
+            survivors.retain(|survivor| !self.has_superclass(candidate, survivor));
+            survivors.push(candidate.dupe());
+        }
+
+        if survivors.len() > 1 {
+            let ctx_classes: Vec<&Class> = std::iter::once(cls).chain(survivors.iter()).collect();
+            let ctx = ClassDisplayContext::new(&ctx_classes);
+            let listed = survivors
+                .iter()
+                .map(|s| format!("`{}`", ctx.display(s)))
+                .join(", ");
+            self.error(
+                errors,
+                cls.range(),
+                ErrorKind::InvalidInheritance,
+                format!(
+                    "Class `{}` inherits from incompatible disjoint bases {}",
+                    ctx.display(cls),
+                    listed,
+                ),
+            );
+        }
+
+        let metadata = self.get_metadata_for_class(cls);
+        let mro = self.get_mro_for_class(cls);
+        let has_nonempty_generated_slots =
+            self.has_nonempty_generated_slots_from_complete_mro(&metadata, &mro);
+
+        // Skip `object` so narrowing's fallback to `object` stays meaningful.
+        let local = !cls.is_builtin("object")
+            && (metadata.is_local_disjoint_base() || has_nonempty_generated_slots);
+        let local_representative = if local { Some(cls.dupe()) } else { None };
+        let inherited_representative = survivors.into_iter().next();
+        ClassDisjointBase::from_representative(local_representative.or(inherited_representative))
+    }
+
+    /// Returns whether the current class would synthesize non-empty dataclass slots.
+    ///
+    /// CPython dedups generated slots against inherited slot names, so this
+    /// requires a complete MRO. A class-body `__slots__` suppresses dataclass
+    /// slot synthesis even when the explicit slot names are dynamic.
+    fn has_nonempty_generated_slots_from_complete_mro(
+        &self,
+        metadata: &ClassMetadata,
+        mro: &ClassMro,
+    ) -> bool {
+        if metadata.is_typed_dict() || metadata.is_protocol() {
+            return false;
+        }
+        if !metadata.has_local_dataclass_slots_request() {
+            return false;
+        }
+        if metadata.has_explicit_slots() {
+            return false;
+        }
+        if !mro.linearization_complete() {
+            return false;
+        }
+        let Some(dataclass) = metadata.dataclass_metadata() else {
+            return false;
+        };
+
+        let mut inherited_slot_names: SmallSet<Name> = SmallSet::new();
+        for ancestor in mro.ancestors_no_object() {
+            let ancestor_cls = ancestor.class_object();
+            let ancestor_metadata = self.get_metadata_for_class(ancestor_cls);
+            if let Some(s) = ancestor_metadata.slots_info() {
+                inherited_slot_names.extend(s.names.iter().cloned());
+            }
+            // Only ancestors that synthesized slots materialize dataclass fields
+            // as inherited slot names; inherited `kws.slots` is not enough.
+            let ancestor_is_nominal =
+                !ancestor_metadata.is_typed_dict() && !ancestor_metadata.is_protocol();
+            if ancestor_is_nominal
+                && ancestor_metadata.has_local_dataclass_slots_request()
+                && !ancestor_metadata.has_explicit_slots()
+                && let Some(ancestor_dataclass) = ancestor_metadata.dataclass_metadata()
+            {
+                inherited_slot_names.extend(ancestor_dataclass.instance_fields().cloned());
+            }
+        }
+        dataclass
+            .instance_fields()
+            .any(|name| !inherited_slot_names.contains(name))
+    }
+
     pub fn calculate_abstract_members(&self, cls: &Class) -> AbstractClassMembers {
         let metadata = self.get_metadata_for_class(cls);
         let mut fields_to_check: SmallSet<Name>;
         if metadata.extends_abc() || metadata.is_protocol() {
-            fields_to_check = SmallSet::from_iter(cls.fields().cloned());
+            fields_to_check = self
+                .get_class_fields(cls)
+                .map(|f| SmallSet::from_iter(f.names().cloned()))
+                .unwrap_or_default();
         } else {
             fields_to_check = SmallSet::new();
         }
@@ -1248,6 +1993,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
         let mut abstract_members = SmallSet::new();
         for field_name in fields_to_check {
+            // If the class has a synthesized concrete implementation (e.g., `__dataclass_fields__`
+            // from @dataclass), that satisfies any protocol requirement for this field.
+            if self
+                .get_class_member(cls, &field_name)
+                .is_some_and(|f| !f.is_abstract() && !f.is_uninit_class_var())
+            {
+                continue;
+            }
             if let Some(field) =
                 self.get_non_synthesized_class_member_and_defining_class(cls, &field_name)
                 && (field.value.is_abstract() ||
@@ -1261,6 +2014,63 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         AbstractClassMembers::new(abstract_members)
     }
 
+    pub fn calculate_subscript_symmetry(&self, cls: &Class) -> bool {
+        // Built-in mutable containers are hardcoded as symmetric: their
+        // typeshed slice overloads would otherwise classify them as asymmetric.
+        if cls.is_builtin("list")
+            || cls.is_builtin("dict")
+            || cls.is_builtin("bytearray")
+            || cls.is_builtin("memoryview")
+        {
+            return true;
+        }
+
+        let base = self.promote_silently(cls);
+        let swallower = self.error_swallower();
+
+        let Some(setitem_ty) = self.type_of_magic_dunder_attr(
+            &base,
+            &dunder::SETITEM,
+            cls.range(),
+            &swallower,
+            None,
+            "calculate_subscript_symmetry",
+            false,
+        ) else {
+            return false;
+        };
+        let Some(getitem_ty) = self.type_of_magic_dunder_attr(
+            &base,
+            &dunder::GETITEM,
+            cls.range(),
+            &swallower,
+            None,
+            "calculate_subscript_symmetry",
+            false,
+        ) else {
+            return false;
+        };
+
+        let setitem_sigs = setitem_ty.callable_signatures();
+        let getitem_sigs = getitem_ty.callable_signatures();
+        if setitem_sigs.is_empty() || getitem_sigs.is_empty() {
+            return false;
+        }
+
+        let candidate = &getitem_sigs[0].ret;
+        let all_getters_match = getitem_sigs
+            .iter()
+            .all(|sig| self.is_equivalent(&sig.ret, candidate));
+        // Bound `__setitem__` has params `[key, value]`; we want `value` at index 1.
+        let all_setters_match = setitem_sigs.iter().all(|sig| {
+            matches!(&sig.params, Params::List(params)
+                if params.items().get(1)
+                    .is_some_and(|p| self.is_equivalent(p.as_type(), candidate)))
+        });
+
+        all_getters_match && all_setters_match
+    }
+
     fn extends_abc(
         &self,
         bases_with_metadata: &Vec<(Class, Arc<ClassMetadata>)>,
@@ -1271,9 +2081,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 return true;
             }
             if let Some(metaclass) = base_metadata.custom_metaclass()
-                && metaclass
-                    .class_object()
-                    .has_toplevel_qname("abc", "ABCMeta")
+                && self.metaclass_extends_abcmeta(metaclass.class_object())
             {
                 return true;
             }
@@ -1282,11 +2090,31 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         }
         if let Some(metaclass) = metaclass
-            && metaclass
-                .class_object()
-                .has_toplevel_qname("abc", "ABCMeta")
+            && self.metaclass_extends_abcmeta(metaclass.class_object())
         {
             return true;
+        }
+        false
+    }
+
+    /// Check if `metaclass_cls` is `abc.ABCMeta` or has `abc.ABCMeta` anywhere in its
+    /// inheritance chain.
+    fn metaclass_extends_abcmeta(&self, metaclass_cls: &Class) -> bool {
+        let mut pending = vec![metaclass_cls.dupe()];
+        let mut seen = SmallSet::new();
+        while let Some(cls) = pending.pop() {
+            if !seen.insert(cls.dupe()) {
+                continue;
+            }
+            if cls.has_toplevel_qname("abc", "ABCMeta") {
+                return true;
+            }
+            pending.extend(
+                self.get_metadata_for_class(&cls)
+                    .base_class_objects()
+                    .iter()
+                    .duped(),
+            );
         }
         false
     }

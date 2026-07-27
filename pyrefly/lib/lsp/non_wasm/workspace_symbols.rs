@@ -7,6 +7,7 @@
 
 use lsp_types::SymbolKind;
 use pyrefly_python::module::TextRangeWithModule;
+use pyrefly_util::thread_pool::ThreadPool;
 
 use crate::state::lsp::MIN_CHARACTERS_TYPED_AUTOIMPORT;
 use crate::state::state::Transaction;
@@ -15,13 +16,17 @@ impl Transaction<'_> {
     pub fn workspace_symbols(
         &self,
         query: &str,
+        custom_thread_pool: Option<&ThreadPool>,
     ) -> Option<Vec<(String, SymbolKind, TextRangeWithModule)>> {
         if query.len() < MIN_CHARACTERS_TYPED_AUTOIMPORT {
             return None;
         }
         let mut result = Vec::new();
-        for (handle, name, export) in self.search_exports_fuzzy(query) {
-            if let Some(module) = self.get_module_info(&handle) {
+        for (definition, _, name, export) in self
+            .search_exports_fuzzy(query, custom_thread_pool)
+            .unwrap_or_default()
+        {
+            if let Some(module) = self.get_module_info(&definition) {
                 let kind = export
                     .symbol_kind
                     .map_or(SymbolKind::VARIABLE, |k| k.to_lsp_symbol_kind());
@@ -29,9 +34,11 @@ impl Transaction<'_> {
                     module,
                     range: export.location,
                 };
-                result.push((name, kind, location));
+                result.push((name.to_string(), kind, location));
             }
         }
+        // Keep shared fuzzy ordering intact while preferring non-`__init__.py` matches here.
+        result.sort_by_key(|(_, _, location)| location.module.path().is_init());
         Some(result)
     }
 }

@@ -21,8 +21,12 @@ use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Identifier;
 
+use crate::dimension::gradual_size;
 use crate::equality::TypeEq;
 use crate::equality::TypeEqCtx;
+use crate::heap::TypeHeap;
+use crate::quantified::Quantified;
+use crate::quantified::QuantifiedKind;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
 use crate::types::Type;
@@ -61,12 +65,24 @@ impl Restriction {
         matches!(self, Self::Bound(_) | Self::Constraints(_))
     }
 
-    pub fn as_type(&self, stdlib: &Stdlib) -> Type {
+    fn as_type(&self, stdlib: &Stdlib, heap: &TypeHeap, kind: QuantifiedKind) -> Type {
         match self {
             Self::Bound(t) => t.clone(),
-            Self::Constraints(ts) => unions(ts.clone()),
-            Self::Unrestricted => stdlib.object().clone().to_type(),
+            Self::Constraints(ts) => unions(ts.clone(), heap),
+            Self::Unrestricted => match kind {
+                QuantifiedKind::TypeVar => stdlib.object().clone().to_type(),
+                QuantifiedKind::IntVar => gradual_size(),
+                QuantifiedKind::ParamSpec => Type::Ellipsis,
+                QuantifiedKind::TypeVarTuple => Type::any_tuple(),
+            },
         }
+    }
+}
+
+impl Quantified {
+    /// The upper bound of this type parameter as a type.
+    pub fn upper_bound(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
+        self.restriction.as_type(stdlib, heap, self.kind)
     }
 }
 
@@ -82,10 +98,10 @@ pub enum PreInferenceVariance {
 impl Display for PreInferenceVariance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PreInferenceVariance::Covariant => write!(f, "Covariant"),
-            PreInferenceVariance::Contravariant => write!(f, "Contravariant"),
-            PreInferenceVariance::Invariant => write!(f, "Invariant"),
-            PreInferenceVariance::Undefined => write!(f, "Undefined"),
+            PreInferenceVariance::Covariant => write!(f, "covariant"),
+            PreInferenceVariance::Contravariant => write!(f, "contravariant"),
+            PreInferenceVariance::Invariant => write!(f, "invariant"),
+            PreInferenceVariance::Undefined => write!(f, "undefined"),
         }
     }
 }
@@ -96,7 +112,6 @@ pub enum Variance {
     Covariant,
     Contravariant,
     Invariant,
-    #[allow(dead_code)]
     Bivariant,
 }
 
@@ -146,6 +161,7 @@ impl Display for Variance {
 #[derive(Debug, PartialEq, TypeEq, Eq, Ord, PartialOrd)]
 struct TypeVarInner {
     qname: QName,
+    kind: QuantifiedKind,
     restriction: Restriction,
     default: Option<Type>,
     /// The variance if known, or None for infer_variance=True
@@ -160,9 +176,28 @@ impl TypeVar {
         default: Option<Type>,
         variance: PreInferenceVariance,
     ) -> Self {
+        Self::new_with_kind(
+            name,
+            module,
+            QuantifiedKind::TypeVar,
+            restriction,
+            default,
+            variance,
+        )
+    }
+
+    pub fn new_with_kind(
+        name: Identifier,
+        module: Module,
+        kind: QuantifiedKind,
+        restriction: Restriction,
+        default: Option<Type>,
+        variance: PreInferenceVariance,
+    ) -> Self {
         Self(ArcId::new(TypeVarInner {
             // TODO: properly take parent from caller of new()
             qname: QName::new(name, NestingContext::toplevel(), module),
+            kind,
             restriction,
             default,
             variance,
@@ -177,6 +212,10 @@ impl TypeVar {
         &self.0.restriction
     }
 
+    pub fn kind(&self) -> QuantifiedKind {
+        self.0.kind
+    }
+
     pub fn default(&self) -> Option<&Type> {
         self.0.default.as_ref()
     }
@@ -185,8 +224,13 @@ impl TypeVar {
         self.0.variance
     }
 
-    pub fn to_type(&self) -> Type {
-        Type::TypeVar(self.dupe())
+    pub fn to_type(&self, heap: &TypeHeap) -> Type {
+        heap.mk_type_var(self.dupe())
+    }
+
+    /// The upper bound of this legacy TypeVar as a type.
+    pub fn upper_bound(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
+        self.restriction().as_type(stdlib, heap, self.kind())
     }
 
     pub fn type_eq_inner(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {

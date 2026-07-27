@@ -5,8 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
+use pyrefly_lsp_test::object_model::InitializeSettings;
+use pyrefly_lsp_test::object_model::LspInteraction;
+
 use crate::test::lsp::lsp_interaction::util::bundled_typeshed_path;
 use crate::test::lsp::lsp_interaction::util::expect_definition_points_to_symbol;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;

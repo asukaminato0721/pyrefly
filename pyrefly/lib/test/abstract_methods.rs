@@ -43,6 +43,30 @@ circle = Circle()
 );
 
 testcase!(
+    test_direct_abc_without_abstract_methods_instantiation_error,
+    r#"
+from abc import ABC, ABCMeta
+
+class DirectABC(ABC):
+    pass
+
+class IndirectABC(DirectABC):
+    pass
+
+class DirectABCMeta(metaclass=ABCMeta):
+    pass
+
+class IndirectABCMeta(DirectABCMeta):
+    pass
+
+direct_abc = DirectABC()  # E: Cannot instantiate `DirectABC`
+indirect_abc = IndirectABC()
+direct_abc_meta = DirectABCMeta()  # E: Cannot instantiate `DirectABCMeta`
+indirect_abc_meta = IndirectABCMeta()
+"#,
+);
+
+testcase!(
     test_polymorphic_calls_ok,
     r#"
 from abc import ABC, abstractmethod
@@ -346,6 +370,57 @@ c = Child()
 );
 
 testcase!(
+    test_super_abstract_call_with_body,
+    r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def method(self) -> int:
+        return 0
+
+class Child(Base):
+    def method(self) -> int:
+        return super().method() + 1
+"#,
+);
+
+testcase!(
+    test_super_abstract_property_call,
+    r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @property
+    @abstractmethod
+    def processor(self) -> bool: pass
+
+class Child(Base):
+    @property
+    def processor(self) -> bool:
+        return super().processor  # E: Method `processor` inherited from class `Base` has no implementation and cannot be accessed via `super()`
+"#,
+);
+
+testcase!(
+    test_super_abstract_property_call_with_body,
+    r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @property
+    @abstractmethod
+    def processor(self) -> bool:
+        return True
+
+class Child(Base):
+    @property
+    def processor(self) -> bool:
+        return super().processor
+"#,
+);
+
+testcase!(
     test_abstract_property,
     TestEnv::new().enable_implicit_abstract_class_error(),
     r#"
@@ -392,17 +467,21 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
-# error
+# `async def` returning AsyncIterator on an abstract method is valid:
+# it declares a coroutine that returns an AsyncIterator when awaited.
 class A(ABC):
     @abstractmethod
-    async def foo(self) -> AsyncIterator[int]:  # E: Abstract methods for async generators should use `def`, not `async def`
+    async def foo(self) -> AsyncIterator[int]:
         pass
 
+# Overriding a coroutine-returning method with an async generator is
+# an inconsistent override: the calling conventions differ.
 class B(A):
-    async def foo(self) -> AsyncIterator[int]:
+    async def foo(self) -> AsyncIterator[int]:  # E: Class member `B.foo` overrides parent class `A` in an inconsistent manner
         yield 1
 
-# ok
+# `def` returning AsyncIterator is the correct pattern for abstract
+# async generators, since async generators are not coroutines.
 class C(ABC):
     @abstractmethod
     def foo(self) -> AsyncIterator[int]:
@@ -427,7 +506,7 @@ from typing import ClassVar, final
 @final
 class A(ABC):
     x: ClassVar[int]
-a = A()
+a = A()  # E: Cannot instantiate `A`
 "#,
 );
 
@@ -487,5 +566,163 @@ class Child(Base):
 
 # This should work - abstract method is implemented via assignment
 x = Child()
+"#,
+);
+
+testcase!(
+    test_implicit_return_in_abstract_method,
+    r#"
+from abc import ABC, abstractmethod
+
+class A(ABC):
+    @abstractmethod
+    def f(self, x: bool) -> int:  # E: one or more paths are missing an explicit `return`
+        if x:
+            return 0
+    "#,
+);
+
+testcase!(
+    test_metaclass_extends_abcmeta,
+    r#"
+from abc import ABCMeta, abstractmethod
+class Meta2(ABCMeta):
+    pass
+class A(metaclass=Meta2):
+    @abstractmethod
+    def f(self) -> None:
+        pass
+A()  # E: Cannot instantiate `A`
+    "#,
+);
+
+// Tests for invalid-abstract-method: @abstractmethod in a non-abstract class.
+
+testcase!(
+    test_invalid_abstract_method_basic,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import abstractmethod
+
+class Foo:
+    @abstractmethod
+    def fn(self) -> int:  # E: `Foo.fn` is decorated with `@abstractmethod` but `Foo` is not an abstract class
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_multiple,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import abstractmethod
+
+class Foo:
+    @abstractmethod
+    def fn(self) -> int:  # E: `Foo.fn` is decorated with `@abstractmethod` but `Foo` is not an abstract class
+        ...
+
+    @abstractmethod
+    def gn(self) -> str:  # E: `Foo.gn` is decorated with `@abstractmethod` but `Foo` is not an abstract class
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_abc_base_exempt,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import ABC, abstractmethod
+
+class Foo(ABC):
+    @abstractmethod
+    def fn(self) -> int:
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_abcmeta_exempt,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import ABCMeta, abstractmethod
+
+class Foo(metaclass=ABCMeta):
+    @abstractmethod
+    def fn(self) -> int:
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_transitive_abc_exempt,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    pass
+
+class Child(Base):
+    @abstractmethod
+    def fn(self) -> int:
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_protocol_exempt,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import abstractmethod
+from typing import Protocol
+
+class Foo(Protocol):
+    @abstractmethod
+    def fn(self) -> int:
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_abstract_property,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import abstractmethod
+
+class Foo:
+    @property
+    @abstractmethod
+    def fn(self) -> int:  # E: `Foo.fn` is decorated with `@abstractmethod` but `Foo` is not an abstract class
+        ...
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_inherited_only_no_error,
+    TestEnv::new().enable_invalid_abstract_method_error(),
+    r#"
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def fn(self) -> int:
+        ...
+
+class Child(Base):
+    # Child only inherits the abstract method, does not define its own @abstractmethod
+    pass
+"#,
+);
+
+testcase!(
+    test_invalid_abstract_method_off_by_default,
+    r#"
+from abc import abstractmethod
+
+class Foo:
+    @abstractmethod
+    def fn(self) -> int:
+        ...
 "#,
 );

@@ -26,6 +26,34 @@ f8: Callable[[int], int] = lambda x: x + "foo" # E: Argument `Literal['foo']` is
 );
 
 testcase!(
+    test_lambda_defaults,
+    r#"
+from typing import reveal_type
+f = lambda x, y=1: x + y
+reveal_type(f)  # E: revealed type: (x: Unknown, y: int = 1) -> Unknown
+f(1)  # OK, y has default
+f(1, 2)  # OK
+f()  # E: Missing argument `x`
+
+g = lambda x, y="hello", z=None: (x, y, z)
+reveal_type(g)  # E: revealed type: (x: Unknown, y: str = 'hello', z: Unknown | None = None) -> tuple[Unknown, str, Unknown | None]
+g(1)  # OK
+g(1, "world")  # OK
+g(1, "world", True)  # OK, z is `Any | None`
+"#,
+);
+
+testcase!(
+    test_lambda_default_promotes_literalstring,
+    r#"
+from typing import Callable
+KEYS="ABC"
+VALUES="DEF"
+x: Callable[[str], str] = lambda key, map=dict(zip(KEYS, VALUES)): map[key]
+"#,
+);
+
+testcase!(
     test_callable_variable_typevar_annotation,
     r#"
 from typing import Callable, TypeVar, reveal_type
@@ -57,6 +85,40 @@ f: Callable[[T], T] = lambda x: x
 reveal_type(f)  # E: revealed type: [T: int](T) -> T
 reveal_type(f(1))  # E: revealed type: int
 f("hello")  # E: `str` is not assignable to upper bound `int` of type variable `T`
+"#,
+);
+
+testcase!(
+    test_callable_typevartuple_varargs_homogeneous_tuple,
+    r#"
+from typing import Callable
+
+def test[*Ts](f: Callable[[*tuple[object, ...]], object]) -> Callable[[*Ts], object]:
+    return f
+"#,
+);
+
+testcase!(
+    test_callable_annotation_only_typevar,
+    TestEnv::one_with_path(
+        "foo",
+        "foo.pyi",
+        r#"
+from collections.abc import Callable
+from typing import Any, TypeVar
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+require_GET: Callable[[F], F]
+"#
+    ),
+    r#"
+from typing import reveal_type
+from foo import require_GET
+def view() -> None:
+    return None
+reveal_type(require_GET)  # E: revealed type: [F: (...) -> Any](F) -> F
+reveal_type(require_GET(view))  # E: revealed type: () -> None
 "#,
 );
 
@@ -116,7 +178,7 @@ testcase!(
     test_callable_invalid_annotation,
     r#"
 from typing import Callable, assert_type, Any
-def test(x: Callable[int]):  # E: `Callable` requires exactly two arguments but 1 was found
+def test(x: Callable[int]):  # E: Expected 2 arguments for `Callable`, got 1
     assert_type(x, Callable[..., Any])
 "#,
 );
@@ -515,10 +577,60 @@ testcase!(
     r#"
 def test(x: int, y: int, z: int): ...
 test(*[1, 2, 3]) # OK
-test(*[1, 2]) # OK
-test(*[1, 2, 3, 4]) # OK
-test(*[1], 2) # E: Expected 3 positional arguments, got 4
-test(1, 2, 3, *[4]) # OK
+test(*[1, 2]) # E: Missing argument `z`
+test(*[1, 2, 3, 4]) # E: Expected 3 positional arguments, got 4
+test(*[1], 2) # E: Missing argument `z`
+test(1, 2, 3, *[4]) # E: Expected 3 positional arguments, got 4
+"#,
+);
+
+testcase!(
+    test_splat_list_literal_with_keyword,
+    r#"
+def fun1(a):
+    return
+
+def fun2(a, b):
+    return
+
+fun1(*[])  # E: Missing argument `a`
+fun1(*[""])  # OK
+fun2(*[""], b=None)  # OK
+fun2(*["", ""])  # OK
+fun2(*[""])  # E: Missing argument `b`
+fun2(*["", "", ""])  # E: Expected 2 positional arguments, got 3
+"#,
+);
+
+testcase!(
+    test_splat_set_literal_with_keyword,
+    r#"
+def fun1(a):
+    return
+
+def fun2(a, b):
+    return
+
+fun1(*{""})  # OK
+fun2(*{""}, b=None)  # OK
+fun2(*{"1", "2"})  # OK - note: set deduplicates at runtime, but type checker uses literal count
+fun2(*{""})  # E: Missing argument `b`
+fun2(*{"1", "2", "3"})  # E: Expected 2 positional arguments, got 3
+"#,
+);
+
+testcase!(
+    test_splat_unknown_length_with_keyword,
+    r#"
+def fun(a: str, b: str, c: int):
+    return
+
+def test(xs: list[str]):
+    # Unknown-length star args should stop consuming positional params
+    # when reaching a parameter that has a keyword argument.
+    fun(*xs, b="", c=1)  # OK
+    fun(*xs, c=1)  # OK
+    fun(*xs)  # E:
 "#,
 );
 
@@ -529,16 +641,15 @@ from typing import assert_type
 
 def test1(*args: *tuple[int, int, int]): ...
 test1(*(1, 2, 3)) # OK
-test1(*(1, 2)) # E: Unpacked argument `tuple[Literal[1], Literal[2]]` is not assignable to parameter `*args` with type `tuple[int, int, int]` in function `test1`
-test1(*(1, 2, 3, 4)) # E: Unpacked argument `tuple[Literal[1], Literal[2], Literal[3], Literal[4]]` is not assignable to parameter `*args` with type `tuple[int, int, int]` in function `test1`
-
+test1(*(1, 2)) # E: Expected 1 more positional argument in function `test1`
+test1(*(1, 2, 3, 4)) # E: Expected 3 positional arguments, got 4 in function `test1`
 def test2[*T](*args: *tuple[int, *T, int]) -> tuple[*T]: ...
 assert_type(test2(*(1, 2, 3)), tuple[int])
 assert_type(test2(*(1, 2)), tuple[()])
 assert_type(test2(*(1, 2, 3, 4)), tuple[int, int])
 assert_type(test2(1, 2, *(3, 4), 5), tuple[int, int, int])
 assert_type(test2(1, *(2, 3), *("4", 5)), tuple[int, int, str])
-assert_type(test2(1, *[2, 3], 4), tuple[int, ...])
+assert_type(test2(1, *[2, 3], 4), tuple[int, int])
 test2(1, *(2, 3), *(4, "5"))  # E: Unpacked argument `tuple[Literal[1], Literal[2], Literal[3], Literal[4], Literal['5']]` is not assignable to parameter `*args` with type `tuple[int, *@_, int]` in function `test2`
 "#,
 );
@@ -797,7 +908,7 @@ def test1(*cmd: str, **keywords: str) -> None:
     cmd = ("mycmd",)
     cmd = (1,)  # E: `tuple[Literal[1]]` is not assignable to variable `cmd` with type `tuple[str, ...]`
     keywords = {"key": "value"}
-    keywords = {"key": 0}  # E: `dict[str, int]` is not assignable to variable `keywords` with type `dict[str, str]`
+    keywords = {"key": 0}  # E: `Literal[0]` is not assignable to dict value type `str`
 class MyDict(TypedDict):
     x: int
     y: int
@@ -884,7 +995,7 @@ zoo(partial(bar, b=99))
 );
 
 testcase!(
-    bug = "Self in Metaclass should be error, treated as Any. Any in metaclass call should act like no annot.",
+    bug = "Self in Metaclass should be treated as Any. Any in metaclass call should act like no annot.",
     test_callable_class_substitute_self,
     r#"
 from typing import Any, Callable, Self, assert_type
@@ -892,7 +1003,7 @@ from typing import Any, Callable, Self, assert_type
 def ret[T](f: Callable[[], T]) -> T: ...
 
 class Meta(type):
-    def __call__(self, *args, **kwargs) -> Self: ... # TODO: Error here and treat `Self` as `Any`
+    def __call__(self, *args, **kwargs) -> Self: ... # E: `Self` cannot be used in a metaclass
 
 # metaclass __call__
 class A(metaclass=Meta):
@@ -941,15 +1052,88 @@ class Foo:
 
 testcase!(
     test_ellipsis_body,
+    TestEnv::new().enable_empty_body_error(),
     r#"
-from typing import Any, assert_type
+from typing import TYPE_CHECKING, Protocol, assert_type, overload
+from abc import abstractmethod
+
 def f(): ...
-# This is technically wrong (`g()` returns `None`), but `...` is often used to stub out the bodies
-# of things like overload signatures and abstractmethods. For simplicity, we just always allow this
-# stubbing behavior.
-def g() -> str: ...
+def g() -> None: ...
+def h() -> int | None: ...
+def i() -> str: ...  # E: Function body cannot consist only of `...` when the return type is not `None`
+
+async def j() -> None: ...
+async def k() -> str: ...  # E: Function body cannot consist only of `...` when the return type is not `None`
+
+if TYPE_CHECKING:
+    def tc() -> str: ...
+
+DOCS_BUILDING = False
+if TYPE_CHECKING or DOCS_BUILDING:
+    def tc_or_docs() -> str: ...  # E: Function body cannot consist only of `...` when the return type is not `None`
+
+if not TYPE_CHECKING:
+    pass
+else:
+    def tc_else() -> str: ...
+
+class P(Protocol):
+    def m(self) -> str: ...
+
+class A:
+    @abstractmethod
+    def m(self) -> str: ...
+
+@overload
+def ov(x: int) -> int: ...
+@overload
+def ov(x: str) -> str: ...
+def ov(x: int | str) -> int | str:
+    return x
+
 assert_type(f(), None)
-assert_type(g(), str)
+assert_type(g(), None)
+    "#,
+);
+
+testcase!(
+    test_ellipsis_body_in_pyi,
+    TestEnv::one_with_path("foo", "foo.pyi", "def f() -> int: ...").enable_empty_body_error(),
+    r#"
+from typing import assert_type
+from foo import f
+assert_type(f(), int)
+    "#,
+);
+
+testcase!(
+    test_ellipsis_body_type_checking_guards,
+    TestEnv::new().enable_empty_body_error(),
+    r#"
+import typing
+from typing import TYPE_CHECKING
+
+# `typing.TYPE_CHECKING` is a valid guard.
+if typing.TYPE_CHECKING:
+    def a() -> str: ...
+
+# `TYPE_CHECKING is False` / `TYPE_CHECKING == False` make the `else` type-checking-only.
+if TYPE_CHECKING is False:
+    pass
+else:
+    def b() -> str: ...
+
+if TYPE_CHECKING == False:  # noqa
+    pass
+else:
+    def c() -> str: ...
+
+# An unrelated attribute named `TYPE_CHECKING` is not a guard.
+class NotTyping:
+    TYPE_CHECKING = True
+nt = NotTyping()
+if nt.TYPE_CHECKING:
+    def d() -> str: ...  # E: Function body cannot consist only of `...` when the return type is not `None`
     "#,
 );
 
@@ -1260,4 +1444,279 @@ def wrap(fn: Callable[[List[T]], T]): ...
 def g():
     return wrap(lambda x: f(x))
     "#,
+);
+
+testcase!(
+    test_protocol_paramspec_ellipsis,
+    r#"
+from typing import Any, Protocol, ParamSpec
+
+P = ParamSpec("P")
+
+class Proto3(Protocol):
+    def __call__(self, a: int, *args: Any, **kwargs: Any) -> None: ...
+
+class Proto4(Protocol[P]):
+    def __call__(self, a: int, *args: P.args, **kwargs: P.kwargs) -> None: ...
+
+class Proto6(Protocol):
+    # Note: conformance uses `*args: Any, *, k: str` which pyrefly incorrectly treats as parse error
+    def __call__(self, a: int, /, *args: Any, k: str, **kwargs: Any) -> None: ...
+
+class Proto7(Protocol):
+    def __call__(self, a: float, /, b: int, *, k: str, m: str) -> None: ...
+
+def test(p4: Proto4[...], p7: Proto7):
+    # Both should be OK per conformance spec.
+    ok10: Proto3 = p4
+    ok11: Proto6 = p7
+"#,
+);
+
+testcase!(
+    bug = "conformance: Constructor to Callable conversion issues with overloads and __new__",
+    test_constructor_callable_conversion,
+    r#"
+from typing import Callable, ParamSpec, TypeVar, Self, assert_type, overload, Generic
+
+P = ParamSpec("P")
+R = TypeVar("R")
+T = TypeVar("T")
+
+def accepts_callable(cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class Class3:
+    def __new__(cls, *args, **kwargs) -> Self: ...
+    def __init__(self, x: int) -> None: ...
+
+r3 = accepts_callable(Class3)
+
+class Class7(Generic[T]):
+    @overload
+    def __init__(self: "Class7[int]", x: int) -> None: ...
+    @overload
+    def __init__(self: "Class7[str]", x: str) -> None: ...
+    def __init__(self, x: int | str) -> None:
+        pass
+
+r7 = accepts_callable(Class7)
+assert_type(r7(""), Class7[str])
+
+class Class8(Generic[T]):
+    def __new__(cls, x: list[T], y: list[T]) -> Self:
+        return super().__new__(cls)
+
+r8 = accepts_callable(Class8)
+# pyrefly incorrectly errors on this - should be OK
+assert_type(r8([""], [""]), Class8[str])  # E: assert_type(Class8[Unknown], Class8[str]) failed
+"#,
+);
+
+testcase!(
+    test_generic_classmethod_to_callable_preserves_class_tparams,
+    r#"
+from typing import Callable, Generic, ParamSpec, TypeVar, assert_type
+
+P = ParamSpec("P")
+R = TypeVar("R")
+T = TypeVar("T")
+
+def accepts_callable(cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class Box(Generic[T]):
+    pass
+
+class Factory(Generic[T]):
+    @classmethod
+    def make(cls, x: list[T], y: list[T]) -> Box[T]: ...
+
+r = accepts_callable(Factory.make)
+assert_type(r([""], [""]), Box[str])
+"#,
+);
+
+testcase!(
+    test_generic_classmethod_to_callable_within_classmethod_preserves_class_tparams,
+    r#"
+from typing import Callable, Generic, ParamSpec, TypeVar, assert_type
+
+P = ParamSpec("P")
+R = TypeVar("R")
+T = TypeVar("T")
+U = TypeVar("U")
+
+def accepts_callable(cb: Callable[P, R]) -> Callable[P, R]:
+    return cb
+
+class Box(Generic[T]):
+    pass
+
+class Factory(Generic[T]):
+    @classmethod
+    def make(cls, x: list[U], y: list[U]) -> Box[U]: ...
+
+    @classmethod
+    def test(cls):
+        r = accepts_callable(cls.make)
+        assert_type(r([""], [""]), Box[str])
+"#,
+);
+
+testcase!(
+    test_callable_instance_with_unknown_base,
+    r#"
+class MyModel(BaseClass):  # E: Could not find name `BaseClass`
+    pass
+
+class Pipeline:
+    def __init__(self) -> None:
+        self.model = MyModel()
+
+    def run(self, data: object) -> object:
+        return self.model(data)
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/1178
+testcase!(
+    test_callable_as_base_class,
+    r#"
+from collections.abc import Callable
+
+class A(Callable):  # E: Invalid base class
+    pass
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/769
+testcase!(
+    test_callable_no_args_assignable_to_varargs,
+    r#"
+from typing import Callable
+
+def schedule(delay: int, func: Callable[..., object]) -> None: ...
+
+def after_func() -> None: ...
+
+schedule(1000, after_func)
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/3912
+testcase!(
+    test_callable_ellipsis_return,
+    r#"
+from typing import Callable, reveal_type
+def f(x: Callable[..., ...]):  # E: `...` is not a valid return type
+    reveal_type(x)  # E: revealed type: (...) -> Unknown
+"#,
+);
+
+testcase!(
+    test_implicit_any_lambda,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda x: x  # E: Type of lambda parameter `x` is unknown  # E: Return type of lambda is unknown
+"#,
+);
+
+testcase!(
+    test_implicit_any_lambda_param_only,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda x: 1  # E: Type of lambda parameter `x` is unknown
+"#,
+);
+
+testcase!(
+    test_implicit_any_lambda_multiple_params,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda x, y: x + y  # E: Type of lambda parameter `x` is unknown  # E: Type of lambda parameter `y` is unknown  # E: Return type of lambda is unknown
+"#,
+);
+
+testcase!(
+    test_implicit_any_lambda_return_only,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+def untyped(x):
+    return x
+
+f = lambda: untyped(1)  # E: Return type of lambda is unknown
+"#,
+);
+
+testcase!(
+    test_lambda_type_contextual_no_error,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable
+f: Callable[[int], int] = lambda x: x
+"#,
+);
+
+testcase!(
+    test_lambda_no_params_known_return_no_error,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda: 1
+"#,
+);
+
+testcase!(
+    test_lambda_default_param_no_error,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda x=1: x
+"#,
+);
+
+testcase!(
+    bug = "Pyrefly does not contextually type lambda parameters in generic callback arguments (e.g. `sorted(key=...)`), so they become implicit `Any` and are flagged, even though the type is derivable (Pyright infers `int` here)",
+    test_implicit_any_lambda_in_generic_call,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+xs = sorted([3, 1, 2], key=lambda x: x)  # E: Type of lambda parameter `x` is unknown  # E: Return type of lambda is unknown
+"#,
+);
+
+testcase!(
+    test_lambda_default_infers_type,
+    r#"
+from typing import reveal_type
+f = lambda x=1: x
+reveal_type(f)  # E: revealed type: (x: int = 1) -> int
+"#,
+);
+
+testcase!(
+    test_lambda_default_none_infers_optional,
+    r#"
+from typing import reveal_type
+f = lambda x=None: x
+reveal_type(f)  # E: revealed type: (x: Unknown | None = None) -> Unknown | None
+"#,
+);
+
+testcase!(
+    test_lambda_default_no_unknown,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+f = lambda x=1: x
+g = lambda x="a": x
+h = lambda x=None: x
+"#,
+);
+
+testcase!(
+    test_lambda_default_contextual_type_takes_precedence,
+    TestEnv::new().enable_implicit_any_lambda_error(),
+    r#"
+from typing import Callable, assert_type
+f: Callable[[str | None], str | None] = lambda x="hi": x
+assert_type(f, Callable[[str | None], str | None])
+"#,
 );

@@ -12,8 +12,11 @@ use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use dupe::Dupe;
+use parse_display::Display;
 use pyrefly_derive::TypeEq;
 use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
@@ -21,21 +24,85 @@ use pyrefly_python::dunder;
 use pyrefly_python::module::Module;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
+use pyrefly_util::display::Fmt;
 use pyrefly_util::owner::Owner;
 use pyrefly_util::prelude::VecExt;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Keyword;
 use ruff_python_ast::name::Name;
-use vec1::Vec1;
-use vec1::vec1;
+use starlark_map::small_set::SmallSet;
 
 use crate::class::Class;
 use crate::class::ClassType;
+use crate::display::TypeDisplayContext;
 use crate::equality::TypeEq;
+use crate::equality::TypeEqCtx;
 use crate::keywords::DataclassTransformMetadata;
+use crate::meta_shape_dsl::ShapeDslFunction;
+use crate::meta_shape_dsl::ShapeTransform;
+use crate::type_output::DisplayOutput;
 use crate::type_output::TypeOutput;
+use crate::types::AnyStyle;
 use crate::types::Type;
+
+/// A wrapper for auxiliary data whose identity should be completely ignored
+/// in equality, hashing, ordering, and type-equality comparisons.
+/// `IdentityIgnored<T>` always compares as equal, hashes as a no-op, and
+/// orders as `Equal` — making it transparent to all identity checks.
+///
+/// This is useful for attaching auxiliary data (e.g. closure caches) to
+/// types that derive `PartialEq`, `Hash`, `Ord`, etc. without affecting
+/// their logical identity.
+#[derive(Debug, Clone)]
+pub struct IdentityIgnored<T>(pub T);
+
+impl<T> PartialEq for IdentityIgnored<T> {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<T> Eq for IdentityIgnored<T> {}
+
+impl<T> Hash for IdentityIgnored<T> {
+    fn hash<H: Hasher>(&self, _state: &mut H) {}
+}
+
+impl<T> PartialOrd for IdentityIgnored<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for IdentityIgnored<T> {
+    fn cmp(&self, _other: &Self) -> Ordering {
+        Ordering::Equal
+    }
+}
+
+impl<T> Visit<Type> for IdentityIgnored<T> {
+    const RECURSE_CONTAINS: bool = false;
+    fn recurse<'a>(&'a self, _: &mut dyn FnMut(&'a Type)) {}
+}
+
+impl<T> VisitMut<Type> for IdentityIgnored<T> {
+    const RECURSE_CONTAINS: bool = false;
+    fn recurse_mut(&mut self, _: &mut dyn FnMut(&mut Type)) {}
+}
+
+impl<T> TypeEq for IdentityIgnored<T> {
+    fn type_eq(&self, _other: &Self, _ctx: &mut TypeEqCtx) -> bool {
+        true
+    }
+}
+
+impl<T> Deref for IdentityIgnored<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq)]
@@ -44,17 +111,76 @@ pub struct Callable {
     pub ret: Type,
 }
 
+impl Callable {
+    /// Returns true if this callable has the `*args: Any, **kwargs: Any -> Any`
+    /// signature (plus an optional unannotated self/cls at index 0).
+    /// Used as a heuristic in decorator type resolution for union-typed
+    /// decorators.
+    pub fn is_args_kwargs_wrapper(&self) -> bool {
+        if !matches!(&self.ret, Type::Any(AnyStyle::Implicit)) {
+            return false;
+        }
+        match &self.params {
+            Params::List(params) | Params::Partial(params) => {
+                let items = params.items();
+                items.iter().any(|p| matches!(p, Param::Varargs(..)))
+                    && items.iter().any(|p| matches!(p, Param::Kwargs(..)))
+                    && items.iter().enumerate().all(|(i, p)| match p {
+                        Param::Varargs(..) | Param::Kwargs(..) => true,
+                        Param::Pos(_, ty, _) | Param::PosOnly(Some(_), ty, _) if i == 0 => {
+                            matches!(ty, Type::Any(AnyStyle::Implicit))
+                        }
+                        _ => false,
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    pub fn contains_callable_residual(&self) -> bool {
+        let check = |t: &Type| matches!(t, Type::CallableResidual(_));
+        if self.ret.any(check) {
+            return true;
+        }
+        match &self.params {
+            Params::List(params) | Params::Partial(params) => {
+                params.items().iter().any(|p| p.as_type().any(check))
+            }
+            Params::ParamSpec(prefix, p) => {
+                prefix.iter().any(|pp| {
+                    let ty = match pp {
+                        PrefixParam::PosOnly(_, ty, _) | PrefixParam::Pos(_, ty, _) => ty,
+                    };
+                    ty.any(check)
+                }) || p.any(check)
+            }
+            Params::Ellipsis | Params::Materialization => false,
+        }
+    }
+
+    /// Returns true if this callable carries no real type information: all
+    /// parameters and the return type are `Any(Implicit)` (i.e. Unknown).
+    pub fn is_fully_unknown(&self) -> bool {
+        if !matches!(&self.ret, Type::Any(AnyStyle::Implicit)) {
+            return false;
+        }
+        match &self.params {
+            Params::List(params) | Params::Partial(params) => params
+                .items()
+                .iter()
+                .all(|p| matches!(p.as_type(), Type::Any(AnyStyle::Implicit))),
+            Params::Ellipsis => true,
+            _ => false,
+        }
+    }
+}
+
 impl Display for Callable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use crate::display::TypeDisplayContext;
-        use crate::type_output::DisplayOutput;
-
-        let ctx = TypeDisplayContext::new(&[]);
+        let ty = Type::Callable(Box::new(self.clone()));
+        let ctx = TypeDisplayContext::new(&[&ty]);
         let mut output = DisplayOutput::new(&ctx, f);
-        self.fmt_with_type(&mut output, &|t, o| {
-            // Use the type's own Display impl to get simple names
-            o.write_str(&format!("{}", t))
-        })
+        self.fmt_with_type(&mut output, &|t, o| ctx.fmt_helper_generic(t, false, o))
     }
 }
 
@@ -90,6 +216,16 @@ impl ArgCount {
 pub struct ArgCounts {
     pub positional: ArgCount,
     pub keyword: ArgCount,
+    pub overall: ArgCount,
+}
+
+/// Controls which parameters are displayed by `ParamList::fmt_with_type`
+#[derive(Debug, Clone)]
+pub enum ParamOverlay {
+    /// Display all parameters
+    All,
+    /// Display only this set of named parameters, plus all anonymous parameters
+    Subset(SmallSet<Name>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,19 +237,21 @@ impl ParamList {
         Self(xs)
     }
 
-    /// Create a new ParamList from a list of types
-    pub fn new_types(xs: Vec<(Type, Required)>) -> Self {
-        Self(xs.into_map(|(t, req)| Param::PosOnly(None, t, req)))
+    /// Create a new ParamList from a list of types,
+    /// converting each one into a positional-only param
+    pub fn new_types(xs: Vec<PrefixParam>) -> Self {
+        Self(xs.into_map(|p| p.into_posonly_param()))
     }
 
-    /// Prepend some position-only parameters.
-    pub fn prepend_types(&self, pre: &[(Type, Required)]) -> Cow<'_, ParamList> {
+    /// Prepend some parameters for `Concatenate`
+    pub fn prepend_types(&self, pre: &[PrefixParam]) -> Cow<'_, ParamList> {
         if pre.is_empty() {
             Cow::Borrowed(self)
         } else {
+            // Use `to_subset_param` to preserve Pos v.s. PosOnly
             Cow::Owned(ParamList(
                 pre.iter()
-                    .map(|(t, req)| Param::PosOnly(None, t.clone(), req.clone()))
+                    .map(|p| p.to_param_preserve_name())
                     .chain(self.0.iter().cloned())
                     .collect(),
             ))
@@ -124,24 +262,41 @@ impl ParamList {
         &self,
         output: &mut O,
         write_type: &impl Fn(&Type, &mut O) -> fmt::Result,
+        overlay: &ParamOverlay,
     ) -> fmt::Result {
         let mut named_posonly = false;
         let mut kwonly = false;
+        let mut skipped_prev = false;
         for (i, param) in self.0.iter().enumerate() {
-            if i > 0 {
-                output.write_str(", ")?;
-            }
+            // `/` or `*` markers that should be printed before the param
+            let mut marker_prefixes = Vec::new();
             if matches!(param, Param::PosOnly(Some(_), _, _)) {
                 named_posonly = true;
             } else if named_posonly {
                 named_posonly = false;
-                output.write_str("/, ")?;
+                marker_prefixes.push("/");
             }
             if !kwonly && matches!(param, Param::KwOnly(..)) {
                 kwonly = true;
-                output.write_str("*, ")?;
+                marker_prefixes.push("*");
             }
-            param.fmt_with_type(output, write_type)?;
+            // Should we elide the param?
+            let skip = matches!(overlay, ParamOverlay::Subset(names) if param.name().is_some_and(|name| !names.contains(name)));
+            if i > 0 && (!skipped_prev || !marker_prefixes.is_empty() || !skip) {
+                output.write_str(", ")?;
+            }
+            for marker_prefix in marker_prefixes.iter() {
+                output.write_str(marker_prefix)?;
+                output.write_str(", ")?;
+            }
+            if skip {
+                if !skipped_prev || !marker_prefixes.is_empty() {
+                    output.write_str("...")?;
+                }
+            } else {
+                param.fmt_with_type(output, write_type)?;
+            }
+            skipped_prev = skip;
         }
         if named_posonly {
             output.write_str(", /")?;
@@ -153,33 +308,39 @@ impl ParamList {
     pub fn fmt_with_type_with_newlines<O: TypeOutput>(
         &self,
         output: &mut O,
-        write_type: &impl Fn(&Type, &mut O) -> fmt::Result,
+        write_type: &impl Fn(&Type, &mut O, usize) -> fmt::Result,
+        indent: usize,
     ) -> fmt::Result {
         let mut named_posonly = false;
         let mut kwonly = false;
 
         for (i, param) in self.0.iter().enumerate() {
             if i > 0 {
-                output.write_str(",\n    ")?;
+                output.write_str(",\n")?;
+                write_indent(output, indent)?;
             }
 
             if matches!(param, Param::PosOnly(Some(_), _, _)) {
                 named_posonly = true;
             } else if named_posonly {
                 named_posonly = false;
-                output.write_str("/,\n    ")?;
+                output.write_str("/,\n")?;
+                write_indent(output, indent)?;
             }
 
             if !kwonly && matches!(param, Param::KwOnly(..)) {
                 kwonly = true;
-                output.write_str("*,\n    ")?;
+                output.write_str("*,\n")?;
+                write_indent(output, indent)?;
             }
 
-            param.fmt_with_type(output, write_type)?;
+            param.fmt_with_type(output, &|t, o| write_type(t, o, indent))?;
         }
 
         if named_posonly {
-            output.write_str(",\n    /")?;
+            output.write_str(",\n")?;
+            write_indent(output, indent)?;
+            output.write_str("/")?;
         }
 
         Ok(())
@@ -205,18 +366,69 @@ impl ParamList {
         self.0.is_empty()
     }
 
-    pub fn split_first(&self) -> Option<(&Type, ParamList)> {
-        self.0
-            .split_first()
-            .map(|(first, rest)| (first.as_type(), ParamList(rest.to_vec())))
-    }
-
     /// Type signature that permits everything, namely `*args, **kwargs`.
     pub fn everything() -> ParamList {
         ParamList(vec![
-            Param::VarArg(None, Type::any_implicit()),
+            Param::Varargs(None, Type::any_implicit()),
             Param::Kwargs(None, Type::any_implicit()),
         ])
+    }
+}
+
+fn write_indent<O: TypeOutput>(output: &mut O, indent: usize) -> fmt::Result {
+    for _ in 0..indent {
+        output.write_str(" ")?;
+    }
+    Ok(())
+}
+
+/// Represents a prefix parameter in `Concatenate`.
+/// Prefix params can be either positional-only or positional (named).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Visit, VisitMut, TypeEq)]
+pub enum PrefixParam {
+    PosOnly(Option<Name>, Type, Required),
+    Pos(Name, Type, Required),
+}
+
+impl PrefixParam {
+    /// Create a positional-only prefix param (no name).
+    pub fn new(ty: Type, required: Required) -> Self {
+        Self::PosOnly(None, ty, required)
+    }
+
+    pub fn ty(&self) -> &Type {
+        match self {
+            Self::PosOnly(_, ty, _) | Self::Pos(_, ty, _) => ty,
+        }
+    }
+
+    pub fn ty_mut(&mut self) -> &mut Type {
+        match self {
+            Self::PosOnly(_, ty, _) | Self::Pos(_, ty, _) => ty,
+        }
+    }
+
+    /// Convert to a positional-only `Param`. Per the typing spec, params in
+    /// `Concatenate` are positional-only at the call site. This is also appropriate
+    /// for ParamSpec forwarding where prefix params must be passed positionally.
+    pub fn into_posonly_param(self) -> Param {
+        match self {
+            Self::PosOnly(name, ty, required) => Param::PosOnly(name, ty, required),
+            Self::Pos(name, ty, required) => Param::PosOnly(Some(name), ty, required),
+        }
+    }
+
+    /// Convert to a `Param` preserving the Pos vs PosOnly distinction.
+    /// Used for subset/subtype checking where name matching matters,
+    /// and for direct calls where prefix params should remain keyword-passable.
+    pub fn to_param_preserve_name(&self) -> Param {
+        match self {
+            Self::PosOnly(name, ty, required) => {
+                Param::PosOnly(name.clone(), ty.clone(), required.clone())
+            }
+            Self::Pos(name, ty, required) => Param::Pos(name.clone(), ty.clone(), required.clone()),
+        }
     }
 }
 
@@ -224,6 +436,10 @@ impl ParamList {
 #[derive(Visit, VisitMut, TypeEq)]
 pub enum Params {
     List(ParamList),
+    /// The residual parameter list of a `functools.partial(...)`: behaves like `List` for
+    /// call-checking, but is additionally recognized as assignable to `functools.partial[ret]`
+    /// (see the subtyping rule in `subset.rs`). Carries the parameters left after binding a prefix.
+    Partial(ParamList),
     Ellipsis,
     /// All possible materializations of `...`. A subset check with Callable[Materialization, R]
     /// succeeds only if it would succeed with Materialization replaced with any parameter list.
@@ -233,34 +449,40 @@ pub enum Params {
     /// E.g. `Concatenate[int, str, P]` would be `ParamSpec([int, str], P)`,
     /// while `P` alone would be `ParamSpec([], P)`.
     /// `P` may resolve to `Type::ParamSpecValue`, `Type::Concatenate`, or `Type::Ellipsis`
-    ParamSpec(Box<[(Type, Required)]>, Type),
+    ParamSpec(Box<[PrefixParam]>, Type),
 }
 
 impl Params {
     fn arg_counts(&self) -> ArgCounts {
         match self {
-            Self::List(params) => {
+            Self::List(params) | Self::Partial(params) => {
                 let mut counts = ArgCounts {
                     positional: ArgCount::none_allowed(),
                     keyword: ArgCount::none_allowed(),
+                    overall: ArgCount::none_allowed(),
                 };
                 for param in params.items() {
                     match param {
                         Param::PosOnly(_, _, req) => {
                             counts.positional.add_arg(req);
+                            counts.overall.add_arg(req);
                         }
-                        Param::Pos(..) => {
+                        Param::Pos(_, _, req) => {
                             counts.positional.add_arg(&Required::Optional(None));
                             counts.keyword.add_arg(&Required::Optional(None));
+                            counts.overall.add_arg(req);
                         }
                         Param::KwOnly(_, _, req) => {
                             counts.keyword.add_arg(req);
+                            counts.overall.add_arg(req);
                         }
-                        Param::VarArg(..) => {
+                        Param::Varargs(..) => {
                             counts.positional.max = None;
+                            counts.overall.max = None;
                         }
                         Param::Kwargs(..) => {
                             counts.keyword.max = None;
+                            counts.overall.max = None;
                         }
                     }
                 }
@@ -269,6 +491,7 @@ impl Params {
             Self::Ellipsis | Self::Materialization => ArgCounts {
                 positional: ArgCount::any_allowed(),
                 keyword: ArgCount::any_allowed(),
+                overall: ArgCount::any_allowed(),
             },
             Self::ParamSpec(prefix, _) => ArgCounts {
                 positional: ArgCount {
@@ -276,6 +499,10 @@ impl Params {
                     max: None,
                 },
                 keyword: ArgCount::any_allowed(),
+                overall: ArgCount {
+                    min: prefix.len(),
+                    max: None,
+                },
             },
         }
     }
@@ -286,9 +513,59 @@ impl Params {
 pub enum Param {
     PosOnly(Option<Name>, Type, Required),
     Pos(Name, Type, Required),
-    VarArg(Option<Name>, Type),
+    Varargs(Option<Name>, Type),
     KwOnly(Name, Type, Required),
     Kwargs(Option<Name>, Type),
+}
+
+/// The default value of an optional parameter, containing its type and an optional
+/// display string for values whose types don't preserve the literal value (e.g. floats).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DefaultValue {
+    pub ty: Type,
+    /// Display string for defaults that can't be recovered from the type alone,
+    /// e.g. `"3.14"` for float literals whose type is just `float`.
+    pub display: Option<String>,
+}
+
+/// Visit/VisitMut/TypeEq delegate to `ty` only; `display` is display-only metadata.
+impl<To> Visit<To> for DefaultValue
+where
+    Type: Visit<To>,
+{
+    const RECURSE_CONTAINS: bool = true;
+    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a To)) {
+        self.ty.visit(f);
+    }
+}
+
+impl<To> VisitMut<To> for DefaultValue
+where
+    Type: VisitMut<To>,
+{
+    const RECURSE_CONTAINS: bool = true;
+    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut To)) {
+        self.ty.visit_mut(f);
+    }
+}
+
+impl TypeEq for DefaultValue {
+    fn type_eq(&self, other: &Self, ctx: &mut TypeEqCtx) -> bool {
+        self.ty.type_eq(&other.ty, ctx)
+    }
+}
+
+impl DefaultValue {
+    pub fn new(ty: Type) -> Self {
+        Self { ty, display: None }
+    }
+
+    pub fn with_display(ty: Type, display: String) -> Self {
+        Self {
+            ty,
+            display: Some(display),
+        }
+    }
 }
 
 /// Requiredness for a function parameter.
@@ -296,8 +573,8 @@ pub enum Param {
 #[derive(Visit, VisitMut, TypeEq)]
 pub enum Required {
     Required,
-    /// The parameter is optional, with the `Type` being the type of its default value, if available.
-    Optional(Option<Type>),
+    /// The parameter is optional, with the default value info if available.
+    Optional(Option<DefaultValue>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -315,15 +592,21 @@ pub struct FuncMetadata {
 }
 
 impl FuncMetadata {
-    pub fn def(module: Module, cls: Class, func: Name) -> Self {
+    pub fn def(module: &Module, cls: Option<&Class>, name: Name) -> Self {
         Self {
-            kind: FunctionKind::Def(Box::new(FuncId {
-                module,
-                cls: Some(cls),
-                name: func,
+            kind: FunctionKind::Def(Arc::new(FuncId {
+                module: module.dupe(),
+                cls: cls.map(Dupe::dupe),
+                name,
+                def_index: None,
+                outer_funcs: None,
             })),
             flags: FuncFlags::default(),
         }
+    }
+
+    pub fn method(cls: &Class, name: Name) -> Self {
+        Self::def(cls.module(), Some(cls), name)
     }
 }
 
@@ -340,11 +623,11 @@ impl Deprecation {
         Self { message }
     }
 
-    /// Format a base description using deprecation metadata.
-    pub fn as_error_message(&self, base: String) -> Vec1<String> {
+    /// Format deprecation metadata for error reporting.
+    pub fn as_error_detail(&self) -> Option<String> {
         match self.message.as_ref().map(|s| s.trim()) {
-            Some(msg) if !msg.is_empty() => vec1![base, msg.to_owned()],
-            _ => vec1![base],
+            Some(msg) if !msg.is_empty() => Some(msg.to_owned()),
+            _ => None,
         }
     }
 }
@@ -359,6 +642,26 @@ pub enum PropertyRole {
     DeleterDecorator,
 }
 
+/// Shape of a function body that consists of a single placeholder statement.
+/// The two variants share the surface form of "trivial body" but have very
+/// different semantics: `RaiseNotImplementedError` is an "abstract-ish"
+/// placeholder that never returns at runtime, while `ReturnNotImplemented`
+/// returns the singleton `NotImplemented` value (a real runtime value used by
+/// the dunder protocol). The type checker keeps them separate so it can relax
+/// override-consistency only for the abstract-style form, without conflating
+/// it with the dunder-protocol form.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Visit, VisitMut, TypeEq
+)]
+pub enum PlaceholderBodyKind {
+    /// Body is exactly `raise NotImplementedError(...)`. This is the canonical
+    /// "abstract-ish" placeholder; concrete subclasses override it.
+    RaiseNotImplementedError,
+    /// Body is exactly `return NotImplemented`. This is the dunder-protocol
+    /// signal to defer to the other operand and is not an override placeholder.
+    ReturnNotImplemented,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Visit, VisitMut, TypeEq
 )]
@@ -367,6 +670,23 @@ pub struct PropertyMetadata {
     pub getter: Type,
     pub setter: Option<Type>,
     pub has_deleter: bool,
+}
+
+impl PropertyMetadata {
+    /// Build a PropertyMetadata that stores sanitized (metadata-free) copies of getter/setter.
+    pub fn from_components(
+        role: PropertyRole,
+        getter: &Type,
+        setter: Option<&Type>,
+        has_deleter: bool,
+    ) -> Self {
+        Self {
+            role,
+            getter: getter.without_property_metadata(),
+            setter: setter.map(|s| s.without_property_metadata()),
+            has_deleter,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -386,22 +706,68 @@ pub struct FuncFlags {
     pub has_final_decoration: bool,
     /// A function decorated with `@abc.abstractmethod`
     pub is_abstract_method: bool,
+    /// A function decorated with `@typing.no_type_check` or `@typing_extensions.no_type_check`
+    pub has_no_type_check: bool,
     /// Function body is treated as a stub (e.g. body is `...` or absent in a stub file)
     pub lacks_implementation: bool,
     /// Is the function definition in a `.pyi` file
     pub defined_in_stub_file: bool,
+    /// Set when the function was declared with `async def` (NOT when a regular
+    /// `def` happens to return a `Coroutine[...]`-typed value). Used to
+    /// distinguish async-def placeholders from sync functions explicitly
+    /// annotated to return a coroutine, which look identical at the type level
+    /// once the async-wrapping into `Coroutine[Any, Any, T]` has happened.
+    pub is_async: bool,
+    /// Set when the function body is a single placeholder statement (see
+    /// `PlaceholderBodyKind`), ignoring a leading docstring. `None` for
+    /// ordinary function bodies, and also for trivial bodies (`pass`, `...`,
+    /// or empty) — those are tracked separately as stubs, not placeholders.
+    pub placeholder_body_kind: Option<PlaceholderBodyKind>,
+    /// Set when the function's return type has no user-supplied annotation and
+    /// was inferred from the body (corresponds to
+    /// `ReturnTypeKind::ShouldInferType`). Used to distinguish a return type
+    /// the user wrote (e.g. an explicit `-> Never`) from one Pyrefly inferred,
+    /// which lets override-consistency logic relax inferred placeholder returns
+    /// without overriding what the user explicitly declared.
+    pub is_return_inferred: bool,
+    /// Whether the function body directly calls `super(...).<this function>(...)`.
+    pub calls_super_method: bool,
     /// A function decorated with `typing.dataclass_transform(...)`, turning it into a
     /// `dataclasses.dataclass`-like decorator. Stores the keyword values passed to the
     /// `dataclass_transform` call. See
     /// https://typing.python.org/en/latest/spec/dataclasses.html#specification.
     pub dataclass_transform_metadata: Option<DataclassTransformMetadata>,
+    /// A function decorated with `@uses_shape_dsl`, whose return type should be
+    /// refined by evaluating the referenced shape-DSL function at call sites.
+    pub shape_transform: Option<Arc<ShapeTransform>>,
+    /// A function decorated with `@defines_assert_shape`.
+    pub is_assert_shape: bool,
 }
+
+impl FuncFlags {
+    /// Whether the function lacks a runtime implementation and is not defined in a stub file.
+    /// This indicates a method that cannot actually be called at runtime (e.g. an abstract
+    /// method or protocol method with a `...` or `pass` body in a `.py` file).
+    pub fn lacks_runtime_implementation(&self) -> bool {
+        self.lacks_implementation && !self.defined_in_stub_file
+    }
+}
+
+/// The index of a function definition (`def ..():` statement) within the module,
+/// used as a reference to data associated with the function.
+#[derive(Debug, Clone, Dupe, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Display, Visit, VisitMut, TypeEq)]
+pub struct FuncDefIndex(pub u32);
 
 #[derive(Debug, Clone)]
 pub struct FuncId {
     pub module: Module,
     pub cls: Option<Class>,
     pub name: Name,
+    pub def_index: Option<FuncDefIndex>,
+    /// Dot-separated path of enclosing function names (e.g. `"f1"` for a function nested inside `f1`).
+    /// `None` for top-level and class-method functions.
+    pub outer_funcs: Option<Name>,
 }
 
 impl PartialEq for FuncId {
@@ -438,17 +804,45 @@ impl Visit<Type> for FuncId {
     fn recurse<'a>(&'a self, _: &mut dyn FnMut(&'a Type)) {}
 }
 
+/// FuncId contains no Type fields, so visiting through Arc is a no-op.
+impl VisitMut<Type> for Arc<FuncId> {
+    fn recurse_mut(&mut self, _: &mut dyn FnMut(&mut Type)) {}
+}
+impl Visit<Type> for Arc<FuncId> {
+    fn recurse<'a>(&'a self, _: &mut dyn FnMut(&'a Type)) {}
+}
+
 impl FuncId {
-    fn key_eq(&self) -> (ModuleName, ModulePath, Option<Class>, &Name) {
+    /// Identity tuple for equality and hashing. `outer_funcs` is intentionally
+    /// excluded because it is display-only metadata (the dotted path of enclosing
+    /// function names) and does not affect the logical identity of a function.
+    fn key_eq(
+        &self,
+    ) -> (
+        ModuleName,
+        ModulePath,
+        Option<Class>,
+        &Name,
+        Option<FuncDefIndex>,
+    ) {
         (
             self.module.name(),
             self.module.path().to_key_eq(),
             self.cls.clone(),
             &self.name,
+            self.def_index,
         )
     }
 
-    fn key_ord(&self) -> (ModuleName, ModulePath, Option<Class>, &Name) {
+    fn key_ord(
+        &self,
+    ) -> (
+        ModuleName,
+        ModulePath,
+        Option<Class>,
+        &Name,
+        Option<FuncDefIndex>,
+    ) {
         self.key_eq()
     }
 
@@ -488,9 +882,23 @@ impl FuncId {
 pub enum FunctionKind {
     IsInstance,
     IsSubclass,
+    /// The builtin `len`. Special-cased so that when the argument's `__len__`
+    /// returns a subtype of `int` (e.g. a shaped array's `Int[N]`), `len(x)`
+    /// yields that type instead of typeshed's plain `int`.
+    Len,
     Dataclass,
     DataclassField,
     DataclassReplace,
+    CopyReplace,
+    DataclassAsdict,
+    /// `attr.fields(C)` / `attrs.fields(C)`.
+    AttrsFields,
+    /// `attr.fields_dict(C)` / `attrs.fields_dict(C)`.
+    AttrsFieldsDict,
+    /// `attr.evolve` / `attrs.evolve`: validated like `dataclasses.replace`.
+    AttrsEvolve,
+    /// `attr.assoc` / `attrs.assoc`: validated against attribute names, including `init=False`.
+    AttrsAssoc,
     /// `typing.dataclass_transform`. Note that this is `dataclass_transform` itself, *not* the
     /// decorator created by a `dataclass_transform(...)` call. See
     /// https://typing.python.org/en/latest/spec/dataclasses.html#specification.
@@ -500,19 +908,37 @@ pub enum FunctionKind {
     Override,
     Cast,
     AssertType,
+    AssertShape,
     RevealType,
     Final,
     RuntimeCheckable,
-    Def(Box<FuncId>),
+    Def(Arc<FuncId>),
     AbstractMethod,
+    /// A function decorated with `typing.no_type_check` or `typing_extensions.no_type_check`.
+    NoTypeCheck,
     /// Instance of a protocol with a `__call__` method. The function has the `__call__` signature.
     CallbackProtocol(Box<ClassType>),
+    /// The `register` method of a `functools.singledispatch` dispatcher, tagged with the fallback's
+    /// first-parameter type so the registered dispatch type can be validated against it.
+    SingleDispatchRegister(Box<Type>),
     TotalOrdering,
     DisjointBase,
     /// `numba.jit()`
     NumbaJit,
     /// `numba.njit()`
     NumbaNjit,
+    /// A function whose return type is computed by a shape DSL definition.
+    /// The `FuncId` provides identity (module, class, name) for display and
+    /// lookup; the `ShapeDslFunction` carries the parsed DSL IR.
+    ShapeDsl(
+        Arc<FuncId>,
+        Arc<ShapeDslFunction>,
+        IdentityIgnored<Arc<Vec<Arc<ShapeDslFunction>>>>,
+    ),
+    /// The `shape_extensions.uses_shape_dsl` decorator function itself.
+    UsesShapeDsl,
+    /// The `shape_extensions.defines_assert_shape` decorator function itself.
+    DefinesAssertShape,
 }
 
 impl Callable {
@@ -522,9 +948,9 @@ impl Callable {
         write_type: &impl Fn(&Type, &mut O) -> fmt::Result,
     ) -> fmt::Result {
         match &self.params {
-            Params::List(params) => {
+            Params::List(params) | Params::Partial(params) => {
                 output.write_str("(")?;
-                params.fmt_with_type(output, write_type)?;
+                params.fmt_with_type(output, write_type, &ParamOverlay::All)?;
                 output.write_str(") -> ")?;
                 write_type(&self.ret, output)
             }
@@ -542,14 +968,14 @@ impl Callable {
                     if i > 0 {
                         output.write_str(", ")?;
                     }
-                    write_type(&arg.0, output)?;
+                    write_type(arg.ty(), output)?;
                 }
                 match pspec {
                     Type::ParamSpecValue(params) => {
                         if !args.is_empty() && !params.is_empty() {
                             output.write_str(", ")?;
                         }
-                        params.fmt_with_type(output, write_type)?;
+                        params.fmt_with_type(output, write_type, &ParamOverlay::All)?;
                     }
                     Type::Ellipsis => {
                         if !args.is_empty() {
@@ -577,26 +1003,96 @@ impl Callable {
     pub fn fmt_with_type_with_newlines<O: TypeOutput>(
         &self,
         output: &mut O,
-        write_type: &impl Fn(&Type, &mut O) -> fmt::Result,
+        write_type: &impl Fn(&Type, &mut O, usize) -> fmt::Result,
+        indent: usize,
     ) -> fmt::Result {
         match &self.params {
-            Params::List(params) if params.len() > 1 => {
+            Params::List(params) | Params::Partial(params) if params.len() > 1 => {
                 // For multiple parameters, put each on a new line with indentation
-                output.write_str("(\n    ")?;
-                params.fmt_with_type_with_newlines(output, write_type)?;
-                output.write_str("\n) -> ")?;
-                write_type(&self.ret, output)
+                let param_indent = indent + 4;
+                output.write_str("(\n")?;
+                write_indent(output, param_indent)?;
+                params.fmt_with_type_with_newlines(output, write_type, param_indent)?;
+                output.write_str("\n")?;
+                write_indent(output, indent)?;
+                output.write_str(") -> ")?;
+                write_type(&self.ret, output, indent)
+            }
+            Params::ParamSpec(args, _) if !args.is_empty() => {
+                let param_indent = indent + 4;
+                output.write_str("(\n")?;
+                write_indent(output, param_indent)?;
+                self.fmt_param_spec_with_newlines(output, write_type, param_indent)?;
+                output.write_str("\n")?;
+                write_indent(output, indent)?;
+                output.write_str(") -> ")?;
+                write_type(&self.ret, output, indent)
             }
             Params::List(..)
+            | Params::Partial(..)
             | Params::ParamSpec(..)
             | Params::Ellipsis
-            | Params::Materialization => self.fmt_with_type(output, write_type),
+            | Params::Materialization => {
+                self.fmt_with_type(output, &|t, o| write_type(t, o, indent))
+            }
+        }
+    }
+
+    fn fmt_param_spec_with_newlines<O: TypeOutput>(
+        &self,
+        output: &mut O,
+        write_type: &impl Fn(&Type, &mut O, usize) -> fmt::Result,
+        indent: usize,
+    ) -> fmt::Result {
+        let Params::ParamSpec(args, pspec) = &self.params else {
+            unreachable!("only ParamSpec callables can be formatted as ParamSpec")
+        };
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                output.write_str(",\n")?;
+                write_indent(output, indent)?;
+            }
+            write_type(arg.ty(), output, indent)?;
+        }
+        match pspec {
+            Type::ParamSpecValue(params) if !params.is_empty() => {
+                if !args.is_empty() {
+                    output.write_str(",\n")?;
+                    write_indent(output, indent)?;
+                }
+                params.fmt_with_type_with_newlines(output, write_type, indent)
+            }
+            Type::ParamSpecValue(_) => Ok(()),
+            Type::Ellipsis => {
+                if !args.is_empty() {
+                    output.write_str(",\n")?;
+                    write_indent(output, indent)?;
+                }
+                output.write_str("...")
+            }
+            _ => {
+                if !args.is_empty() {
+                    output.write_str(",\n")?;
+                    write_indent(output, indent)?;
+                }
+                output.write_str("ParamSpec(")?;
+                write_type(pspec, output, indent)?;
+                output.write_str(")")
+            }
         }
     }
 
     pub fn list(params: ParamList, ret: Type) -> Self {
         Self {
             params: Params::List(params),
+            ret,
+        }
+    }
+
+    /// Build a `Callable` carrying a [`Params::Partial`] residual signature, returning `ret`.
+    pub fn partial(params: ParamList, ret: Type) -> Self {
+        Self {
+            params: Params::Partial(params),
             ret,
         }
     }
@@ -615,11 +1111,17 @@ impl Callable {
         }
     }
 
-    pub fn concatenate(args: Box<[(Type, Required)]>, param_spec: Type, ret: Type) -> Self {
+    pub fn concatenate(args: Box<[PrefixParam]>, param_spec: Type, ret: Type) -> Self {
         Self {
             params: Params::ParamSpec(args, param_spec),
             ret,
         }
+    }
+
+    /// Return a new Callable with the first parameter removed (the `self` param for bound methods).
+    pub fn strip_first_param(&self) -> Option<Self> {
+        self.split_first_param(&mut Owner::new())
+            .map(|(_, rest)| rest)
     }
 
     pub fn split_first_param<'a>(&'a self, owner: &'a mut Owner<Type>) -> Option<(&'a Type, Self)> {
@@ -628,16 +1130,37 @@ impl Callable {
                 params: Params::List(params),
                 ret,
             } => {
-                let (first, rest) = params.split_first()?;
-                Some((first, Self::list(rest, ret.clone())))
+                let (first, rest) = params.0.split_first()?;
+                if let Param::Varargs(_, first) = first {
+                    Some((first, self.clone()))
+                } else {
+                    Some((
+                        first.as_type(),
+                        Self::list(ParamList(rest.to_vec()), ret.clone()),
+                    ))
+                }
+            }
+            Self {
+                params: Params::Partial(params),
+                ret,
+            } => {
+                let (first, rest) = params.0.split_first()?;
+                if let Param::Varargs(_, first) = first {
+                    Some((first, self.clone()))
+                } else {
+                    Some((
+                        first.as_type(),
+                        Self::partial(ParamList(rest.to_vec()), ret.clone()),
+                    ))
+                }
             }
             Self {
                 params: Params::ParamSpec(ts, p),
                 ret,
             } => {
-                let ((first, _), rest) = ts.split_first()?;
+                let (first, rest) = ts.split_first()?;
                 Some((
-                    first,
+                    first.ty(),
                     Self::concatenate(rest.iter().cloned().collect(), p.clone(), ret.clone()),
                 ))
             }
@@ -650,25 +1173,30 @@ impl Callable {
     }
 
     pub fn get_first_param(&self) -> Option<Type> {
-        match self {
-            Self {
-                params: Params::List(params),
-                ret: _,
-            } if let Some(param) = params.items().first() => match param {
-                Param::PosOnly(_, ty, _) | Param::Pos(_, ty, _) | Param::VarArg(_, ty) => {
-                    Some(ty.clone())
-                }
-                _ => None,
+        self.split_first_param(&mut Owner::new())
+            .map(|(first, _)| first.clone())
+    }
+
+    /// Whether this signature can be called with a single positional argument, i.e. none of the
+    /// parameters after the first is required (positional or keyword-only). `*args`/`**kwargs`
+    /// don't prevent it.
+    pub fn accepts_single_positional_arg(&self) -> bool {
+        match &self.params {
+            Params::List(params) | Params::Partial(params) => match params.0.split_first() {
+                Some((_, rest)) => !rest.iter().any(|p| {
+                    matches!(
+                        p,
+                        Param::PosOnly(_, _, Required::Required)
+                            | Param::Pos(_, _, Required::Required)
+                            | Param::KwOnly(_, _, Required::Required)
+                    )
+                }),
+                None => false,
             },
-            Self {
-                params: Params::ParamSpec(ts, _),
-                ret: _,
-            } => ts.first().cloned().map(|x| x.0),
-            Self {
-                params: Params::Ellipsis,
-                ret: _,
-            } => Some(Type::any_implicit()),
-            _ => None,
+            Params::Ellipsis | Params::Materialization => true,
+            // A bare `P` or `Concatenate[A, P]` can resolve to anything, so stay permissive; only
+            // `Concatenate[A, B, ...]` (2+ prepended args) cannot be called with one positional.
+            Params::ParamSpec(prefix, _) => prefix.len() <= 1,
         }
     }
 
@@ -702,10 +1230,17 @@ impl Callable {
 }
 
 impl Param {
-    fn fmt_default(&self, default: &Option<Type>) -> String {
+    fn fmt_default(&self, default: &Option<DefaultValue>) -> String {
         match default {
-            Some(Type::Literal(lit)) => format!("{}", lit.value),
-            Some(Type::None) => "None".to_owned(),
+            Some(DefaultValue {
+                display: Some(text),
+                ..
+            }) => text.clone(),
+            Some(DefaultValue {
+                ty: Type::Literal(lit),
+                ..
+            }) => format!("{}", lit.value),
+            Some(DefaultValue { ty: Type::None, .. }) => "None".to_owned(),
             _ => "...".to_owned(),
         }
     }
@@ -739,13 +1274,13 @@ impl Param {
                 output.write_str(" = ")?;
                 output.write_str(&self.fmt_default(default))
             }
-            Param::VarArg(Some(name), ty) => {
+            Param::Varargs(Some(name), ty) => {
                 output.write_str("*")?;
                 output.write_str(name.as_str())?;
                 output.write_str(": ")?;
                 write_type(ty, output)
             }
-            Param::VarArg(None, ty) => {
+            Param::Varargs(None, ty) => {
                 output.write_str("*")?;
                 write_type(ty, output)
             }
@@ -764,7 +1299,7 @@ impl Param {
 
     pub fn name(&self) -> Option<&Name> {
         match self {
-            Param::PosOnly(name, ..) | Param::VarArg(name, ..) | Param::Kwargs(name, ..) => {
+            Param::PosOnly(name, ..) | Param::Varargs(name, ..) | Param::Kwargs(name, ..) => {
                 name.as_ref()
             }
             Param::Pos(name, ..) | Param::KwOnly(name, ..) => Some(name),
@@ -775,7 +1310,7 @@ impl Param {
         match self {
             Param::PosOnly(_, ty, _)
             | Param::Pos(_, ty, _)
-            | Param::VarArg(_, ty)
+            | Param::Varargs(_, ty)
             | Param::KwOnly(_, ty, _)
             | Param::Kwargs(_, ty) => ty,
         }
@@ -785,7 +1320,7 @@ impl Param {
         match self {
             Param::PosOnly(_, ty, _)
             | Param::Pos(_, ty, _)
-            | Param::VarArg(_, ty)
+            | Param::Varargs(_, ty)
             | Param::KwOnly(_, ty, _)
             | Param::Kwargs(_, ty) => ty,
         }
@@ -805,11 +1340,7 @@ impl Param {
     ///
     /// This is similar to the `Display` impl, but allows passing in a `TypeDisplayContext`
     /// for context-aware formatting (e.g., disambiguating types with the same name).
-    pub fn format_for_signature(&self, type_ctx: &crate::display::TypeDisplayContext) -> String {
-        use pyrefly_util::display::Fmt;
-
-        use crate::type_output::DisplayOutput;
-
+    pub fn format_for_signature(&self, type_ctx: &TypeDisplayContext) -> String {
         format!(
             "{}",
             Fmt(|f| {
@@ -824,31 +1355,39 @@ impl Param {
 
 impl Display for Param {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use crate::display::TypeDisplayContext;
-        use crate::type_output::DisplayOutput;
-
-        let ctx = TypeDisplayContext::new(&[]);
+        let ctx = TypeDisplayContext::new(&[self.as_type()]);
         let mut output = DisplayOutput::new(&ctx, f);
-        self.fmt_with_type(&mut output, &|t, o| {
-            // Use the type's own Display impl to get simple names
-            o.write_str(&format!("{}", t))
-        })
+        self.fmt_with_type(&mut output, &|t, o| ctx.fmt_helper_generic(t, false, o))
     }
 }
 
 impl FunctionKind {
-    pub fn from_name(module: Module, cls: Option<Class>, func: &Name) -> Self {
+    pub fn from_name(
+        module: Module,
+        cls: Option<Class>,
+        func: &Name,
+        def_index: Option<FuncDefIndex>,
+        outer_funcs: Option<Name>,
+    ) -> Self {
         match (module.name().as_str(), cls.as_ref(), func.as_str()) {
             ("builtins", None, "isinstance") => Self::IsInstance,
             ("builtins", None, "issubclass") => Self::IsSubclass,
+            ("builtins", None, "len") => Self::Len,
             ("builtins", None, "classmethod") => Self::ClassMethod,
             ("dataclasses", None, "dataclass") => Self::Dataclass,
             ("dataclasses", None, "field") => Self::DataclassField,
             ("dataclasses", None, "replace") => Self::DataclassReplace,
+            ("copy", None, "replace") => Self::CopyReplace,
+            ("dataclasses", None, "asdict") => Self::DataclassAsdict,
+            ("attr" | "attrs", None, "fields") => Self::AttrsFields,
+            ("attr" | "attrs", None, "fields_dict") => Self::AttrsFieldsDict,
+            ("attr" | "attrs", None, "evolve") => Self::AttrsEvolve,
+            ("attr" | "attrs", None, "assoc") => Self::AttrsAssoc,
             ("typing" | "typing_extensions", None, "overload") => Self::Overload,
             ("typing" | "typing_extensions", None, "override") => Self::Override,
             ("typing" | "typing_extensions", None, "cast") => Self::Cast,
             ("typing" | "typing_extensions", None, "assert_type") => Self::AssertType,
+            ("shape_extensions", None, "assert_shape") => Self::AssertShape,
             ("typing" | "typing_extensions", None, "reveal_type") => Self::RevealType,
             ("typing" | "typing_extensions", None, "final") => Self::Final,
             ("typing" | "typing_extensions", None, "runtime_checkable") => Self::RuntimeCheckable,
@@ -856,14 +1395,19 @@ impl FunctionKind {
                 Self::DataclassTransform
             }
             ("abc", None, "abstractmethod") => Self::AbstractMethod,
+            ("typing" | "typing_extensions", None, "no_type_check") => Self::NoTypeCheck,
             ("functools", None, "total_ordering") => Self::TotalOrdering,
             ("typing" | "typing_extensions", None, "disjoint_base") => Self::DisjointBase,
             ("numba.core.decorators", None, "jit") => Self::NumbaJit,
             ("numba.core.decorators", None, "njit") => Self::NumbaNjit,
-            _ => Self::Def(Box::new(FuncId {
+            ("shape_extensions", None, "uses_shape_dsl") => Self::UsesShapeDsl,
+            ("shape_extensions", None, "defines_assert_shape") => Self::DefinesAssertShape,
+            _ => Self::Def(Arc::new(FuncId {
                 module,
                 cls,
                 name: func.clone(),
+                def_index,
+                outer_funcs,
             })),
         }
     }
@@ -872,25 +1416,38 @@ impl FunctionKind {
         match self {
             Self::IsInstance => ModuleName::builtins(),
             Self::IsSubclass => ModuleName::builtins(),
+            Self::Len => ModuleName::builtins(),
             Self::ClassMethod => ModuleName::builtins(),
             Self::Dataclass => ModuleName::dataclasses(),
             Self::DataclassField => ModuleName::dataclasses(),
             Self::DataclassReplace => ModuleName::dataclasses(),
+            Self::CopyReplace => ModuleName::from_str("copy"),
+            Self::DataclassAsdict => ModuleName::dataclasses(),
+            Self::AttrsFields => ModuleName::attr(),
+            Self::AttrsFieldsDict => ModuleName::attr(),
+            Self::AttrsEvolve => ModuleName::attr(),
+            Self::AttrsAssoc => ModuleName::attr(),
             Self::DataclassTransform => ModuleName::typing(),
             Self::Final => ModuleName::typing(),
             Self::Overload => ModuleName::typing(),
             Self::Override => ModuleName::typing(),
             Self::Cast => ModuleName::typing(),
             Self::AssertType => ModuleName::typing(),
+            Self::AssertShape => ModuleName::from_str("shape_extensions"),
             Self::RevealType => ModuleName::typing(),
             Self::RuntimeCheckable => ModuleName::typing(),
             Self::CallbackProtocol(cls) => cls.qname().module_name(),
+            Self::SingleDispatchRegister(_) => ModuleName::functools(),
             Self::AbstractMethod => ModuleName::abc(),
+            Self::NoTypeCheck => ModuleName::typing(),
             Self::TotalOrdering => ModuleName::functools(),
             Self::DisjointBase => ModuleName::typing(),
             Self::NumbaJit => ModuleName::from_str("numba"),
             Self::NumbaNjit => ModuleName::from_str("numba"),
             Self::Def(func_id) => func_id.module.name().dupe(),
+            Self::ShapeDsl(id, _, _) => id.module.name().dupe(),
+            Self::UsesShapeDsl => ModuleName::from_str("shape_extensions"),
+            Self::DefinesAssertShape => ModuleName::from_str("shape_extensions"),
         }
     }
 
@@ -898,25 +1455,38 @@ impl FunctionKind {
         match self {
             Self::IsInstance => Cow::Owned(Name::new_static("isinstance")),
             Self::IsSubclass => Cow::Owned(Name::new_static("issubclass")),
+            Self::Len => Cow::Owned(Name::new_static("len")),
             Self::ClassMethod => Cow::Owned(Name::new_static("classmethod")),
             Self::Dataclass => Cow::Owned(Name::new_static("dataclass")),
             Self::DataclassField => Cow::Owned(Name::new_static("field")),
             Self::DataclassReplace => Cow::Owned(Name::new_static("replace")),
+            Self::CopyReplace => Cow::Owned(Name::new_static("replace")),
+            Self::DataclassAsdict => Cow::Owned(Name::new_static("asdict")),
+            Self::AttrsFields => Cow::Owned(Name::new_static("fields")),
+            Self::AttrsFieldsDict => Cow::Owned(Name::new_static("fields_dict")),
+            Self::AttrsEvolve => Cow::Owned(Name::new_static("evolve")),
+            Self::AttrsAssoc => Cow::Owned(Name::new_static("assoc")),
             Self::DataclassTransform => Cow::Owned(Name::new_static("dataclass_transform")),
             Self::Final => Cow::Owned(Name::new_static("final")),
             Self::Overload => Cow::Owned(Name::new_static("overload")),
             Self::Override => Cow::Owned(Name::new_static("override")),
             Self::Cast => Cow::Owned(Name::new_static("cast")),
             Self::AssertType => Cow::Owned(Name::new_static("assert_type")),
+            Self::AssertShape => Cow::Owned(Name::new_static("assert_shape")),
             Self::RevealType => Cow::Owned(Name::new_static("reveal_type")),
             Self::RuntimeCheckable => Cow::Owned(Name::new_static("runtime_checkable")),
             Self::CallbackProtocol(_) => Cow::Owned(dunder::CALL),
+            Self::SingleDispatchRegister(_) => Cow::Owned(Name::new_static("register")),
             Self::AbstractMethod => Cow::Owned(Name::new_static("abstractmethod")),
+            Self::NoTypeCheck => Cow::Owned(Name::new_static("no_type_check")),
             Self::TotalOrdering => Cow::Owned(Name::new_static("total_ordering")),
             Self::DisjointBase => Cow::Owned(Name::new_static("disjoint_base")),
             Self::NumbaJit => Cow::Owned(Name::new_static("jit")),
             Self::NumbaNjit => Cow::Owned(Name::new_static("njit")),
             Self::Def(func_id) => Cow::Borrowed(&func_id.name),
+            Self::ShapeDsl(id, _, _) => Cow::Borrowed(&id.name),
+            Self::UsesShapeDsl => Cow::Owned(Name::new_static("uses_shape_dsl")),
+            Self::DefinesAssertShape => Cow::Owned(Name::new_static("defines_assert_shape")),
         }
     }
 
@@ -924,25 +1494,45 @@ impl FunctionKind {
         match self {
             Self::IsInstance => None,
             Self::IsSubclass => None,
+            Self::Len => None,
             Self::ClassMethod => None,
             Self::Dataclass => None,
             Self::DataclassField => None,
             Self::DataclassReplace => None,
+            Self::CopyReplace => None,
+            Self::DataclassAsdict => None,
+            Self::AttrsFields => None,
+            Self::AttrsFieldsDict => None,
+            Self::AttrsEvolve => None,
+            Self::AttrsAssoc => None,
             Self::DataclassTransform => None,
             Self::Final => None,
             Self::Overload => None,
             Self::Override => None,
             Self::Cast => None,
             Self::AssertType => None,
+            Self::AssertShape => None,
             Self::RevealType => None,
             Self::RuntimeCheckable => None,
             Self::NumbaJit => None,
             Self::NumbaNjit => None,
             Self::CallbackProtocol(cls) => Some(cls.class_object().dupe()),
+            Self::SingleDispatchRegister(_) => None,
             Self::AbstractMethod => None,
+            Self::NoTypeCheck => None,
             Self::TotalOrdering => None,
             Self::DisjointBase => None,
             Self::Def(func_id) => func_id.cls.clone(),
+            Self::ShapeDsl(id, _, _) => id.cls.clone(),
+            Self::UsesShapeDsl => None,
+            Self::DefinesAssertShape => None,
+        }
+    }
+
+    pub fn outer_funcs(&self) -> Option<&Name> {
+        match self {
+            Self::Def(func_id) | Self::ShapeDsl(func_id, _, _) => func_id.outer_funcs.as_ref(),
+            _ => None,
         }
     }
 
@@ -958,7 +1548,7 @@ impl FunctionKind {
     /// Does this decorator require special-casing to be signature-preserving?
     pub fn is_signature_preserving_decorator(&self) -> bool {
         match self {
-            Self::NumbaJit | Self::NumbaNjit => true,
+            Self::NumbaJit | Self::NumbaNjit | Self::SingleDispatchRegister(_) => true,
             _ => false,
         }
     }
@@ -975,12 +1565,25 @@ pub fn unexpected_keyword(error: &dyn Fn(String), func: &str, keyword: &Keyword)
 
 #[cfg(test)]
 mod tests {
+    use pyrefly_python::module_name::ModuleName;
+    use pyrefly_util::visit::Visit;
+    use pyrefly_util::visit::VisitMut;
     use ruff_python_ast::name::Name;
+    use ruff_text_size::TextRange;
 
     use crate::callable::Callable;
+    use crate::callable::DefaultValue;
     use crate::callable::Param;
     use crate::callable::ParamList;
+    use crate::callable::PrefixParam;
     use crate::callable::Required;
+    use crate::quantified::AnchorIndex;
+    use crate::quantified::Quantified;
+    use crate::quantified::QuantifiedIdentity;
+    use crate::quantified::QuantifiedKind;
+    use crate::quantified::QuantifiedOrigin;
+    use crate::type_var::PreInferenceVariance;
+    use crate::type_var::Restriction;
     use crate::types::Type;
 
     #[test]
@@ -1033,7 +1636,7 @@ mod tests {
     fn test_arg_counts_varargs() {
         // (*args) -> None
         let callable = Callable::list(
-            ParamList::new(vec![Param::VarArg(None, Type::any_implicit())]),
+            ParamList::new(vec![Param::Varargs(None, Type::any_implicit())]),
             Type::None,
         );
         let counts = callable.arg_counts();
@@ -1068,7 +1671,7 @@ mod tests {
                     Required::Required,
                 ),
                 Param::Pos(Name::new("x"), Type::any_implicit(), Required::Required),
-                Param::VarArg(None, Type::any_implicit()),
+                Param::Varargs(None, Type::any_implicit()),
                 Param::KwOnly(Name::new("y"), Type::any_implicit(), Required::Required),
                 Param::KwOnly(
                     Name::new("z"),
@@ -1099,8 +1702,8 @@ mod tests {
     fn test_arg_counts_paramspec() {
         let callable = Callable::concatenate(
             vec![
-                (Type::None, Required::Required),
-                (Type::None, Required::Required),
+                PrefixParam::new(Type::None, Required::Required),
+                PrefixParam::new(Type::None, Required::Required),
             ]
             .into_boxed_slice(),
             Type::any_implicit(),
@@ -1111,5 +1714,54 @@ mod tests {
         assert_eq!(counts.positional.max, None);
         assert_eq!(counts.keyword.min, 0);
         assert_eq!(counts.keyword.max, None);
+    }
+
+    #[test]
+    fn test_default_value_visit_delegates_to_ty() {
+        let q = Quantified::new(
+            QuantifiedIdentity::new(
+                ModuleName::from_str("__test__"),
+                AnchorIndex::first(TextRange::default()),
+                QuantifiedOrigin::Pep695,
+            ),
+            Name::new("T"),
+            QuantifiedKind::TypeVar,
+            None,
+            Restriction::Unrestricted,
+            PreInferenceVariance::Invariant,
+        );
+        let quantified_ty = Type::Quantified(Box::new(q));
+        let default = DefaultValue::with_display(quantified_ty.clone(), "default".to_owned());
+
+        // Visit should yield the inner type from ty, not the display metadata.
+        let mut visited = Vec::new();
+        default.visit(&mut |ty: &Type| visited.push(ty.clone()));
+        assert_eq!(visited, vec![quantified_ty]);
+    }
+
+    #[test]
+    fn test_default_value_visit_mut_delegates_to_ty() {
+        let q = Quantified::new(
+            QuantifiedIdentity::new(
+                ModuleName::from_str("__test__"),
+                AnchorIndex::new(TextRange::default(), 1),
+                QuantifiedOrigin::Pep695,
+            ),
+            Name::new("T"),
+            QuantifiedKind::TypeVar,
+            None,
+            Restriction::Unrestricted,
+            PreInferenceVariance::Invariant,
+        );
+        let mut default =
+            DefaultValue::with_display(Type::Quantified(Box::new(q)), "default".to_owned());
+
+        // VisitMut should be able to mutate the inner type.
+        default.visit_mut(&mut |ty: &mut Type| {
+            *ty = Type::None;
+        });
+        assert_eq!(default.ty, Type::None);
+        // Display metadata should be unaffected.
+        assert_eq!(default.display, Some("default".to_owned()));
     }
 }

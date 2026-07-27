@@ -22,8 +22,7 @@ get_freeze_count() -- Return the number of objects in the permanent generation.
 """
 
 from collections.abc import Callable
-from typing import Any, Final, Literal
-from typing_extensions import TypeAlias
+from typing import Any, Final, Literal, TypeAlias
 
 DEBUG_COLLECTABLE: Final = 2
 DEBUG_LEAK: Final = 38
@@ -136,7 +135,7 @@ def set_debug(flags: int, /) -> None:
     Debugging information is written to sys.stderr.
     """
     ...
-def set_threshold(threshold0: int, threshold1: int = ..., threshold2: int = ..., /) -> None:
+def set_threshold(threshold0: int, threshold1: int = 0, threshold2: int = 0, /) -> None:
     """
     set_threshold(threshold0, [threshold1, threshold2]) -> None
 

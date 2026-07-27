@@ -10,11 +10,11 @@ use std::fs;
 use lsp_types::SemanticTokensResult;
 use lsp_types::Url;
 use lsp_types::request::SemanticTokensFullRequest;
+use pyrefly_lsp_test::object_model::InitializeSettings;
+use pyrefly_lsp_test::object_model::LspInteraction;
 use serde_json::json;
 
 use crate::state::semantic_tokens::SemanticTokensLegends;
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 
 #[test]

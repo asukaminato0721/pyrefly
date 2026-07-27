@@ -9,17 +9,19 @@ use std::fmt;
 use std::fmt::Display;
 
 use pyrefly_derive::TypeEq;
+use pyrefly_derive::Visit;
 use pyrefly_derive::VisitMut;
+use pyrefly_types::heap::TypeHeap;
 
 use crate::types::types::Type;
 
-#[derive(Clone, Debug, VisitMut, TypeEq, Eq, PartialEq)]
+#[derive(Clone, Debug, Visit, VisitMut, TypeEq, Eq, PartialEq)]
 pub struct YieldResult {
     pub yield_ty: Type,
     pub send_ty: Type,
 }
 
-#[derive(Clone, Debug, VisitMut, TypeEq, Eq, PartialEq)]
+#[derive(Clone, Debug, Visit, VisitMut, TypeEq, Eq, PartialEq)]
 pub struct YieldFromResult {
     pub yield_ty: Type,
     pub send_ty: Type,
@@ -27,43 +29,43 @@ pub struct YieldFromResult {
 }
 
 impl YieldResult {
-    pub fn recursive() -> Self {
+    pub fn recursive(heap: &TypeHeap) -> Self {
         YieldResult {
-            yield_ty: Type::any_implicit(),
-            send_ty: Type::any_implicit(),
+            yield_ty: heap.mk_any_implicit(),
+            send_ty: heap.mk_any_implicit(),
         }
     }
 
-    pub fn any_error() -> Self {
+    pub fn any_error(heap: &TypeHeap) -> Self {
         YieldResult {
-            yield_ty: Type::any_error(),
-            send_ty: Type::any_error(),
+            yield_ty: heap.mk_any_error(),
+            send_ty: heap.mk_any_error(),
         }
     }
 }
 
 impl YieldFromResult {
-    pub fn recursive() -> Self {
+    pub fn recursive(heap: &TypeHeap) -> Self {
         YieldFromResult {
-            yield_ty: Type::any_implicit(),
-            send_ty: Type::any_implicit(),
-            return_ty: Type::any_implicit(),
+            yield_ty: heap.mk_any_implicit(),
+            send_ty: heap.mk_any_implicit(),
+            return_ty: heap.mk_any_implicit(),
         }
     }
 
-    pub fn any_error() -> Self {
+    pub fn any_error(heap: &TypeHeap) -> Self {
         YieldFromResult {
-            yield_ty: Type::any_error(),
-            send_ty: Type::any_error(),
-            return_ty: Type::any_error(),
+            yield_ty: heap.mk_any_error(),
+            send_ty: heap.mk_any_error(),
+            return_ty: heap.mk_any_error(),
         }
     }
 
-    pub fn from_iterable(yield_ty: Type) -> Self {
+    pub fn from_iterable(heap: &TypeHeap, yield_ty: Type) -> Self {
         YieldFromResult {
             yield_ty,
-            send_ty: Type::any_implicit(),
-            return_ty: Type::any_implicit(),
+            send_ty: heap.mk_any_implicit(),
+            return_ty: heap.mk_any_implicit(),
         }
     }
 

@@ -117,14 +117,16 @@ impl DebugInfo {
                 let key = bindings.idx_to_key(idx);
                 res.push(Binding {
                     key: module_info.display(key).to_string(),
-                    location: module_info.display_range(key.range()).to_string(),
+                    location: module_info
+                        .display_range(K::range_with(idx, bindings))
+                        .to_string(),
                     binding: bindings.get(idx).display_with(bindings).to_string(),
                     result: match val.get() {
                         None => "None".to_owned(),
                         Some(v) => {
                             let mut r = (*v).clone();
                             r.visit_mut(&mut |t| {
-                                answers.solver().expand_vars_mut(t);
+                                answers.solver().expand_mut(t);
                             });
                             r.to_string()
                         }
@@ -146,7 +148,10 @@ impl DebugInfo {
                         answers,
                         &mut res
                     ));
-                    let errors = errors.collect(&error_config).shown.map(|e| Error {
+                    let collected = errors.collect(&error_config);
+                    let mut output_errors = collected.ordinary;
+                    output_errors.extend(collected.directives);
+                    let errors = output_errors.map(|e| Error {
                         location: e.display_range().to_string(),
                         message: e.msg().to_owned(),
                     });

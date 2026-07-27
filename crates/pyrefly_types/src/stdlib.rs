@@ -20,6 +20,7 @@ use starlark_map::small_map::SmallMap;
 
 use crate::class::Class;
 use crate::class::ClassType;
+use crate::heap::TypeHeap;
 use crate::types::TArgs;
 use crate::types::TParams;
 use crate::types::Type;
@@ -27,7 +28,16 @@ use crate::types::Type;
 /// Names of special forms that should be clickable in type hints.
 /// These are defined as annotated assignments in typing.pyi (e.g., `Literal: _SpecialForm`)
 /// rather than as classes, so they require special handling.
-const SPECIAL_FORM_NAMES: &[&str] = &["Literal", "LiteralString", "Never", "NoReturn"];
+const SPECIAL_FORM_NAMES: &[&str] = &[
+    "Literal",
+    "LiteralString",
+    "Never",
+    "NoReturn",
+    "TypeForm",
+    "TypeGuard",
+    "TypeIs",
+    "Unpack",
+];
 
 #[derive(Debug, Clone)]
 struct StdlibError {
@@ -61,6 +71,7 @@ pub struct Stdlib {
     exception_group: Option<StdlibResult<(Class, Arc<TParams>)>>,
     list: StdlibResult<(Class, Arc<TParams>)>,
     dict: StdlibResult<(Class, Arc<TParams>)>,
+    partial: StdlibResult<(Class, Arc<TParams>)>,
     deque: StdlibResult<(Class, Arc<TParams>)>,
     frozenset: StdlibResult<(Class, Arc<TParams>)>,
     dict_items: StdlibResult<(Class, Arc<TParams>)>,
@@ -69,6 +80,7 @@ pub struct Stdlib {
     mapping: StdlibResult<(Class, Arc<TParams>)>,
     set: StdlibResult<(Class, Arc<TParams>)>,
     tuple: StdlibResult<(Class, Arc<TParams>)>,
+    enumerate: StdlibResult<(Class, Arc<TParams>)>,
     iterable: StdlibResult<(Class, Arc<TParams>)>,
     async_iterable: StdlibResult<(Class, Arc<TParams>)>,
     async_iterator: StdlibResult<(Class, Arc<TParams>)>,
@@ -95,6 +107,9 @@ pub struct Stdlib {
     /// After 3.14, `typing_extensions` reexports from `typing`.
     /// For 3.12 and 3.13 defined separately in both locations.
     type_alias_type: StdlibResult<ClassType>,
+    /// Defined in `typing_extensions` as Sentinel.
+    /// Defined in `builtins` as `sentinel` since 3.15.
+    sentinel: StdlibResult<ClassType>,
     traceback_type: StdlibResult<ClassType>,
     builtins_type: StdlibResult<ClassType>,
     /// Introduced in Python 3.10.
@@ -120,6 +135,9 @@ pub struct Stdlib {
     union_type: Option<StdlibResult<ClassType>>,
     /// QNames for special forms (Literal, Any, Never, etc.) to enable go-to-definition for inlay hints.
     special_form_qnames: SmallMap<&'static str, QName>,
+    generic_alias: StdlibResult<ClassType>,
+    // string.templatelib.Template for t-strings
+    template: Option<StdlibResult<ClassType>>,
 }
 
 impl Stdlib {
@@ -144,6 +162,7 @@ impl Stdlib {
         let enum_ = ModuleName::enum_();
         let type_checker_internals = ModuleName::type_checker_internals();
         let collections_abc = ModuleName::collections_abc();
+        let string_templatelib = ModuleName::string_templatelib();
 
         let lookup_generic =
             |module: ModuleName, name: &'static str, args: usize| match lookup_class(
@@ -216,6 +235,7 @@ impl Stdlib {
                 .then(|| lookup_generic(builtins, "ExceptionGroup", 1)),
             list: lookup_generic(builtins, "list", 1),
             dict: lookup_generic(builtins, "dict", 2),
+            partial: lookup_generic(ModuleName::from_str("functools"), "partial", 1),
             deque: lookup_generic(ModuleName::collections(), "deque", 1),
             frozenset: lookup_generic(builtins, "frozenset", 1),
             dict_items: lookup_generic(collections_abc, "dict_items", 2),
@@ -223,6 +243,7 @@ impl Stdlib {
             dict_values: lookup_generic(collections_abc, "dict_values", 2),
             set: lookup_generic(builtins, "set", 1),
             tuple: lookup_generic(builtins, "tuple", 1),
+            enumerate: lookup_generic(builtins, "enumerate", 1),
             builtins_type: lookup_concrete(builtins, "type"),
             ellipsis_type: version
                 .at_least(3, 10)
@@ -243,6 +264,11 @@ impl Stdlib {
             param_spec_kwargs: lookup_concrete(standardised(3, 10), "ParamSpecKwargs"),
             type_var_tuple: lookup_concrete(standardised(3, 11), "TypeVarTuple"),
             type_alias_type: lookup_concrete(standardised(3, 12), "TypeAliasType"),
+            sentinel: if version.at_least(3, 15) {
+                lookup_concrete(builtins, "sentinel")
+            } else {
+                lookup_concrete(typing_extensions, "Sentinel")
+            },
             traceback_type: lookup_concrete(types, "TracebackType"),
             function_type: lookup_concrete(types, "FunctionType"),
             method_type: lookup_concrete(types, "MethodType"),
@@ -259,6 +285,10 @@ impl Stdlib {
                 .at_least(3, 10)
                 .then(|| lookup_concrete(types, "UnionType")),
             special_form_qnames,
+            generic_alias: lookup_concrete(types, "GenericAlias"),
+            template: version
+                .at_least(3, 14)
+                .then(|| lookup_concrete(string_templatelib, "Template")),
         }
     }
 
@@ -412,6 +442,10 @@ impl Stdlib {
         Some(Self::apply(self.exception_group.as_ref()?, vec![x]))
     }
 
+    pub fn exception_group_object(&self) -> Option<&Class> {
+        Some(&Self::unwrap(self.exception_group.as_ref()?).0)
+    }
+
     pub fn union_type(&self) -> Option<&ClassType> {
         Some(Self::primitive(self.union_type.as_ref()?))
     }
@@ -424,8 +458,16 @@ impl Stdlib {
         Self::apply(&self.tuple, vec![x])
     }
 
+    pub fn enumerate(&self, x: Type) -> ClassType {
+        Self::apply(&self.enumerate, vec![x])
+    }
+
     pub fn list(&self, x: Type) -> ClassType {
         Self::apply(&self.list, vec![x])
+    }
+
+    pub fn partial(&self, ret: Type) -> ClassType {
+        Self::apply(&self.partial, vec![ret])
     }
 
     pub fn list_object(&self) -> &Class {
@@ -466,6 +508,10 @@ impl Stdlib {
 
     pub fn mapping(&self, key: Type, value: Type) -> ClassType {
         Self::apply(&self.mapping, vec![key, value])
+    }
+
+    pub fn mapping_object(&self) -> &Class {
+        &Self::unwrap(&self.mapping).0
     }
 
     pub fn set(&self, x: Type) -> ClassType {
@@ -540,19 +586,23 @@ impl Stdlib {
         Self::primitive(&self.param_spec_kwargs)
     }
 
-    pub fn param_spec_args_as_tuple(&self) -> ClassType {
-        self.tuple(self.object().clone().to_type())
+    pub fn param_spec_args_as_tuple(&self, heap: &TypeHeap) -> ClassType {
+        self.tuple(heap.mk_class_type(self.object().clone()))
     }
 
-    pub fn param_spec_kwargs_as_dict(&self) -> ClassType {
+    pub fn param_spec_kwargs_as_dict(&self, heap: &TypeHeap) -> ClassType {
         self.dict(
-            self.str().clone().to_type(),
-            self.object().clone().to_type(),
+            heap.mk_class_type(self.str().clone()),
+            heap.mk_class_type(self.object().clone()),
         )
     }
 
     pub fn type_alias_type(&self) -> &ClassType {
         Self::primitive(&self.type_alias_type)
+    }
+
+    pub fn sentinel(&self) -> &ClassType {
+        Self::primitive(&self.sentinel)
     }
 
     pub fn traceback_type(&self) -> &ClassType {
@@ -577,5 +627,13 @@ impl Stdlib {
 
     pub fn special_form_qname(&self, name: &str) -> Option<&QName> {
         self.special_form_qnames.get(name)
+    }
+
+    pub fn generic_alias(&self) -> &ClassType {
+        Self::primitive(&self.generic_alias)
+    }
+
+    pub fn template(&self) -> Option<&ClassType> {
+        Some(Self::primitive(self.template.as_ref()?))
     }
 }

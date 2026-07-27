@@ -3,8 +3,7 @@ This module provides access to mathematical functions for complex
 numbers.
 """
 
-from typing import Final, SupportsComplex, SupportsFloat, SupportsIndex
-from typing_extensions import TypeAlias
+from typing import Final, SupportsComplex, SupportsFloat, SupportsIndex, TypeAlias
 
 e: Final[float]
 pi: Final[float]
@@ -14,6 +13,7 @@ nan: Final[float]
 nanj: Final[complex]
 tau: Final[float]
 
+_F: TypeAlias = SupportsFloat | SupportsIndex
 _C: TypeAlias = SupportsFloat | SupportsComplex | SupportsIndex | complex
 
 def acos(z: _C, /) -> complex:
@@ -89,7 +89,7 @@ def polar(z: _C, /) -> tuple[float, float]:
     r is the distance from 0 and phi the phase angle.
     """
     ...
-def rect(r: float, phi: float, /) -> complex:
+def rect(r: _F, phi: _F, /) -> complex:
     """Convert from polar coordinates to rectangular coordinates."""
     ...
 def sin(z: _C, /) -> complex:

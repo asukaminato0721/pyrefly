@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::state::require::Require;
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -47,6 +49,48 @@ testcase!(
 );
 
 testcase!(
+    test_pyrefly_top_level_ignore_typed,
+    r#"
+# pyrefly: ignore-errors[bad-assignment]
+x: int = "x"
+3 + "3"  # E:
+"#,
+);
+
+// A typed file-level directive is only honored in the preamble; placed after code
+// it is inert (the error on the following line is still reported) and additionally
+// flagged with a `misplaced-ignore` warning on the directive line.
+testcase!(
+    test_pyrefly_top_level_ignore_typed_not_at_top,
+    r#"
+x: int = "x"  # E:
+# pyrefly: ignore-errors[bad-assignment]  # E: has no effect here
+y: int = "y"  # E:
+"#,
+);
+
+// A blanket file-level directive after code is inert and flagged as misplaced.
+testcase!(
+    test_pyrefly_misplaced_ignore_errors_blanket,
+    r#"
+x: int = "x"  # E:
+# pyrefly: ignore-errors  # E: has no effect here
+y: int = "y"  # E:
+"#,
+);
+
+// A correctly-placed top-of-file directive suppresses everything and produces
+// no `misplaced-ignore` warning.
+testcase!(
+    test_pyrefly_misplaced_ignore_errors_top_of_file_ok,
+    r#"
+# pyrefly: ignore-errors
+x: int = "x"
+y: int = "y"
+"#,
+);
+
+testcase!(
     test_pyrefly_top_level_ignore_wrong_same_line,
     r#"
 3 + "3" # pyrefly: ignore-errors # E:
@@ -58,7 +102,7 @@ testcase!(
     test_pyrefly_top_level_ignore_wrong_own_line,
     r#"
 3 + "3" # E:
-# pyrefly: ignore-errors
+# pyrefly: ignore-errors # E: has no effect here
 3 + "3" # E:
 "#,
 );
@@ -184,5 +228,148 @@ w: int = "0"
 
 x: int = "1"  # type: ignore
 y: int = "2"  # E: is not assignable
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_fstring_above,
+    r#"
+def foo() -> str:
+  # pyrefly: ignore
+  return f"""
+result: {1 + "a"}
+"""
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_fstring_inline_end,
+    r#"
+def foo() -> str:
+  return f"""
+result: {1 + "a"}
+"""  # pyrefly: ignore
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_fstring_typed,
+    r#"
+def foo() -> str:
+  # pyrefly: ignore[unsupported-operation]
+  return f"""
+result: {1 + "a"}
+"""
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_nested_fstring_single_line_inner,
+    r#"
+def foo() -> str:
+  # pyrefly: ignore
+  return f"""
+result: {f"{1 + 'a'}"}
+"""
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_nested_fstring_multi_line_inner,
+    r#"
+def foo() -> str:
+  # pyrefly: ignore
+  return f"""
+result: {f'''
+{1 + "a"}
+'''}
+"""
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_consecutive_fstrings_above_first,
+    r#"
+def foo():
+  # pyrefly: ignore
+  f"""hello"""
+  f"result: {1 + "a"}"  # E: is not supported
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_consecutive_fstrings_above_second,
+    r#"
+def foo():
+  f"""hello"""
+  # pyrefly: ignore
+  f"result: {1 + "a"}"
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_fstring_embedded_comment,
+    r#"
+def foo() -> str:
+  return f"""
+# pyrefly: ignore
+result: {1 + "a"}  # E: is not supported
+"""
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_backslash_continuation_above,
+    r#"
+# pyrefly: ignore
+x: str = 1 + \
+    "a"
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_backslash_continuation_middle_line,
+    r#"
+# pyrefly: ignore
+x: int = \
+    "a" + \
+    2
+"#,
+);
+
+testcase!(
+    test_pyrefly_suppression_implicit_string_concat,
+    TestEnv::new().with_run_require(Require::Errors),
+    r#"
+from typing import Any
+
+def test(d: dict[str, Any] | str) -> None:
+    x = (
+        # pyrefly: ignore [bad-index]
+        f"{d['foo']}\n"
+        f"{d['bar']}"
+    )
+"#,
+);
+
+testcase!(
+    test_pyrefly_top_level_ignore_after_docstring,
+    r#"
+"""Module docstring."""
+# pyrefly: ignore-errors
+3 + "3"
+3 + "3"
+"#,
+);
+
+testcase!(
+    test_pyrefly_top_level_ignore_after_multiline_docstring,
+    r#"
+"""
+Module docstring.
+"""
+# pyrefly: ignore-errors
+3 + "3"
+3 + "3"
 "#,
 );

@@ -55,14 +55,44 @@ Coding style: All code must be clean, documented and minimal. That means:
   complicated work at all.
 - If some code looks heavyweight, perhaps with lots of conditionals, then think
   harder for a more elegant way of achieving it.
-- Code should have comments, and functions should have docstrings. The best
-  comments are ones that introduce invariants, or prove that invariants are
-  being upheld, or indicate which invariants the code relies upon.
+- Code should have comments and functions should have docstrings, but both should be
+  concise. The best comments are ones that introduce invariants, or prove that invariants are being upheld, or indicate which invariants the code relies upon. Don't write duplicate comments, overly long comments, or comments for things that are obvious from
+  reading the code.
+- **Unreachable states must panic, not silently degrade.** Do not use defensive
+  programming to handle states that should be impossible. If a match arm, Option,
+  or Result should never occur given the surrounding invariants, use
+  `unreachable!("explanation")` or `.expect("explanation")` — never
+  `_ => default`, `.unwrap_or_default()`, or silent fallbacks. A type checker
+  that silently produces wrong results is far worse than one that crashes with a
+  clear message. Silent fallbacks hide bugs and confuse maintainers by making
+  unreachable states look reachable.
 - Check for existing helpers in the `pyrefly_types` crate before manually
   creating or destructuring a `Type`.
 - Minimize the number of places `Expr` nodes are passed around and the number of
   times they are parsed. Generally, this means extracting semantic information
   as early as possible.
+- **Imports:** Always add `use` imports at the top of the file rather than using
+  inline qualified paths (e.g., write `use crate::foo::Bar;` and then `Bar`,
+  not `crate::foo::Bar` inline). The only exception is when there is a name
+  collision between two imports, which is rare.
+
+## Commit Messages
+
+Do not write a laundry list of implementation changes. Focus on:
+
+- **Why**: what problem or design gap motivated the change
+- **What** (high level): the approach or solution, not individual file edits
+- **Why it works**: how the code changes realize the solution
+
+A reader should be able to understand the intent and rationale from the commit message, without following all the code changes in details.
+
+For any diff in this project (internal/Sapling), always:
+
+- Prefix the title with `[pyrefly]`.
+- Add the `#pyrefly` project as a reviewer (note the `#` — it is a Phabricator
+  project tag, not a user). E.g. `jf template --add-reviewers "#pyrefly"` before
+  `jf submit`, or `meta phabricator.diff update -n D<number> --add-reviewers
+  "#pyrefly"` if the diff already exists.
 
 ## Development environments
 
@@ -78,6 +108,20 @@ There are three possible development environments:
 the project root. BUCK files are not exported to GitHub, so:
 - If `BUCK` exists → internal checkout, `buck` and `arc` are available
 - If `BUCK` does not exist → GitHub checkout, only `cargo` works
+
+### Source control
+
+**Do not assume git.** This repo may be either a Git checkout or a Sapling
+(Mercurial-based) checkout. Before running any source-control commands, detect
+which VCS is in use:
+
+- If `.git` exists at the repo root → Git. Use `git` commands.
+- If `.sl` exists at the repo root → Sapling. Use `sl` commands (`sl status`,
+  `sl diff`, `sl commit`, `sl amend`, etc.). **Do not use `git`.**
+
+You can check with: `test -d "$(sl root 2>/dev/null)/.sl" && echo sapling || echo git`
+
+The internal (Meta) checkout always uses Sapling. The GitHub checkout uses Git.
 
 ## Feature guidelines
 
@@ -96,8 +140,9 @@ the project root. BUCK files are not exported to GitHub, so:
   you are confident the feature is complete.
 - By default, `test.py` auto-detects the build tool based on BUCK file presence.
   You can override this with `--mode buck` or `--mode cargo`.
+- For external builds, always use `python3 test.py` instead of `./test.py`.
 - To run just formatting and linting (much faster than running tests):
-  `./test.py --no-test --no-conformance`
+  `./test.py --no-test --no-tensor-shapes --no-conformance --no-jsonschema`
 
 ### After modifying BUCK files (internal only)
 
@@ -107,7 +152,7 @@ the project root. BUCK files are not exported to GitHub, so:
 
 **Always run formatting and linting before committing, updating a commit, or
 handing code off to a human for review:**
-`./test.py --no-test --no-conformance`
+`./test.py --no-test --no-tensor-shapes --no-conformance --no-jsonschema`
 
 This applies whether you are committing autonomously or preparing code for a
 human to commit. Do not skip this step during human-in-the-loop iteration.
@@ -119,7 +164,9 @@ human to commit. Do not skip this step during human-in-the-loop iteration.
   whether the errors are in code you modified. If so, fix them before
   committing.
 
-## The `bug` marker in tests
+## Writing tests
+
+### The `bug` marker in tests
 
 The `testcase!` macro supports a `bug = "<description>"` marker to indicate that
 a test captures undesirable behavior. Important points:
@@ -137,4 +184,15 @@ a test captures undesirable behavior. Important points:
   has become stale.
 - **Message length:** Keep the `bug` message concise. For complicated bugs, add
   detailed explanations as comments inside the test body rather than making the
-  marker message very long.
+  marker message very long. If there is an associated Github issue, linking to it
+  in a comment is often sufficient without paraphrasing the issue in the test.
+
+### `testcase!` header hygiene
+
+The macro uses `line!()` to map errors in the embedded source back to the test file,
+assuming a fixed layout. Extra lines in the header shift every reported line number.
+
+- Put comments above `testcase!(`, never between it and the `r#"..."#` content.
+- Keep `bug = "..."` on one line, with no blank lines in the header.
+- `rustfmt` re-splits a `bug = ` line past 100 cols, so keep the message short
+  enough to fit; put longer detail in a comment above the macro.

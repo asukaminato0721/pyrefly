@@ -320,7 +320,6 @@ def foo(x: Callable[[int], str], c: C, c2: C2, c3: C3):
 );
 
 testcase!(
-    bug = "classmethod bound object w/o targs is default-instantiated, solves T to Any",
     test_bound_classmethod_explicit_targs,
     r#"
 from typing import assert_type
@@ -333,7 +332,7 @@ class A[T]:
         return cls(x)
 
 assert_type(A[int].m(0), A[int])
-assert_type(A.m(0), A[int]) # TODO # E: assert_type(A[Any], A[int]) failed
+assert_type(A.m(0), A[int])
 
 def test_typevar_bounds[T: A[int]](x: type[T]):
     assert_type(x.m(0), A[int])
@@ -357,10 +356,10 @@ class A:
 
 class B:
     def __init__(self, a: A):
-        a.x: int = 1  # E: Type cannot be declared in assignment to non-self attribute `a.x`
+        a.x: int = 1  # E: Cannot annotate non-self attribute `a.x`
 
 a: A = A()
-a.x: int = 5  # E: Type cannot be declared in assignment to non-self attribute `a.x`
+a.x: int = 5  # E: Cannot annotate non-self attribute `a.x`
     "#,
 );
 
@@ -522,6 +521,16 @@ C().f(0)    # E: Argument `Literal[0]` is not assignable to parameter `x` with t
     "#,
 );
 
+testcase!(
+    test_bad_bound_on_self,
+    r#"
+class C:
+    def f[T: int](self: T) -> T:
+        return self
+C().f()  # E: `C` is not assignable to upper bound `int`
+    "#,
+);
+
 // Make sure we treat `callable_attr` as a bare instance attribute, not a bound method.
 testcase!(
     test_callable_instance_only_attribute,
@@ -606,7 +615,7 @@ def f2(c: Callable[[C, int], None]):
 f1(C.f)  # E: Argument `(self: C, x: int) -> None` is not assignable to parameter `c` with type `(int) -> None`
 f1(C().f)
 f2(C.f)
-f2(C().f)  # E: Argument `BoundMethod[C, (self: C, x: int) -> None]` is not assignable to parameter `c` with type `(C, int) -> None`
+f2(C().f)  # E: Argument `(self: C, x: int) -> None` is not assignable to parameter `c` with type `(C, int) -> None`
     "#,
 );
 
@@ -693,6 +702,21 @@ C.x  # E: Generic attribute `x` of class `C` is not visible on the class
 );
 
 testcase!(
+    test_class_generic_attribute_lookup_on_self_type,
+    r#"
+from typing import assert_type
+
+class C[T]:
+    x: type[T]
+
+    @classmethod
+    def f(cls) -> type[T]:
+        assert_type(cls.x, type[T])
+        return cls.x
+"#,
+);
+
+testcase!(
     test_var_attribute,
     r#"
 from typing import assert_type
@@ -774,6 +798,26 @@ class Meta(type):
 class C(metaclass=Meta):
     pass
 assert_type(C.x, int)
+    "#,
+);
+
+testcase!(
+    test_metaclass_property_precedence,
+    r#"
+from typing import assert_type
+
+class Meta(type):
+    @property
+    def f(cls) -> str:
+        return "1"
+
+class C(metaclass=Meta):
+    @property
+    def f(self) -> str:
+        return type(self).f
+
+# C.f should resolve to the metaclass property, returning str
+assert_type(C.f, str)
     "#,
 );
 
@@ -1054,6 +1098,16 @@ class Test(B):
 );
 
 testcase!(
+    test_any_as_base_class_suppresses_missing_attribute_in_method,
+    r#"
+from typing import Any
+class MyTest(Any):
+    def foo(self):
+        self.bar()  # should not error: Any is in base-class hierarchy
+"#,
+);
+
+testcase!(
     test_field_using_method_scope_type_variable,
     r#"
 from typing import assert_type, Any
@@ -1097,6 +1151,74 @@ class C2[R]:
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/2204
+testcase!(
+    test_generic_function_assigned_to_attribute,
+    r#"
+from typing import reveal_type, assert_type
+def f[T](x: T) -> T:
+    return x
+
+class C:
+    def m[U](self, x: U) -> U:
+        return x
+
+class D:
+    def __init__(self, c: C):
+        self.f = f
+        self.g = c.m
+        self.h = C.m
+
+def test(o: D):
+    reveal_type(o.f) # E: [T](x: T) -> T
+    assert_type(o.f(1), int)
+
+    reveal_type(o.g) # E: [U](self: C, x: U) -> U
+    assert_type(o.g(1), int)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/2812
+testcase!(
+    test_bound_overload_assigned_to_attribute,
+    r#"
+from typing import assert_type
+
+class ThemeStack:
+    def __init__(self) -> None:
+        self._entries: list[dict[str, str]] = [{}]
+        self.get = self._entries[-1].get
+
+def test(stack: ThemeStack) -> None:
+    assert_type(stack.get("theme"), str | None)
+    assert_type(stack.get("theme", "fallback"), str)
+"#,
+);
+
+testcase!(
+    test_generic_function_as_closure_default_arg,
+    r#"
+import bisect
+
+class Worker:
+    def __init__(self) -> None:
+        self.heartbeats: list[float] = []
+        self.event = self._create_event_handler()
+
+    def _create_event_handler(self):
+        heartbeats = self.heartbeats
+
+        def event(
+            timestamp: float | None = None,
+            insort = bisect.insort,
+        ) -> None:
+            if timestamp is not None:
+                insort(heartbeats, timestamp)
+
+        return event
+"#,
+);
+
 testcase!(
     test_attr_unknown,
     r#"
@@ -1108,7 +1230,6 @@ class Namespace:
             return "test"
         return Op()
 x = Namespace().some_op.default # E:  Object of class `str` has no attribute `default
-
 "#,
 );
 
@@ -1126,7 +1247,7 @@ class C:
         if orig_func is None:
             return super().__new__(cls)
 def f():
-    with C():  # E: `NoneType` has no attribute `__enter__`  # E: `NoneType` has no attribute `__exit__`
+    with C():
         pass
     "#,
 );
@@ -1427,6 +1548,95 @@ class B:
     "#,
 );
 
+testcase!(
+    test_private_attribute_with_getattr,
+    r#"
+from typing import assert_type
+
+class Foo:
+    def __getattr__(self, attr: str) -> str:
+        return attr
+
+def main(f: Foo) -> None:
+    assert_type(f._foo, str)
+    assert_type(f.__foo, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_getattr_and_explicit_field,
+    r#"
+class A:
+    __secret: int = 0
+    def __getattr__(self, name: str) -> str: ...
+
+class B:
+    def leak(self, a: A):
+        return a.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_getattribute,
+    r#"
+from typing import assert_type
+
+class Foo:
+    def __getattribute__(self, name: str) -> str:
+        return name
+
+def main(f: Foo) -> None:
+    assert_type(f.__bar, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_with_inherited_getattr,
+    r#"
+from typing import assert_type
+
+class Base:
+    def __getattr__(self, name: str) -> str:
+        return name
+
+class Child(Base):
+    pass
+
+def main(c: Child) -> None:
+    assert_type(c.__foo, str)
+    "#,
+);
+
+testcase!(
+    test_private_attribute_inherited_field_with_child_getattr,
+    r#"
+class Parent:
+    __secret: int = 0
+
+class Child(Parent):
+    def __getattr__(self, name: str) -> str: ...
+
+class External:
+    def leak(self, c: Child):
+        return c.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
+testcase!(
+    test_private_attribute_mixed_union_with_getattr,
+    r#"
+class A:
+    __secret: int = 0
+
+class Dyn:
+    def __getattr__(self, name: str) -> str: ...
+
+class External:
+    def leak(self, x: A | Dyn):
+        return x.__secret  # E: Private attribute `__secret` cannot be accessed outside of its defining class
+    "#,
+);
+
 // We allow __attr access on modules, since name mangling only occurs on attributes of classes.
 testcase!(
     test_module_attr_is_not_private,
@@ -1520,7 +1730,7 @@ def test_union(x: A  | B):
 );
 
 testcase!(
-    bug = "type[ClassDef(..)] and type[ClassType(..)] should be type (or the direct metaclass?)",
+    bug = "type[ClassType(..)] should be type (or the direct metaclass?)",
     test_attribute_access_on_type_class,
     r#"
 # handy hack to get a type[X] for any X
@@ -1534,8 +1744,29 @@ class D[T]:
     @classmethod
     def m(cls, x: T): ...
 
-ty(C).m(0) # E: Expr::attr_infer_for_type attribute base undefined
+ty(C).m(0) # E: Class `type` has no class attribute `m`
 ty(D[int]).m(0) # E: Expr::attr_infer_for_type attribute base undefined
+"#,
+);
+
+testcase!(
+    test_attribute_access_on_classdef_metaclass,
+    r#"
+class Meta(type):
+    def __setattr__(cls, name: str, value: int) -> None: ...
+    def __getattribute__(cls, name: str) -> object: ...
+
+class C(metaclass=Meta):
+    pass
+
+C.__class__.__setattr__(C, "x", 0)
+C.__class__.__setattr__(C, "x", "bad") # E: Argument `Literal['bad']` is not assignable to parameter `value` with type `int`
+C.__class__.__getattribute__(C, "x")
+
+class DefaultMeta:
+    pass
+
+DefaultMeta.__class__.mro(DefaultMeta)
 "#,
 );
 
@@ -1552,7 +1783,22 @@ class TD(TypedDict):
     x: int
 
 ty(TD(x = 0))(x = 0)
-ty(TD).mro() # E: Expr::attr_infer_for_type attribute base undefined
+ty(TD).mro() # E: Missing argument `self` in function `type.mro`
+"#,
+);
+
+testcase!(
+    test_attribute_access_on_type_bare_typeddict_special_form,
+    r#"
+from typing import TypedDict
+# `type[TypedDict]` is invalid as an annotation. After the error is reported,
+# the inner `TypedDict` should be recovered to `Any` so attribute access on
+# `cls` does not trigger an internal error. Value-position access on bare
+# `TypedDict` is unaffected and should still error.
+def f(cls: type[TypedDict]) -> None:  # E: `TypedDict` is not allowed in this context
+    cls.__annotations__
+    cls.__name__
+    cls.__bases__
 "#,
 );
 
@@ -1631,6 +1877,23 @@ class A[T]:
 reveal_type(A.f) # E: revealed type: Overload[\n  (x: None = ...) -> None\n  [T](x: T) -> T\n]
 assert_type(A.f(), None)
 assert_type(A.f(0), int)
+    "#,
+);
+
+testcase!(
+    test_parametrized_class_init_call,
+    r#"
+from typing import reveal_type
+
+class Foo[T]:
+    def __init__(self, /) -> None:
+        pass
+
+class Bar[S](Foo[S]):
+    def __init__(self, /) -> None:
+        Foo[S].__init__(self)
+
+Foo[int].__init__(Foo[int]())
     "#,
 );
 
@@ -1746,8 +2009,20 @@ testcase!(
     r#"
 from typing import ClassVar, Final
 class C:
-    x: ClassVar[Final[int]] = 42
+    x: ClassVar[Final[int]] = 42  # E: `Final` may not be nested inside `ClassVar`
 C.x = 43  # E: This field is marked as Final
+    "#,
+);
+
+testcase!(
+    test_classvar_final_nesting,
+    r#"
+from typing import ClassVar, Final
+class C:
+    x: Final[ClassVar[int]] = 1  # E: `ClassVar` may not be nested inside `Final`
+    y: ClassVar[Final[int]] = 2  # E: `Final` may not be nested inside `ClassVar`
+    z: Final[int] = 3
+    w: ClassVar[int] = 4
     "#,
 );
 
@@ -2000,7 +2275,7 @@ testcase!(
     r#"
 from typing import Never, assert_type, reveal_type
 def f() -> type[Never]: ...
-reveal_type(f().mro) # E: BoundMethod[type, (self: type) -> list[type[Any]]]
+reveal_type(f().mro) # E: (self: type) -> list[type[Any]]
 assert_type(f().wut, Never)
     "#,
 );
@@ -2127,7 +2402,7 @@ testcase!(
     r#"
 # Partial union failure with 3 types: attribute exists on 1, missing on 2
 def f(x: str | int | None):
-    return x.split()  # E: Object of class `NoneType` has no attribute `split`\nObject of class `int` has no attribute `split` # !E: Did you mean
+    return x.split()  # E: Object of type `int | str | None` has no attribute `split` # !E: Did you mean
 "#,
 );
 
@@ -2159,7 +2434,7 @@ class A:
 class B:
     value: str
 def f(x: A | B):
-    return x.vaule  # E: Object of class `A` has no attribute `vaule`\nObject of class `B` has no attribute `vaule`\n  Did you mean `value`?
+    return x.vaule  # E: Object of type `A | B` has no attribute `vaule`\n  Object of class `A` has no attribute `vaule`\n  Object of class `B` has no attribute `vaule`\n  Did you mean `value`?
 "#,
 );
 
@@ -2263,6 +2538,54 @@ def f(a: A):
 );
 
 testcase!(
+    test_promote_literalstring_method_attribute,
+    r#"
+from typing import Literal, assert_type
+
+class SessionMiddleware:
+    def __init__(
+        self, same_site: Literal["lax", "strict", "none"] = "lax", domain: str | None = None
+    ) -> None:
+        self.security_flags = "httponly; samesite=" + same_site
+        if domain is not None:
+            self.security_flags += f"; domain={domain}"
+
+def f(middleware: SessionMiddleware):
+    assert_type(middleware.security_flags, str)
+    "#,
+);
+
+testcase!(
+    test_do_not_promote_addition_of_explicit_literal_strings,
+    r#"
+from typing import LiteralString, assert_type
+
+class C:
+    def __init__(self, x: LiteralString, y: LiteralString) -> None:
+        self.z = x + y
+
+def f(c: C):
+    assert_type(c.z, LiteralString)
+    "#,
+);
+
+testcase!(
+    test_do_not_promote_augmented_addition_of_explicit_literal_strings,
+    r#"
+from typing import LiteralString, assert_type
+
+class C:
+    def __init__(self, x: LiteralString, y: LiteralString) -> None:
+        z = x
+        z += y
+        self.attr = z
+
+def f(c: C):
+    assert_type(c.attr, LiteralString)
+    "#,
+);
+
+testcase!(
     test_top_level_anonymous_typeddict,
     r#"
 from typing import NotRequired, TypedDict
@@ -2274,7 +2597,8 @@ class A:
         self.y = {"x": 0} if check else 42
 def f(a: A):
     x: TD = a.x
-    y: TD | int = a.y
+    # anoynmous typed dicts are promoted away when unioned
+    y: dict[str, int] | int = a.y
     "#,
 );
 
@@ -2303,4 +2627,442 @@ class B(A[None]):
         if not foo:
             pass
     "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/417
+testcase!(
+    test_classmethod_inherited_no_missing_attribute,
+    r#"
+class Base:
+    @classmethod
+    def from_pretrained(cls, name: str) -> "Base":
+        return cls()
+
+class Derived(Base):
+    pass
+
+Derived.from_pretrained("model")
+"#,
+);
+
+testcase!(
+    test_classmethod_vararg_does_not_bind_self,
+    r#"
+class C:
+    @classmethod
+    def create(*args, **kwargs): ...
+
+C.create(42)
+C.create(a=42)
+"#,
+);
+
+testcase!(
+    test_method_preserves_typevar,
+    r#"
+def f[T: (bytes, str)](x: T, y: T) -> T: ...
+def g[T: (bytes, str)](x: T) -> T:
+    y = x.lower()
+    return f(y, y)
+    "#,
+);
+
+testcase!(
+    test_method_returning_self_preserves_typevar,
+    r#"
+from typing import reveal_type, Self
+
+class A:
+    def f(self) -> Self:
+        return self
+
+def f[T](x: T) -> T:
+    if isinstance(x, A):
+        return x.f()
+    return x
+    "#,
+);
+
+testcase!(
+    test_getitem_on_constrained_typevar,
+    r#"
+from typing import assert_type
+
+class A:
+    def __getitem__(self, key) -> "A": ...
+
+class B:
+    def __getitem__(self, key: str) -> A: ...
+
+class C[T: (A, B)]:
+    def f(self) -> T: ...
+    def g(self):
+        return self.f()[""][0]
+    "#,
+);
+
+testcase!(
+    test_multiple_assignments_in_same_method,
+    r#"
+from typing import assert_type
+class A:
+    def __init__(self):
+        self.val = "string"
+        self.val = 1
+def f(a: A):
+    assert_type(a.val, str | int)
+
+class B:
+    def __init__(self, x: bool):
+        if x:
+            self.val = "string"
+        else:
+            self.val = 1
+def f2(b: B):
+    assert_type(b.val, str | int)
+    "#,
+);
+
+testcase!(
+    test_assignments_across_multiple_recognized_methods,
+    r#"
+from typing import assert_type
+class A:
+    def __init__(self):
+        self.val = "string"
+    def __post_init__(self):
+        self.val = 1
+def f(a: A):
+    assert_type(a.val, str | int)
+    "#,
+);
+
+testcase!(
+    test_class_level_attribute_priority,
+    r#"
+from typing import assert_type
+class A:
+    val: int = 1
+    def __init__(self):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f(a: A):
+    assert_type(a.val, int)
+
+class B:
+    val = 1
+    def __init__(self):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f2(b: B):
+    assert_type(b.val, int)
+    "#,
+);
+
+testcase!(
+    test_recognized_vs_unrecognized_methods,
+    r#"
+from typing import assert_type, reveal_type
+class A:
+    def __init__(self):
+        self.val = 1
+    def do_work(self):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f(a: A):
+    assert_type(a.val, int)
+
+class B:
+    def __init__(self):
+        self.val = None  # W: This expression is implicitly inferred to be `Any | None`. Please provide an explicit type annotation.
+    def do_work(self):
+        self.val = "string"
+def f2(b: B):
+    reveal_type(b.val)  # E: revealed type: Unknown | None
+    "#,
+);
+
+testcase!(
+    test_explicit_annotation_override,
+    r#"
+from typing import assert_type
+
+class A:
+    def __init__(self):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+        self.val: int = 1
+def f(a: A):
+    assert_type(a.val, int)
+
+class B:
+    def __init__(self):
+        self.val: int = 1
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f2(b: B):
+    assert_type(b.val, int)
+
+class C:
+    def __init__(self, cond: bool):
+        self.val: int = 1
+        if cond:
+            self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f3(c: C):
+    assert_type(c.val, int)
+
+class D:
+    def __init__(self, cond: bool):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+        if cond:
+            self.val: int = 1
+def f4(d: D):
+    assert_type(d.val, int)
+
+class E:
+    def __init__(self, cond: bool):
+        self.val = None  # E: `None` is not assignable to attribute `val` with type `int`
+        if cond:
+            self.val: int = 1
+def f5(e: E):
+    assert_type(e.val, int)
+    "#,
+);
+
+testcase!(
+    test_none_union_conditional_initialization,
+    r#"
+from typing import reveal_type
+
+class A:
+    def __init__(self, x: None | int):
+        self._x = None  # W: This expression is implicitly inferred to be `Any | None`. Please provide an explicit type annotation.
+        if x:
+            self._x = x
+def f(a: A):
+    reveal_type(a._x)  # E: revealed type: int | Unknown | None
+
+class B:
+    def __init__(self, x: None | int):
+        if x:
+            self._x = x
+        else:
+            self._x = x
+def f2(b: B):
+    reveal_type(b._x)  # E: revealed type: int | None
+
+class C:
+    def __init__(self, x: None | int):
+        if not x:
+            self._y = x
+        else:
+            self._y = x
+def f3(c: C):
+    reveal_type(c._y)  # E: revealed type: int | None
+    "#,
+);
+
+testcase!(
+    test_class_method_receiver_union,
+    r#"
+from typing import reveal_type, assert_type, Literal
+
+class A:
+    def __new__(cls):
+        cls.val = 1
+        return super().__new__(cls)
+    def __init__(self):
+        self.val = "string"
+def f(a: A):
+    assert_type(a.val, Literal[1, 'string'])
+    reveal_type(A.val)  # E: revealed type: Literal['string', 1]
+
+class B:
+    def __init__(self):
+        self.val = "string"
+    def __new__(cls):
+        cls.val = 1
+        return super().__new__(cls)
+def g(b: B):
+    assert_type(b.val, Literal['string', 1])
+    reveal_type(B.val)  # E: revealed type: Literal['string', 1]
+    "#,
+);
+
+testcase!(
+    test_class_body_with_method_definition,
+    r#"
+from typing import reveal_type, assert_type, Literal
+
+class A:
+    val = 0
+    def __new__(cls):
+        cls.val = 1
+        return super().__new__(cls)
+    def __init__(self):
+        self.val = "string"  # E: `Literal['string']` is not assignable to attribute `val` with type `int`
+def f(a: A):
+    reveal_type(a.val)  # E: revealed type: int
+    reveal_type(A.val)  # E: revealed type: int
+
+class B:
+    val: int | str = 0
+    def __new__(cls):
+        cls.val = 1
+        return super().__new__(cls)
+    def __init__(self):
+        self.val = "string"
+        assert_type(self.val, Literal["string"])
+def g(b: B):
+    reveal_type(b.val)  # E: revealed type: int | str
+    reveal_type(B.val)  # E: revealed type: int | str
+    "#,
+);
+
+testcase!(
+    test_none_first_assignment_adds_any,
+    r#"
+from typing import assert_type, Any, Literal
+class C:
+    def __init__(self, x: bool):
+        self.foo = None
+        if x:
+            self.foo = 0
+        else:
+            self.foo = 1
+        assert_type(self.foo, Literal[0, 1])
+def f(c: C):
+    # If the first assignment to a field is `None`, we infer `Any | None`
+    assert_type(c.foo, int | Any | None)
+    "#,
+);
+
+testcase!(
+    test_recognized_methods_contribute_helpers_excluded,
+    r#"
+from typing import assert_type
+class A:
+    def __init__(self):
+        self.val = 1
+    def __post_init__(self):
+        self.val = "string"
+    def helper(self):
+        self.val = b"bytes"  # E: `Literal[b'bytes']` is not assignable to attribute `val` with type `int | str`
+def f(a: A):
+    assert_type(a.val, int | str)
+    "#,
+);
+
+testcase!(
+    test_self_referential_attribute,
+    r#"
+from typing import Any, assert_type
+class C:
+    def m(self) -> None:
+        # `self.x = [self.x]` is self-referential and never converges (each fixpoint
+        # iteration nests another `list[...]`).
+        self.x = [self.x]  # E: Fixpoint iteration did not converge
+def f(c: C):
+    assert_type(c.x, list[list[list[list[list[Any]]]]])
+    "#,
+);
+
+testcase!(
+    test_unknown_attribute_type_untyped_call,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+class C:
+    def __init__(self) -> None:
+        self.x = untyped(1)  # E: implicitly inferred to be `Any`
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_type_class_body_untyped_call,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+class C:
+    x = untyped(1)  # E: implicitly inferred to be `Any`
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_type_annotated_no_error,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+class C:
+    def __init__(self) -> None:
+        self.x: int = untyped(1)
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_type_known_no_error,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+class C:
+    def __init__(self) -> None:
+        self.x = 1
+        self.s = "hello"
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_type_not_suppressed_by_implicit_any,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+class C:
+    def __init__(self) -> None:
+        # pyrefly: ignore[implicit-any]
+        self.x = untyped(1)  # E: implicitly inferred to be `Any`
+"#,
+);
+
+testcase!(
+    test_unknown_attribute_type_explicit_any_no_error,
+    TestEnv::new().enable_unknown_attribute_type_error(),
+    r#"
+from typing import Any, cast
+class C:
+    def __init__(self) -> None:
+        # An explicit `Any` is intentional, so only implicit `Any` should trigger.
+        self.x = cast(Any, 1)
+"#,
+);
+
+testcase!(
+    test_implicit_any_attribute_class_body_no_double_report,
+    TestEnv::new()
+        .enable_unknown_variable_type_error()
+        .enable_unknown_attribute_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+# With both rules enabled, a class-body attribute is reported ONLY by
+# unknown-attribute-type, not unknown-variable-type (the is_class_body_assignment
+# guard prevents a double report). Exactly one error must fire here.
+class C:
+    x = untyped(1)  # E: implicitly inferred to be `Any`
+"#,
+);
+
+testcase!(
+    test_bound_method_no_arbitrary_attr_set,
+    r#"
+class Foo:
+    def real_method(self) -> None: ...
+f: Foo = Foo()
+f.real_method.test = None  # E: has no attribute `test`
+del f.real_method.test  # E: has no attribute `test`
+# Known method attributes are still accessible.
+name: str = f.real_method.__name__
+"#,
 );

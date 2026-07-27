@@ -18,11 +18,11 @@ use itertools::Itertools;
 use pyrefly_python::sys_info::PythonPlatform;
 use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_util::lock::Mutex;
-use pyrefly_util::lock::RwLock;
+use pyrefly_util::stdlib::register_stdlib_paths;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_with::skip_serializing_none;
 use starlark_map::small_map::SmallMap;
-use starlark_map::small_set::SmallSet;
 use tracing::warn;
 
 use crate::environment::interpreters::Interpreters;
@@ -31,9 +31,6 @@ static INTERPRETER_ENV_REGISTRY: LazyLock<
     Mutex<SmallMap<PathBuf, Result<PythonEnvironment, String>>>,
 > = LazyLock::new(|| Mutex::new(SmallMap::new()));
 
-static INTERPRETER_STDLIB_PATH_REGISTRY: LazyLock<RwLock<SmallSet<PathBuf>>> =
-    LazyLock::new(|| RwLock::new(SmallSet::new()));
-
 /// Values representing the environment of the Python interpreter.
 /// These values are `None` by default, so we can tell if a config
 /// overrode them, or if we should query a Python interpreter for
@@ -41,13 +38,12 @@ static INTERPRETER_STDLIB_PATH_REGISTRY: LazyLock<RwLock<SmallSet<PathBuf>>> =
 /// on config parsing, since we also won't know if an executable
 /// other than the first available on the path should be used (i.e.
 /// should we always look at a venv/conda environment instead?)
+#[skip_serializing_none]
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct PythonEnvironment {
     /// The platform any `sys.platform` check should evaluate against.
     #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
         // TODO(connernilsen): DON'T COPY THIS TO NEW FIELDS. This is a temporary
         // alias while we migrate existing fields from snake case to kebab case.
         alias = "python_platform"
@@ -56,8 +52,6 @@ pub struct PythonEnvironment {
 
     /// The platform any `sys.version` check should evaluate against.
     #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
         // TODO(connernilsen): DON'T COPY THIS TO NEW FIELDS. This is a temporary
         // alias while we migrate existing fields from snake case to kebab case.
         alias = "python_version"
@@ -67,15 +61,13 @@ pub struct PythonEnvironment {
     /// Directories containing third-party package imports, searched
     /// after first checking `search_path` and `typeshed`.
     #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
         // TODO(connernilsen): DON'T COPY THIS TO NEW FIELDS. This is a temporary
         // alias while we migrate existing fields from snake case to kebab case.
         alias = "site_package_path"
     )]
     pub site_package_path: Option<Vec<PathBuf>>,
 
-    #[serde(skip, default)]
+    #[serde(skip)]
     pub interpreter_site_package_path: Vec<PathBuf>,
 
     #[serde(alias = "stdlib_paths", default, skip_serializing)]
@@ -99,12 +91,10 @@ impl PythonEnvironment {
             self.python_version = Some(PythonVersion::default());
         }
         if self.site_package_path.is_none() {
-            let typings = PathBuf::from("./typings");
-            if typings.exists() {
-                self.site_package_path = Some(vec![PathBuf::from("./typings")]);
-            } else {
-                self.site_package_path = Some(Vec::new());
-            }
+            // The `typings/` default is applied in `ConfigFile::configure()` so it
+            // can be resolved relative to the config root and applied regardless
+            // of whether an interpreter was queried.
+            self.site_package_path = Some(Vec::new());
         }
     }
 
@@ -140,8 +130,8 @@ import json, sys, sysconfig
 platform = sys.platform
 v = sys.version_info
 version = '{}.{}.{}'.format(v.major, v.minor, v.micro)
-site_package_path = list(filter(lambda x: x != '' and '.zip' not in x, sys.path))
-stdlib_paths = [sysconfig.get_path('stdlib'), sysconfig.get_path('platstdlib')]
+stdlib_paths = [p for p in [sysconfig.get_path('stdlib')] if p is not None]
+site_package_path = [p for p in sys.path if p != '' and '.zip' not in p and not p.endswith('/lib-dynload') and p not in stdlib_paths]
 print(json.dumps({'python_platform': platform, 'python_version': version, 'site_package_path': site_package_path, 'stdlib_paths': stdlib_paths}))
 ";
 
@@ -211,13 +201,7 @@ print(json.dumps({'python_platform': platform, 'python_version': version, 'site_
     }
 
     fn cache_interpreter_stdlib_path(path: Vec<PathBuf>) {
-        INTERPRETER_STDLIB_PATH_REGISTRY.write().extend(path);
-    }
-
-    /// todo(jvansch): Remove this once function is used to filter standard library files
-    #[allow(dead_code)]
-    pub fn get_interpreter_stdlib_path() -> &'static LazyLock<RwLock<SmallSet<PathBuf>>> {
-        &INTERPRETER_STDLIB_PATH_REGISTRY
+        register_stdlib_paths(path);
     }
 
     /// [`Self::get_default_interpreter()`] and [`Self::get_interpreter_env()`] with the resulting value,

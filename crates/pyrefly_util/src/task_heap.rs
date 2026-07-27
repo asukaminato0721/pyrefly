@@ -20,6 +20,7 @@ use crate::lock::Condvar;
 use crate::lock::Mutex;
 
 /// Used to signal that all the tasks should be cancelled.
+#[derive(Debug)]
 pub struct Cancelled;
 
 #[derive(Clone, Dupe)]
@@ -30,7 +31,7 @@ impl CancellationHandle {
         Self(Arc::new(AtomicBool::new(false)))
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
     }
 
@@ -114,6 +115,16 @@ impl<K: Ord, V> TaskHeap<K, V> {
         self.cancellation_handle.dupe()
     }
 
+    /// Replace the cancellation handle with a fresh one, so that a previously
+    /// cancelled TaskHeap can process work again. The old handle becomes orphaned.
+    pub fn reset_cancellation(&mut self) {
+        self.cancellation_handle = CancellationHandle::new();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().heap.is_empty()
+    }
+
     /// Push a task into the heap with specified ordering.
     /// If `is_lifo` is true, the task will be processed in LIFO order for equal values of `K`.
     /// If `is_lifo` is false, the task will be processed in FIFO order for equal values of `K`.
@@ -162,7 +173,9 @@ impl<K: Ord, V> TaskHeap<K, V> {
             fn drop(&mut self) {
                 let mut lock = self.0.inner.lock();
                 lock.active_workers -= 1;
-                if lock.active_workers == 0 && lock.heap.is_empty() {
+                // Only wake when a worker is parked; a bare `notify_all` still
+                // issues a `futex`.
+                if lock.active_workers == 0 && lock.heap.is_empty() && lock.paused_workers > 0 {
                     self.0.condition.notify_all();
                 }
             }
@@ -189,7 +202,11 @@ impl<K: Ord, V> TaskHeap<K, V> {
                 }
                 None => {
                     if lock.active_workers == 0 {
-                        self.condition.notify_all();
+                        // Only wake when a worker is parked, to avoid a needless
+                        // `futex`.
+                        if lock.paused_workers > 0 {
+                            self.condition.notify_all();
+                        }
                         break;
                     }
                     lock.paused_workers += 1;
@@ -317,8 +334,7 @@ mod tests {
     fn test_pausing() {
         let heap = TaskHeap::new();
         heap.push_fifo(1, ());
-        let threads =
-            ThreadPool::with_thread_count(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
+        let threads = ThreadPool::new(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
         let executed = Mutex::new(Vec::new());
         let thread_count = AtomicUsize::new(0);
         threads.spawn_many(|| {
@@ -341,8 +357,7 @@ mod tests {
         let heap = TaskHeap::new();
         heap.push_fifo(1, ());
         heap.push_fifo(2, ());
-        let threads =
-            ThreadPool::with_thread_count(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
+        let threads = ThreadPool::new(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
         let executed = Mutex::new(Vec::new());
         let thread_count = AtomicUsize::new(0);
         threads.spawn_many(|| {
@@ -361,8 +376,7 @@ mod tests {
     fn test_panic_one() {
         let heap = TaskHeap::new();
         heap.push_fifo(1, ());
-        let threads =
-            ThreadPool::with_thread_count(ThreadCount::NumThreads(NonZero::new(1).unwrap()));
+        let threads = ThreadPool::new(ThreadCount::NumThreads(NonZero::new(1).unwrap()));
         threads.spawn_many(|| {
             heap.work_without_cancellation(|_, _| panic!());
         });
@@ -374,8 +388,7 @@ mod tests {
         let heap = TaskHeap::new();
         heap.push_fifo(1, ());
         heap.push_fifo(2, ());
-        let threads =
-            ThreadPool::with_thread_count(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
+        let threads = ThreadPool::new(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
         threads.spawn_many(|| {
             heap.work_without_cancellation(|k, _| {
                 // Ensure the panic happens first, while both are active.
@@ -396,8 +409,7 @@ mod tests {
         let heap = TaskHeap::new();
         heap.push_fifo(1, ());
         heap.push_fifo(2, ());
-        let threads =
-            ThreadPool::with_thread_count(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
+        let threads = ThreadPool::new(ThreadCount::NumThreads(NonZero::new(2).unwrap()));
         threads.spawn_many(|| {
             heap.work_without_cancellation(|k, _| {
                 // Ensure the panic happens second, while the first is sleeping.

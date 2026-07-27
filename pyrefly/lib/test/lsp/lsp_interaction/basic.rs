@@ -10,12 +10,12 @@ use lsp_types::Url;
 use lsp_types::notification::DidChangeTextDocument;
 use lsp_types::notification::DidOpenTextDocument;
 use lsp_types::request::DocumentDiagnosticRequest;
+use pyrefly_lsp_test::Message;
+use pyrefly_lsp_test::Request;
+use pyrefly_lsp_test::object_model::InitializeSettings;
+use pyrefly_lsp_test::object_model::LspInteraction;
 use serde_json::json;
 
-use crate::lsp::non_wasm::protocol::Message;
-use crate::lsp::non_wasm::protocol::Request;
-use crate::test::lsp::lsp_interaction::object_model::InitializeSettings;
-use crate::test::lsp::lsp_interaction::object_model::LspInteraction;
 use crate::test::lsp::lsp_interaction::util::get_test_files_root;
 
 #[test]
@@ -32,13 +32,21 @@ fn test_initialize_basic() {
         )
         .expect_response(json!({"capabilities": {
             "positionEncoding": "utf-16",
-            "textDocumentSync": 2,
+            "textDocumentSync": {
+                "openClose": true,
+                "change": 2,
+                "save": { "includeText": false }
+            },
             "definitionProvider": true,
             "typeDefinitionProvider": true,
             "codeActionProvider": {
-                "codeActionKinds": ["quickfix", "refactor.extract", "refactor.move", "refactor.inline"]
+                "codeActionKinds": ["quickfix", "refactor.extract", "refactor.rewrite", "refactor.delete", "refactor.move", "refactor.inline", "source.fixAll", "source.fixAll.pyrefly"]
+            },
+            "codeLensProvider": {
+                "resolveProvider": false,
             },
             "completionProvider": {
+                "resolveProvider": true,
                 "triggerCharacters": [".", "'", "\""]
             },
             "declarationProvider": true,
@@ -52,6 +60,7 @@ fn test_initialize_basic() {
             "notebookDocumentSync":{"notebookSelector":[{"cells":[{"language":"python"}]}]},
             "documentSymbolProvider": true,
             "foldingRangeProvider":true,
+            "selectionRangeProvider": true,
             "workspaceSymbolProvider": true,
             "workspace": {
                 "workspaceFolders": {

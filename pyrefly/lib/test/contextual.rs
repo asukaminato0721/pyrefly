@@ -8,6 +8,24 @@
 use crate::testcase;
 
 testcase!(
+    test_context_subscript_assign_delete,
+    r#"
+class Foo:
+    def __getitem__(self, key: list[str | None]):
+        pass
+    def __setitem__(self, key: list[str | None], value: list[int | None]):
+        pass
+    def __delitem__(self, key: list[str | None]):
+        pass
+
+foo = Foo()
+x = foo[["bar"]]
+foo[["bar"]] = [1]
+del foo[["bar"]]
+"#,
+);
+
+testcase!(
     test_context_annassign,
     r#"
 class A: ...
@@ -102,7 +120,6 @@ kwarg(xs=[B()], ys=[B()])
 );
 
 testcase!(
-    bug = "Both assignments should be allowed. When decomposing the contextual hint, we eagerly resolve vars to the 'first' branch of the union. Note: due to the union's sorted representation, the first branch is not necessarily the first in source order.",
     test_contextual_typing_against_unions,
     r#"
 class A: ...
@@ -110,9 +127,43 @@ class B: ...
 class B2(B): ...
 class C: ...
 
-x: list[A] | list[B] = [B2()] # E: `list[B2]` is not assignable to `list[A] | list[B]`
+x: list[A] | list[B] = [B2()]
 y: list[B] | list[C] = [B2()]
+z: list[A] | list[B] = [B2() for _ in range(10)]
 "#,
+);
+
+testcase!(
+    test_dict_union,
+    r#"
+from typing import Sequence
+d1: dict[int, int] | dict[str, list[int]] = {"x": [True]}
+x: list[str] = []
+d2: dict[int, int] | dict[str, list[int]] = {k: [True] for k in x}
+d3: Sequence[dict[str, int]] | Sequence[dict[int, int]] = [{"x": 1}]
+    "#,
+);
+
+testcase!(
+    test_set_union,
+    r#"
+class A: ...
+class B: ...
+class B2(B): ...
+x1: set[A] | set[B] = {B2()}
+x2: set[A] | set[B] = {B2() for _ in range(10)}
+    "#,
+);
+
+testcase!(
+    test_nontuple_union_hint_for_tuple_value,
+    r#"
+from typing import Sequence
+class A: ...
+class B: ...
+class B2(B): ...
+x: Sequence[A] | Sequence[list[B]] = ([B2()],)
+    "#,
 );
 
 testcase!(
@@ -159,11 +210,11 @@ testcase!(
     r#"
 from typing import Iterable, MutableMapping, Literal
 x1: dict[str, int] = {"a": 1}
-x2: dict[str, int] = {"a": "oops"}  # E: `dict[str, str]` is not assignable to `dict[str, int]`
-x3: dict[str, Literal[1]] = {"a": 2} # E: `dict[str, int]` is not assignable to `dict[str, Literal[1]]`
+x2: dict[str, int] = {"a": "oops"}  # E: `Literal['oops']` is not assignable to dict value type `int`
+x3: dict[str, Literal[1]] = {"a": 2} # E: `Literal[2]` is not assignable to dict value type `Literal[1]`
 x4: MutableMapping[str, int] = {"a": 1}
 x5: Iterable[str] = {"a": 1}
-x6: Iterable[int] = {"oops": 1}  # E: `dict[str, int]` is not assignable to `Iterable[int]`
+x6: Iterable[int] = {"oops": 1}  # E: `Literal['oops']` is not assignable to dict key type `int`
 x7: Iterable[Literal[4]] = {4: "a"}
 x8: object = {"a": 1}
 x9: list[str] = {"a": 1}  # E: `dict[str, int]` is not assignable to `list[str]`
@@ -218,17 +269,29 @@ from typing import Generator, Iterable
 class A: ...
 class B(A): ...
 x0 = ([B()] for _ in [0])
-x1a: Generator[list[A], None, None] = x0 # E: `Generator[list[B], None, None]` is not assignable to `Generator[list[A], None, None]`
+x1a: Generator[list[A], None, None] = x0 # E: `Generator[list[B]]` is not assignable to `Generator[list[A]]`
 x1b: Generator[list[A], None, None] = ([B()] for _ in [0])
-x2a: Iterable[list[A]] = x0 # E: `Generator[list[B], None, None]` is not assignable to `Iterable[list[A]]`
+x2a: Iterable[list[A]] = x0 # E: `Generator[list[B]]` is not assignable to `Iterable[list[A]]`
 x2b: Iterable[list[A]] = ([B()] for _ in [0])
 
 # In theory, we should allow this, since the generator expression accepts _any_ send type,
 # but both Mypy and Pyright assume that the send type is `None`.
-x3: Generator[int, int, None] = (1 for _ in [1]) # E: `Generator[Literal[1], None, None]` is not assignable to `Generator[int, int, None]`
+x3: Generator[int, int, None] = (1 for _ in [1]) # E: `Generator[Literal[1]]` is not assignable to `Generator[int, int]`
 
-x4: Generator[int, None, int] = (1 for _ in [1]) # E: `Generator[Literal[1], None, None]` is not assignable to `Generator[int, None, int]`
+x4: Generator[int, None, int] = (1 for _ in [1]) # E: `Generator[Literal[1]]` is not assignable to `Generator[int, None, int]`
 "#,
+);
+
+testcase!(
+    test_generator_union,
+    r#"
+from typing import Generator
+class A: ...
+class B: ...
+class B2(B): ...
+def f():
+    x: Generator[A] | Generator[list[B]] = ([B2()] for _ in range(10))
+    "#,
 );
 
 testcase!(
@@ -266,7 +329,6 @@ x2: list[A] = True and [B()]
 );
 
 testcase!(
-    bug = "x or y or ... fails due to union hints, see test_contextual_typing_against_unions",
     test_context_boolop_soft,
     r#"
 from typing import TypedDict, assert_type
@@ -280,7 +342,7 @@ def test(x: list[A] | None, y: list[C] | None, z: TD | None) -> None:
     assert_type(x or [B()], list[A])
     assert_type(x or [0], list[A] | list[int])
     assert_type(x or y or [B()], list[A] | list[C])
-    assert_type(x or y or [D()], list[A] | list[C]) # TODO # E: assert_type(list[A] | list[C] | list[D], list[A] | list[C]) failed
+    assert_type(x or y or [D()], list[A] | list[C])
     assert_type(z or {"x": 0}, TD)
     assert_type(z or {"x": ""}, TD | dict[str, str])
 "#,
@@ -304,9 +366,20 @@ testcase!(
     r#"
 from typing import Callable
 class A: ...
-class B(A): ...
-f: Callable[[], list[A]] = lambda: [B()]
+class B: ...
+class B2(B): ...
+f1: Callable[[], list[B]] = lambda: [B2()]
+f2: Callable[[], list[A]] | Callable[[], list[B]] = lambda: [B2()]
+f3: Callable[[], dict[int, A]] | Callable[[], dict[int, B]] = lambda: {0: B2()}
 "#,
+);
+
+testcase!(
+    test_use_lambda_annotation_in_body,
+    r#"
+from typing import Callable
+f: Callable[[int], int] | Callable[[str], str] = lambda x: x + "1"
+    "#,
 );
 
 // We want to contextually type lambda params even when there is an arity mismatch.
@@ -359,8 +432,8 @@ from typing import Callable, assert_type
 def f[**P, R](f: Callable[P, R], g: Callable[P, R]) -> Callable[P, R]: ...
 def g1(x: int, *args: int): ...
 def g2(x: int, **kwargs: str): ...
-x1 = f(g1, lambda x, *args: assert_type(args, tuple[int, ...])) # E: assert_type(Any, tuple[int, ...]) failed
-x2 = f(g2, lambda x, **kwargs: assert_type(kwargs, dict[str, str])) # E: assert_type(Any, dict[str, str]) failed
+x1 = f(g1, lambda x, *args: assert_type(args, tuple[int, ...])) # E: assert_type(Unknown, tuple[int, ...]) failed
+x2 = f(g2, lambda x, **kwargs: assert_type(kwargs, dict[str, str])) # E: assert_type(Unknown, dict[str, str]) failed
     "#,
 );
 
@@ -389,7 +462,6 @@ f(g(0)) # OK
 );
 
 testcase!(
-    bug = "Propagating the hint should still allow for a narrower inferred type",
     test_context_return_narrow,
     r#"
 from typing import assert_type
@@ -399,8 +471,31 @@ def f[T](x: T) -> T:
 
 def test(x: int | str):
     x = f(0)
-    assert_type(x, int) # E: assert_type(int | str, int) failed
+    assert_type(x, int)
 "#,
+);
+
+testcase!(
+    test_context_return_union,
+    r#"
+class A: ...
+class B: ...
+class B2(B): ...
+
+def f[T](x: T) -> T:
+    return x
+
+x: list[A] | list[B] = f([B2()])
+    "#,
+);
+
+testcase!(
+    test_context_return_union_literal_hint,
+    r#"
+from typing import Literal
+def f[T](x: T) -> Literal[1, 2] | T: ...
+x: Literal[1, 2] = f(1)
+    "#,
 );
 
 testcase!(
@@ -470,7 +565,7 @@ class A: ...
 class B(A): ...
 x: list[A]
 y: list[B]
-x = y = [B()]  # E: Wrong type for assignment, expected `list[A]` and got `list[B]`
+x = y = [B()]  # E: `list[B]` is not assignable to `list[A]`
     "#,
 );
 
@@ -532,6 +627,20 @@ from typing import assert_type, Any
 def test(x: int):
     assert_type({ **x }, dict[Any, Any])  # E: Expected a mapping, got int
     assert_type({ "x": 1, **x }, dict[str, int])  # E: Expected a mapping, got int
+"#,
+);
+
+testcase!(
+    test_dict_infer_error_value,
+    r#"
+# Error-typed values should not cause the anonymous TypedDict to drop
+# fields, which would narrow the value_type and cause false positives
+# on subscript assignment.
+message = {
+    "device_id": "device-id",
+    "device_2": Unknown,  # E: Could not find name `Unknown`
+}
+message["attachment"] = {"image": "thumb-url"}
 "#,
 );
 
@@ -604,8 +713,8 @@ testcase!(
 from typing import Protocol, assert_type, Any
 class Identity(Protocol):
     def __call__(self, *args: int, **kwargs: int) -> Any: ...
-x: Identity = lambda *args, **kwargs: assert_type(args, tuple[int, ...]) # E: assert_type(Any, tuple[int, ...]) failed
-y: Identity = lambda *args, **kwargs: assert_type(kwargs, dict[str, int]) # E: assert_type(Any, dict[str, int]) failed
+x: Identity = lambda *args, **kwargs: assert_type(args, tuple[int, ...]) # E: assert_type(Unknown, tuple[int, ...]) failed
+y: Identity = lambda *args, **kwargs: assert_type(kwargs, dict[str, int]) # E: assert_type(Unknown, dict[str, int]) failed
     "#,
 );
 
@@ -658,5 +767,158 @@ x1: tuple[TD1] | tuple[TD2, ...] = ({"x": 0},)
 x2: tuple[TD1] | tuple[TD2, ...] = ({"y": "a"}, {"y": "b"})
 x3: tuple[TD1] | tuple[TD2] = ({"y": "a"},)
 x4: tuple[TD1] | tuple[TD2, ...] = ({"x": 0}, {"y": "a"})  # E: `tuple[TD1, TD2]` is not assignable to `tuple[TD1] | tuple[TD2, ...]`
+    "#,
+);
+
+testcase!(
+    test_sequence_hint_in_typevar_bound,
+    r#"
+from typing import Sequence
+class A: ...
+class B(A): ...
+def f[T: Sequence[list[A]]](x: T) -> T:
+    return x
+# When the top-level hint is a Var, we ignore it, so the Var restriction isn't used as a hint.
+f(([B()],))  # E: `tuple[list[B]]` is not assignable to upper bound `Sequence[list[A]]`
+    "#,
+);
+
+// Contrast this with test_sequence_hint_in_typevar_bound.
+// Because we don't need to filter out wrapped Vars, we are able to use their restrictions as hints.
+testcase!(
+    bug = "Bad Var-Var interaction in `decompose_tuple`",
+    test_list_hint_in_typevar_bound,
+    r#"
+from typing import Sequence
+class A: ...
+class B(A): ...
+
+def f1[T: list[A]](x: tuple[T, ...]) -> T:
+    return x[0]
+f1(([B()],))
+
+def f2[T: list[A]](x: tuple[T]) -> T:
+    return x[0]
+f2(([B()],))
+
+def f3[T: list[A]](x: Sequence[T]) -> T:
+    return x[0]
+# `decompose_tuple` accidentally drops the relationship between the Unwrap var we create to collect
+# the hint and the Quantified var created from T because `is_subset_eq_var` unifies the latter
+# into the former, losing the information that the Unwrap var has collected a bound.
+f3(([B()],))  # E: `list[B]` is not assignable to upper bound `list[A]`
+    "#,
+);
+
+testcase!(
+    test_concat_custom_vecs,
+    r#"
+class Vec[T]:  # invariant in T
+    def _items(self) -> list[T]: ...
+    def _append(self, item: T) -> None: ...
+
+def concat_vecs[T1, T2](left: Vec[T1], right: Vec[T2]) -> Vec[T1 | T2]:
+    return Vec()
+
+class A: ...
+class B: ...
+
+def test_vec_concat(left: Vec[A], right: Vec[B]) -> None:
+    _0: Vec[A | B] = concat_vecs(left, right)
+    "#,
+);
+
+testcase!(
+    test_list_construction_with_union_hint,
+    r#"
+from typing import Protocol, TypeVar
+_T_co = TypeVar("_T_co", covariant=True)
+class Seq(Protocol[_T_co]):
+    def __getitem__(self, index: int, /) -> _T_co: ...
+U = Seq[str] | Seq[int]
+def f(x: U) -> None: ...
+f(list())
+    "#,
+);
+
+// Regression: a list/set literal against `Alias | Collection[Alias]`, where the
+// `Literal[...]` alias is wide, must still pick up the `Collection` element hint.
+// Flattening the alias used to count its members against `MAX_DECOMPOSE_HINT_WIDTH`,
+// incorrectly triggering the cap so the literal fell back to `list[str]`.
+testcase!(
+    test_list_hint_with_wide_literal_alias_union,
+    r#"
+from typing import Literal, TypeAlias
+from collections.abc import Collection
+L: TypeAlias = Literal["a", "b", "c", "d", "e", "f", "g", "h"]
+def f(*, x: L | Collection[L] = "a") -> None: ...
+f(x=["a", "b"])
+f(x={"a", "b"})
+f(x=["a", "bad"])  # E: `list[str]` is not assignable to parameter `x`
+    "#,
+);
+
+// Regression: when a TypeVar's only constraints are upper bounds, multiple
+// such bounds where one is a subtype of the other must collapse to the
+// *narrowest* one. Previously `get_new_bound`'s absorb logic kept the wider
+// type for both lower and upper bounds, which is correct for lower bounds
+// but throws away the tighter constraint for upper bounds.
+//
+// Here `f(bar)` against return hint `int | Callable[[], int]` records:
+//   T <: int                  (from callback contravariance)
+//   T <: int                  (from `() -> T` arm matching `() -> int`)
+//   T <: int | Callable[[], int]  (from bare `T` arm matching the hint)
+// No lower bounds. Without the fix, the wider union wins and the call's
+// return becomes `(int | () -> int) | () -> (int | () -> int)`, producing a
+// spurious bad-return. With the fix, T solves to `int` and the return matches.
+testcase!(
+    test_typevar_upper_bound_narrowing,
+    r#"
+from typing import Callable, TypeVar
+T = TypeVar('T')
+
+def f(g: Callable[[T], None]) -> T | Callable[[], T]: ...
+def bar(x: int) -> None: ...
+
+def make() -> int | Callable[[], int]:
+    return f(bar)
+    "#,
+);
+
+testcase!(
+    test_typeddict_in_lambda,
+    r#"
+from typing import Callable, TypedDict
+
+class A: ...
+class B: ...
+class B2(B): ...
+
+class DA(TypedDict):
+    x: A
+
+class DB(TypedDict):
+    x: B
+
+f: Callable[[], DA] | Callable[[], DB] = lambda: {"x": B2()}
+    "#,
+);
+
+testcase!(
+    test_nested_typeddict_in_union,
+    r#"
+from typing import TypedDict
+
+class A(TypedDict):
+    x: int
+
+class B(TypedDict, total=False):
+    x: str
+
+type X = list[A] | list[B]
+
+x1: X = [{"x": ""}]
+x2: X = [{}]
+x3: X = [{"x": 1.0}]  # E: `float` is not assignable to TypedDict key `x` with type `int`
     "#,
 );

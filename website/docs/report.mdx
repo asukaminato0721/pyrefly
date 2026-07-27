@@ -1,0 +1,95 @@
+---
+title: Coverage
+
+description: Measure and enforce type coverage in your Python codebase with Pyrefly.
+---
+
+{/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */}
+
+# Pyrefly Coverage
+
+`pyrefly coverage` measures how much of your code is annotated with types. It has two subcommands:
+
+- [`pyrefly coverage check`](#checking-coverage-against-a-threshold) fails when coverage is below
+  a threshold, useful as a CI gate.
+- [`pyrefly coverage report`](#generating-a-json-report) emits a JSON report with per-module
+  statistics.
+
+## How coverage is measured
+
+Coverage is counted over _typables_: function return types, function parameters, module-level
+variables, and class attributes. Each typable is either **typed** (annotated, no `Any` in the
+resolved type), **any** (annotated, but the resolved type contains `Any`), or **untyped** (no
+annotation).
+
+- **Coverage** is the percentage of typables that are annotated; `Any` counts as covered.
+- **Strict coverage** is the percentage of typables that are typed; `Any` doesn't count.
+
+Only public symbols count: names without a leading underscore, plus anything in `__all__`.
+`self`/`cls` are not typable, overloads are merged, and `.py` files are skipped when their `.pyi`
+stub is also analyzed (`--prefer-stubs=false` disables this). With `--public-only`, only symbols
+reachable from public modules via re-export chains count: the library's public API.
+
+## Checking coverage against a threshold
+
+```sh
+pyrefly coverage check robot/ --fail-under 60
+```
+
+It reports every offending symbol in the same style as `pyrefly check`, as `coverage-missing`
+(no annotations at all) or `coverage-partial` (only some), followed by a one-line summary:
+
+```
+ WARN `walk` is not fully typed [coverage-partial]
+ --> robot/legs.py:1:1
+  |
+1 | / def walk(speed, direction: str) -> None:
+2 | |     print(f"walking {speed} {direction}")
+  | |_________________________________________-
+  |
+ WARN `stop` is untyped [coverage-missing]
+ --> robot/legs.py:5:1
+  |
+5 | / def stop():
+6 | |     print("stopping")
+  | |_____________________-
+  |
+ERROR type coverage 66.67% (4 of 6 typable) is below the 100.00% threshold
+```
+
+When coverage meets the threshold, the findings are printed but the summary is INFO and the exit
+code is 0:
+
+```
+ INFO type coverage 66.67% (4 of 6 typable)
+```
+
+Findings go to stdout, the summary to stderr. With `--strict`, annotations that resolve to `Any`
+count as untyped. `--output-format` controls the findings format.
+See `pyrefly coverage check --help` for all flags.
+
+## Generating a JSON report
+
+```sh
+pyrefly coverage report path/to/directory/ > coverage.json
+```
+
+The report contains a `"major.minor"` `schema_version`, a `summary`, and one entry per module in
+`module_reports`, with:
+
+- per-symbol typed/any/untyped counts and locations (`symbol_reports`)
+- the module's public names (`names`)
+- error-suppression comments (`type_ignores`)
+- typable totals, `coverage` and `strict_coverage` percentages, and counts of functions, methods,
+  parameters, classes, attributes, and properties
+
+See `pyrefly coverage report --help` for all flags. The output is easy to consume with e.g. `jq`:
+
+```sh
+pyrefly coverage report path/to/directory/ | jq .summary.strict_coverage
+```

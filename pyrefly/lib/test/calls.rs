@@ -82,8 +82,8 @@ testcase!(
 from typing import assert_type, Self
 class A[T]:
     def __new__(cls: type[Self], x: T) -> Self: ...
-o = A[int].__new__(A[str], "foo") # E: `type[A[str]]` is not assignable to parameter `cls` with type `type[A[int]]` # E: Argument `Literal['foo']` is not assignable to parameter `x` with type `int` in function `A.__new__`
-assert_type(o, A[int])
+# A[int] is a generic alias, which doesn't resolve to custom __new__
+o = A[int].__new__(A[str], "foo") # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: `A[str]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal['foo']` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
     "#,
 );
 
@@ -157,6 +157,48 @@ def f(x: int | str) -> int | str:
     return x
 
 f(0)  # E: `f` is deprecated
+    "#,
+);
+
+fn test_env_string_as_iterable() -> TestEnv {
+    TestEnv::new().enable_string_as_iterable_warning()
+}
+
+testcase!(
+    test_string_as_iterable_warning,
+    test_env_string_as_iterable(),
+    r#"
+from typing import Iterable, Sequence
+
+def takes_iter(xs: Iterable[str]) -> None: ...
+def takes_seq(xs: Sequence[str]) -> None: ...
+def takes_iter_or_str(xs: Iterable[str] | str) -> None: ...
+
+s: str = "hello"
+takes_iter(s)  # E: Passing `str` to `Iterable[str]` treats the string as an iterable of characters
+takes_seq(s)  # E: Passing `str` to `Sequence[str]` treats the string as an iterable of characters
+takes_iter_or_str(s)
+takes_iter(["hello"])
+
+x: Iterable[str] = s  # E: Passing `str` to `Iterable[str]` treats the string as an iterable of characters
+y: Sequence[str] = s  # E: Passing `str` to `Sequence[str]` treats the string as an iterable of characters
+
+takes_iter("hello")  # E: Passing `str` to `Iterable[str]` treats the string as an iterable of characters
+z: Iterable[str] = "hello"  # E: Passing `str` to `Iterable[str]` treats the string as an iterable of characters
+    "#,
+);
+
+testcase!(
+    test_string_as_iterable_warning_does_not_break_overload_matching,
+    test_env_string_as_iterable(),
+    r#"
+from traceback import format_exception
+
+def f(exc: BaseException) -> None:
+    "".join(format_exception(exc))
+
+s: str = "hello"
+"".join(s)  # E: Passing `str` to `Iterable[str]` treats the string as an iterable of characters
     "#,
 );
 
@@ -234,6 +276,18 @@ reduce(max, [1,2])
 );
 
 testcase!(
+    test_call_arg_lambda_contextual_typing,
+    r#"
+from typing import Callable
+
+def takes(cb: Callable[[int], int]) -> None: ...
+
+# This only errors because we're able to pass down the `int` hint through contextual typing.
+takes(lambda x: x + "")  # E:  Argument `Literal['']` is not assignable to parameter `value` with type `int` in function `int.__add__`
+    "#,
+);
+
+testcase!(
     test_union_with_type,
     r#"
 from typing import assert_type
@@ -251,10 +305,20 @@ def f(condition: bool):
 );
 
 testcase!(
+    test_generic_function_subscript,
+    r#"
+def func[T](x: T) -> T:
+    return x
+
+func[int](100)  # E: `func` is not subscriptable
+    "#,
+);
+
+testcase!(
     test_any_constructor,
     r#"
 from typing import Any
-Any()  # E: `Any` can not be instantiated
+Any()  # E: `Any` cannot be instantiated
     "#,
 );
 
@@ -305,8 +369,8 @@ from typing import Self, assert_type
 class A[T]:
     def __new__(cls: type[Self], x: T) -> Self: ...
 
-# Custom __new__ should continue to work correctly
-o = A[int].__new__(A[int], 42)
+# A[int] is a generic alias, which doesn't resolve to custom __new__
+o = A[int].__new__(A[int], 42) # E: Missing positional argument `args` in function `types.GenericAlias.__new__` # E: `A[int]` is not assignable to upper bound `GenericAlias` of type variable `Self@GenericAlias` # E: Argument `Literal[42]` is not assignable to parameter `origin` with type `type[Any]` in function `types.GenericAlias.__new__`
 assert_type(o, A[int])
 
 # Receiver type binding is preserved
@@ -361,4 +425,350 @@ class B(A):
 assert_type(A.__new__(B), B)
 assert_type(A.__new__(B, 0), B)
     "#,
+);
+
+// Minimized from https://github.com/PrefectHQ/prefect/blob/3e80a036349748edfac2ccb5609f65b7f91e85d8/src/prefect/runtime/flow_run.py#L218.
+testcase!(
+    test_complicated_paramspec_forwarding,
+    r#"
+from collections.abc import Awaitable
+from typing import assert_type, Callable
+
+type _SyncOrAsyncCallable[**P, T] = Callable[P, T | Awaitable[T]]
+
+class Flow: ...
+
+class Call[T]:
+    def __call__(self) -> T | Awaitable[T]: ...
+    def result(self) -> T: ...
+
+def create_call[**P, T](
+    fn: _SyncOrAsyncCallable[P, T], *args: P.args, **kwargs: P.kwargs
+) -> Call[T]: ...
+
+def call_soon_in_loop_thread[T](
+    call: _SyncOrAsyncCallable[[], T] | Call[T],
+) -> Call[T]: ...
+
+async def _get_flow_from_run(flow_run_id: str) -> Flow: ...
+
+def get_flow_version(run_id: str | None) -> str | None:
+    flow = call_soon_in_loop_thread(
+        create_call(_get_flow_from_run, run_id)  # E: `str | None` is not assignable to parameter `flow_run_id`
+    ).result()
+    assert_type(flow, Flow)
+    "#,
+);
+
+testcase!(
+    test_call_not_implemented_constant,
+    r#"
+# NotImplemented is a singleton constant, not a callable class.
+# Using NotImplemented() is always a mistake; they mean NotImplementedError().
+def broken():
+    raise NotImplemented()  # E: `NotImplemented` is not callable. Did you mean `NotImplementedError`?
+
+def also_broken():
+    raise NotImplemented("not yet done")  # E: `NotImplemented` is not callable. Did you mean `NotImplementedError`?
+"#,
+);
+
+testcase!(
+    test_call_not_implemented_in_union,
+    r#"
+def f(condition: bool):
+    def g(): ...
+    if condition:
+        x = g
+    else:
+        x = NotImplemented
+    x()  # E: `NotImplemented` is not callable. Did you mean `NotImplementedError`?
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/2914
+testcase!(
+    test_non_callable_bool_attribute,
+    r#"
+class BadBool:
+    __bool__: int = 3
+
+assert BadBool()  # E: `__bool__` attribute of `BadBool` has type `int`, which is not callable
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/3060
+testcase!(
+    test_setdefault_then_index,
+    r#"
+def parse_groups(entries: list[tuple[str, str]]) -> None:
+    groups = {}
+    for group, host in entries:
+        groups.setdefault(group, {})
+        groups[group][host] = True
+"#,
+);
+
+testcase!(
+    test_call_instance_with_non_callable_dunder_call,
+    r#"
+class Uncallable:
+    __call__ = 42
+
+obj = Uncallable()
+obj()  # E: Expected a callable, got `Uncallable`
+"#,
+);
+
+// Verify **kwargs unpacking correctly suppresses missing-argument errors.
+testcase!(
+    test_kwargs_unpacking_provides_required_args,
+    r#"
+class Config:
+    def __init__(self, name: str, value: int) -> None: ...
+
+data = {"name": "test", "value": 42}
+Config(**data)
+
+def make(**kwargs) -> Config:
+    return Config(**kwargs)
+    "#,
+);
+
+// Verify object.__init__(self) is accepted when self is the only argument.
+testcase!(
+    test_object_init_explicit_self,
+    r#"
+class MyClass:
+    def __init__(self) -> None:
+        object.__init__(self)
+
+class MyClass2:
+    def __new__(cls) -> "MyClass2":
+        return object.__new__(cls)
+    "#,
+);
+
+// Verify explicit kwarg + **dict_mapping doesn't falsely report conflicts.
+testcase!(
+    test_explicit_kwarg_with_mapping_kwargs,
+    r#"
+class Config:
+    def __init__(self, name: str, value: int, **kwargs) -> None: ...
+
+extra = {"debug": True}
+Config(name="test", value=42, **extra)
+    "#,
+);
+
+testcase!(
+    test_bad_argument_type_none_hint,
+    r#"
+def takes_str(x: str) -> None: ...
+
+maybe: str | None = "hello"
+takes_str(maybe)  # E: Consider narrowing the value with an `is not None` check  # !E: changing the declared type
+
+takes_str(None)  # E:  # !E: `is not None` check  # !E: changing the declared type
+
+if maybe is not None:
+    takes_str(maybe)  # OK — narrowed
+    "#,
+);
+
+testcase!(
+    test_bad_assignment_none_hint,
+    r#"
+maybe: str | None = "hello"
+x: int | str = maybe  # E: Consider narrowing the value with an `is not None` check or changing the declared type to `int | str | None`
+    "#,
+);
+
+testcase!(
+    test_bad_return_none_hint,
+    r#"
+def foo(x: bool) -> str:
+    if x:
+        y = "hello"
+    else:
+        y = None
+    return y  # E: Consider narrowing the value with an `is not None` check or changing the declared type to `str | None`
+    "#,
+);
+
+testcase!(
+    test_implicit_return_no_none_hint,
+    r#"
+def f() -> str:  # E:  # !E: does not allow `None`
+    pass
+def g(x: str) -> str:  # E:  # !E: does not allow `None`
+    if x:
+        return x
+    "#,
+);
+
+testcase!(
+    test_bad_default_none_hint,
+    r#"
+def default() -> int | None: ...
+def f(x: int = default()):  # E: Consider changing the declared type to `int | None`  # !E: `is not None` check
+    pass
+    "#,
+);
+
+testcase!(
+    test_bare_none_hint,
+    r#"
+x: str = None  # E: Consider changing the declared type to `str | None`  # !E: `is not None` check
+    "#,
+);
+
+testcase!(
+    test_attribute_assignment_none_hint,
+    r#"
+class A:
+    def __init__(self):
+        self.x = 42
+
+def f(a: A, x: int | None):
+    a.x = x  # E: Consider narrowing the value with an `is not None` check  # !E: changing the declared type
+
+def g(a: A):
+    a.x = None  # E:  # !E: `is not None` check  # !E: changing the declared type
+    "#,
+);
+
+testcase!(
+    test_return_hint_not_used_if_detrimental,
+    r#"
+from collections.abc import Callable
+from typing import reveal_type
+
+def first[T](items: list[T], matcher: Callable[[T], bool]) -> T | None: ...
+def foo(items: list[int]) -> int | None:
+    return first(items, lambda i: reveal_type(i) == 3)  # E: revealed type: int
+    "#,
+);
+
+testcase!(
+    test_uses_return_hint_even_if_some_arg_error,
+    r#"
+from collections.abc import Iterable
+from typing import Any
+
+def collect[T](xs: Iterable[T], unrelated: Any) -> list[T]: ...
+
+def f() -> list[object]:
+    return collect(["x"], 1 + "oops")  # E: `+` is not supported between `Literal[1]` and `Literal['oops']`
+    "#,
+);
+
+testcase!(
+    test_unknown_argument_type,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(untyped(1))  # E: The type of this argument is unknown
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_known_no_error,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def f(n: int) -> None: ...
+
+f(1)
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_disabled_no_error,
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(untyped(1))
+f(n=untyped(1))
+f(*untyped(1))
+f(**untyped(1))
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_keyword,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(n=untyped(1))  # E: The type of this argument is unknown
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_overload_no_duplicate,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+from typing import overload
+
+def untyped(x):
+    return x
+
+@overload
+def f(n: int) -> int: ...
+@overload
+def f(n: str) -> str: ...
+def f(n: int | str) -> int | str:
+    return n
+
+f(untyped(1))  # E: The type of this argument is unknown
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_suppressed_by_implicit_any,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(untyped(1))  # pyrefly: ignore[implicit-any]
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_args_unpack,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(*untyped(1))  # E: The type of this argument is unknown
+"#,
+);
+
+testcase!(
+    test_unknown_argument_type_kwargs_unpack,
+    TestEnv::new().enable_unknown_argument_type_error(),
+    r#"
+def untyped(x):
+    return x
+
+def f(n: int) -> None: ...
+
+f(**untyped(1))  # E: The type of this argument is unknown
+"#,
 );

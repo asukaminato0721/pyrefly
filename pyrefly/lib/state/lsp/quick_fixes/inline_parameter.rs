@@ -8,6 +8,7 @@
 use dupe::Dupe;
 use lsp_types::CodeActionKind;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
@@ -16,12 +17,14 @@ use ruff_python_ast::ModModule;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
+use vec1::Vec1;
 
 use super::types::LocalRefactorCodeAction;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::Transaction;
 use crate::state::lsp::quick_fixes::extract_shared::NameRefCollector;
 use crate::state::lsp::quick_fixes::extract_shared::find_enclosing_function;
+use crate::state::lsp::quick_fixes::extract_shared::find_local_definition;
 
 pub(crate) fn inline_parameter_code_actions(
     transaction: &Transaction<'_>,
@@ -31,10 +34,8 @@ pub(crate) fn inline_parameter_code_actions(
     let position = selection.start();
     let module_info = transaction.get_module_info(handle)?;
     let ast = transaction.get_ast(handle)?;
-    let defs = transaction.find_definition(handle, position, FindPreference::default());
-    let def = defs.into_iter().find(|def| {
-        def.module.path() == module_info.path()
-            && matches!(def.metadata.symbol_kind(), Some(SymbolKind::Parameter))
+    let def = find_local_definition(transaction, handle, position, &module_info, |k| {
+        matches!(k, Some(SymbolKind::Parameter))
     })?;
     let function_def = find_enclosing_function(ast.as_ref(), def.definition_range)?;
     if !function_def.decorator_list.is_empty() {
@@ -79,7 +80,6 @@ pub(crate) fn inline_parameter_code_actions(
         .arguments
         .find_argument_value(param_name, param_index)?;
     let arg_text = module_info.code_at(arg_expr.range());
-    let replacement = format!("({arg_text})");
     let mut edits = Vec::new();
     let mut collector = NameRefCollector::new(param_name.to_owned());
     collector.visit_stmts(&function_def.body);
@@ -87,7 +87,13 @@ pub(crate) fn inline_parameter_code_actions(
         return None;
     }
     for range in collector.load_refs {
-        edits.push((module_info.dupe(), range, replacement.clone()));
+        let parent = Ast::parent_node(ast.as_ref(), range);
+        let replacement = if Ast::needs_brackets(parent, arg_expr) {
+            format!("({arg_text})")
+        } else {
+            arg_text.to_owned()
+        };
+        edits.push((module_info.dupe(), range, replacement));
     }
     let param_remove_range = expand_range_to_remove_item(module_info.contents(), param.range());
     edits.push((module_info.dupe(), param_remove_range, String::new()));
@@ -116,8 +122,10 @@ fn collect_calls_to_definition(
         if let Expr::Call(call) = expr
             && let Expr::Name(name) = call.func.as_ref()
         {
-            let defs =
-                transaction.find_definition(handle, name.range.start(), FindPreference::default());
+            let defs = transaction
+                .find_definition(handle, name.range.start(), FindPreference::default())
+                .map(Vec1::into_vec)
+                .unwrap_or_default();
             if defs.iter().any(|def| {
                 def.module.path() == module_info.path() && def.definition_range == definition_range
             }) {

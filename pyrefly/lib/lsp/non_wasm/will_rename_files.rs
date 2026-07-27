@@ -10,11 +10,11 @@ use std::sync::Arc;
 
 use lsp_types::DocumentChangeOperation;
 use lsp_types::DocumentChanges;
-use lsp_types::OneOf;
 use lsp_types::OptionalVersionedTextDocumentIdentifier;
 use lsp_types::RenameFilesParams;
 use lsp_types::TextDocumentEdit;
 use lsp_types::TextEdit;
+use lsp_types::TextEditOrAnnotatedOrSnippet;
 use lsp_types::Url;
 use lsp_types::WorkspaceEdit;
 use pyrefly_python::PYTHON_EXTENSIONS;
@@ -28,6 +28,7 @@ use ruff_python_ast::Stmt;
 use ruff_text_size::Ranged;
 use tracing::info;
 
+use crate::lsp::non_wasm::module_helpers::PathRemapper;
 use crate::lsp::non_wasm::module_helpers::handle_from_module_path;
 use crate::lsp::non_wasm::module_helpers::module_info_to_uri;
 use crate::state::load::LspFile;
@@ -135,6 +136,7 @@ pub fn will_rename_files(
     _open_files: &RwLock<HashMap<std::path::PathBuf, Arc<LspFile>>>,
     params: RenameFilesParams,
     supports_document_changes: bool,
+    path_remapper: Option<&PathRemapper>,
 ) -> Option<WorkspaceEdit> {
     info!(
         "will_rename_files called with {} file(s)",
@@ -209,6 +211,7 @@ pub fn will_rename_files(
                     .for_directory(new_path.parent())
                     .iter(),
             ),
+            &config.extra_file_extensions,
         );
 
         let new_module_name = match new_module_name {
@@ -265,7 +268,7 @@ pub fn will_rename_files(
                 let edits_for_file = visitor.take_edits();
 
                 if !edits_for_file.is_empty() {
-                    let uri = module_info_to_uri(&module_info)?;
+                    let uri = module_info_to_uri(&module_info, path_remapper)?;
                     info!(
                         "    Found {} import(s) to update in {}",
                         edits_for_file.len(),
@@ -307,7 +310,10 @@ pub fn will_rename_files(
                             uri,
                             version: None, // None means "any version"
                         },
-                        edits: edits.into_iter().map(OneOf::Left).collect(),
+                        edits: edits
+                            .into_iter()
+                            .map(TextEditOrAnnotatedOrSnippet::TextEdit)
+                            .collect(),
                     })
                 })
                 .collect();

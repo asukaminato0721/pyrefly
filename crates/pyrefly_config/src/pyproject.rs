@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Context as _;
@@ -14,17 +15,23 @@ use serde::Serialize;
 
 use crate::config::ConfigFile;
 
+/// Known Python tool names whose presence in `[tool.*]` indicates
+/// this directory is a Python project root.
+const PYTHON_TOOL_NAMES: &[&str] = &["ruff", "mypy", "pyright"];
+
 /// Wrapper used to (de)serialize pyrefly configs from pyproject.toml files.
 #[derive(Debug, Serialize, Deserialize)]
 struct Tool {
-    #[serde(default)]
     pyrefly: Option<ConfigFile>,
+    /// Catch-all for other `[tool.*]` sections. We check this for known
+    /// Python tool names (see `PYTHON_TOOL_NAMES`) to detect Python project roots.
+    #[serde(flatten)]
+    other_tools: HashMap<String, toml::Value>,
 }
 
 /// Wrapper used to (de)serialize pyrefly configs from pyproject.toml files.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PyProject {
-    #[serde(default)]
     tool: Option<Tool>,
 }
 
@@ -46,12 +53,26 @@ impl PyProject {
     /// Wrap the given ConfigFile in a `PyProject { Tool { ... }}`
     pub fn new(cfg: ConfigFile) -> Self {
         Self {
-            tool: Some(Tool { pyrefly: Some(cfg) }),
+            tool: Some(Tool {
+                pyrefly: Some(cfg),
+                other_tools: HashMap::new(),
+            }),
         }
     }
 
     pub(crate) fn pyrefly(self) -> Option<ConfigFile> {
         self.tool.and_then(|t| t.pyrefly)
+    }
+
+    /// Whether this pyproject.toml has sections for Python tools like ruff,
+    /// mypy, or pyright. This is a strong signal that the directory is a Python
+    /// project root, even without an explicit `[tool.pyrefly]` section.
+    pub(crate) fn has_python_tools(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| {
+            PYTHON_TOOL_NAMES
+                .iter()
+                .any(|name| t.other_tools.contains_key(*name))
+        })
     }
 
     pub fn update(pyproject_path: &Path, config: ConfigFile) -> anyhow::Result<()> {
@@ -95,7 +116,7 @@ impl PyProject {
                         && let Some(pyrefly_table_mut) = pyrefly_item.as_table_mut()
                     {
                         pyrefly_table_mut.decor_mut().set_prefix("\n");
-                        pyrefly_table_mut.set_position(max_tool_pos + 1);
+                        pyrefly_table_mut.set_position(Some(max_tool_pos + 1));
                     }
                 }
             }

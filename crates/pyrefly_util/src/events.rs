@@ -9,8 +9,9 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
-use lsp_types::FileChangeType;
 use notify::EventKind;
+
+use crate::stdlib::is_python_stdlib_file;
 
 #[derive(Debug, Clone, Default)]
 pub struct CategorizedEvents {
@@ -39,6 +40,7 @@ impl CategorizedEvents {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_lsp(events: Vec<lsp_types::FileEvent>) -> CategorizedEvents {
+        use lsp_types::FileChangeType;
         let mut res = CategorizedEvents::default();
         for event in events {
             if let Ok(path) = event.uri.to_file_path()
@@ -53,6 +55,14 @@ impl CategorizedEvents {
             }
         }
         res
+    }
+
+    /// Merge another set of categorized events into this one.
+    pub fn extend(&mut self, other: CategorizedEvents) {
+        self.created.extend(other.created);
+        self.modified.extend(other.modified);
+        self.removed.extend(other.removed);
+        self.unknown.extend(other.unknown);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -73,5 +83,6 @@ impl CategorizedEvents {
     pub fn should_ignore(path: &Path) -> bool {
         path.components()
             .any(|c| matches!(c, Component::Normal(name) if name == "__pycache__"))
+            || is_python_stdlib_file(path)
     }
 }

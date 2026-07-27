@@ -31,6 +31,10 @@ impl<T> Mutex<T> {
         self.0.try_lock().ok()
     }
 
+    pub fn get_mut(&mut self) -> &mut T {
+        self.0.get_mut().unwrap()
+    }
+
     pub fn into_inner(self) -> T {
         self.0.into_inner().unwrap()
     }
@@ -71,6 +75,10 @@ impl Condvar {
 
     pub fn notify_all(&self) {
         self.0.notify_all();
+    }
+
+    pub fn wait<'a, T>(&self, guard: sync::MutexGuard<'a, T>) -> sync::MutexGuard<'a, T> {
+        self.0.wait(guard).unwrap()
     }
 
     pub fn wait_while<'a, T, F>(
