@@ -142,6 +142,14 @@ fn is_int_class_type(cls: &ClassType) -> bool {
     cls.has_qname("shape_extensions", "Int")
 }
 
+fn is_cython_integral_type(cls: &ClassType) -> bool {
+    cls.has_qname("cython", "c_bint") || cls.has_qname("cython", "c_int")
+}
+
+fn is_cython_floating_type(cls: &ClassType) -> bool {
+    cls.has_qname("cython", "c_float") || cls.has_qname("cython", "c_double")
+}
+
 /// Check if a param list has both `*args: Any` and `**kwargs: Any`
 fn has_any_args_and_kwargs(args: &[Param]) -> bool {
     let has_vararg_any = args
@@ -2262,6 +2270,30 @@ impl<'a, Ans: LookupAnswer> Subset<'a, Ans> {
             }
             (Type::ClassType(ty), _) | (_, Type::ClassType(ty))
                 if self.type_order.extends_any(ty.class_object()) =>
+            {
+                Ok(())
+            }
+            // Cython performs a checked runtime conversion when a Python number
+            // crosses into a C scalar slot. Model that boundary explicitly while
+            // keeping the C scalar classes distinct in the rest of the type graph.
+            (Type::ClassType(got), Type::ClassType(want))
+                if is_cython_integral_type(want)
+                    && self.type_order.has_superclass(
+                        got.class_object(),
+                        self.type_order.stdlib().int().class_object(),
+                    ) =>
+            {
+                Ok(())
+            }
+            (Type::ClassType(got), Type::ClassType(want))
+                if is_cython_floating_type(want)
+                    && (self.type_order.has_superclass(
+                        got.class_object(),
+                        self.type_order.stdlib().int().class_object(),
+                    ) || self.type_order.has_superclass(
+                        got.class_object(),
+                        self.type_order.stdlib().float().class_object(),
+                    )) =>
             {
                 Ok(())
             }

@@ -472,7 +472,7 @@ impl TestEnv {
                 || path.ends_with(".pyx")
                 || path.ends_with(".pxd")
                 || path.ends_with(".pxi")
-                || path.ends_with(".rs"),
+                || path.ends_with(".rs")
                 || has_extra_ext,
             "{path} doesn't look like a reasonable path"
         );

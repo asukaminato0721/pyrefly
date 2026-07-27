@@ -211,7 +211,7 @@ f.b
     let completion_items = |position| {
         state
             .transaction()
-            .completion(&handle, position, ImportFormat::Absolute, true)
+            .completion(&handle, position, ImportFormat::Absolute, true, None)
     };
     let fields_for = |position| {
         completion_items(position)
@@ -254,7 +254,7 @@ fn cython_keyword_completion() {
     assert_eq!(1, positions.len());
     let labels = state
         .transaction()
-        .completion(&handle, positions[0], ImportFormat::Absolute, true)
+        .completion(&handle, positions[0], ImportFormat::Absolute, true, None)
         .into_iter()
         .filter(|item| item.kind == Some(CompletionItemKind::KEYWORD))
         .map(|item| item.label)

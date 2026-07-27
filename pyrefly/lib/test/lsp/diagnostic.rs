@@ -95,7 +95,7 @@ cdef struct Point
         .transaction()
         .get_errors(&[handle])
         .collect_errors()
-        .shown;
+        .ordinary;
     assert!(
         errors
             .iter()
@@ -107,6 +107,111 @@ cdef struct Point
             .iter()
             .any(|error| error.msg_header() == "Cython parse error"),
         "expected Cython parse error message, got: {errors:?}"
+    );
+}
+
+#[test]
+fn test_cython_uses_shared_type_checker() {
+    let code = r#"
+cdef int count = "not an int"
+
+cdef int add(int x):
+    return x + "not an int"
+
+cdef class Box:
+    cdef int value
+
+    def set_value(self, value: str) -> None:
+        self.value = value
+"#;
+    let mut env = TestEnv::new();
+    env.add_with_path("main", "main.pyx", code);
+    let (state, handle) = env.to_state();
+    let errors = state
+        .transaction()
+        .get_errors(&[handle("main")])
+        .collect_errors()
+        .ordinary;
+    assert!(
+        errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::BadAssignment)
+            .count()
+            >= 2,
+        "expected Cython declaration and extension-field assignment errors, got: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.error_kind() == ErrorKind::UnsupportedOperation),
+        "expected a Cython function body type error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn test_cython_shadow_type_mvp() {
+    let code = r#"
+DEF USE_C_TYPES = True
+
+IF USE_C_TYPES:
+    cdef int selected = 1
+ELSE:
+    cdef int selected = "inactive branch"
+
+ctypedef fused number:
+    int
+    double
+
+cdef number identity(number value):
+    return value
+
+cdef void update_pointer(int* pointer):
+    pointer[0] = "not an int"
+
+cdef void update_view(int[:] view):
+    view[0] = "not an int"
+
+cdef void gil_erasure(int value) noexcept nogil:
+    with gil:
+        value += 1
+
+cdef int integer = identity(1)
+cdef double floating = identity(1.5)
+identity("not numeric")
+"#;
+    let mut env = TestEnv::new();
+    env.add_with_path("main", "main.pyx", code);
+    let (state, handle) = env.to_state();
+    let errors = state
+        .transaction()
+        .get_errors(&[handle("main")])
+        .collect_errors()
+        .ordinary;
+    assert!(
+        !errors.iter().any(|error| {
+            error.error_kind() == ErrorKind::BadAssignment
+                && error.msg_header().contains("inactive branch")
+        }),
+        "compile-time inactive branch should be pruned, got: {errors:?}"
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| error.error_kind() == ErrorKind::UnsupportedOperation)
+            .count(),
+        2,
+        "pointer and memoryview writes should preserve their element types: {errors:?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.error_kind() == ErrorKind::BadSpecialization),
+        "fused type constraints should reject strings: {errors:?}"
+    );
+    assert_eq!(
+        errors.len(),
+        3,
+        "the MVP should not add diagnostics for valid Cython constructs: {errors:?}"
     );
 }
 

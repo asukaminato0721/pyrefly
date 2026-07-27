@@ -23,13 +23,34 @@ pub fn module_parse(
     keep_tokens: bool,
 ) -> (ModModule, Option<Tokens>) {
     if cython::is_cython_module(module_info) {
-        for range in cython::syntax_error_ranges(contents) {
+        let syntax_error_ranges = cython::syntax_error_ranges(contents);
+        for range in &syntax_error_ranges {
             errors
-                .error_builder(range, ErrorKind::ParseError, "Cython parse error".to_owned())
+                .error_builder(
+                    *range,
+                    ErrorKind::ParseError,
+                    "Cython parse error".to_owned(),
+                )
                 .emit();
         }
-        let empty = Ast::parse_with_version("", version, module_info.source_type()).0;
-        return (empty, None);
+        if !syntax_error_ranges.is_empty() {
+            let empty = Ast::parse_with_version("", version, module_info.source_type())
+                .0
+                .into_syntax();
+            return (empty, None);
+        }
+        let lowered = cython::lower_to_python(contents);
+        let mut module =
+            Ast::parse_with_version(&lowered.source, version, module_info.source_type())
+                .0
+                .into_syntax();
+        let mut prelude =
+            Ast::parse_with_version(&lowered.prelude, version, module_info.source_type())
+                .0
+                .into_syntax();
+        prelude.body.append(&mut module.body);
+        module.body = prelude.body;
+        return (module, None);
     }
 
     let (parsed, parse_errors, unsupported_syntax_errors) =

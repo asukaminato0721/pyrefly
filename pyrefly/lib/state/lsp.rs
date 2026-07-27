@@ -4149,6 +4149,12 @@ impl<'a> Transaction<'a> {
     where
         F: FnMut(&CompletionItem) -> Option<usize>,
     {
+        if let Some(module) = self.get_module_info(handle)
+            && crate::cython::is_cython_module(&module)
+        {
+            return (crate::cython::completion_items(&module, position), false);
+        }
+
         // Check if position is in a disabled range (comments)
         if let Some(module) = self.get_module_info(handle) {
             let disabled_ranges = Self::comment_ranges_for_module(&module);
