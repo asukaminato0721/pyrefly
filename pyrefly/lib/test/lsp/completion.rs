@@ -3469,6 +3469,45 @@ needs_base(val)
 }
 
 #[test]
+fn completion_sorts_method_matching_local_context_first() {
+    let code = r#"
+class Special:
+    pass
+
+class A:
+    def alpha(self) -> None:
+        pass
+
+    def use_special(self, value: Special) -> None:
+        pass
+
+special = Special()
+a = A()
+a.
+# ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let position = extract_cursors_for_test(code)[0];
+    let txn = state.transaction();
+    let completions = txn.completion(handle, position, ImportFormat::Absolute, true, None);
+
+    let alpha_index = completions
+        .iter()
+        .position(|item| item.label == "alpha")
+        .expect("Expected completion for alpha");
+    let use_special_index = completions
+        .iter()
+        .position(|item| item.label == "use_special")
+        .expect("Expected completion for use_special");
+
+    assert!(
+        use_special_index < alpha_index,
+        "A method accepting a visible local value should sort first: {completions:?}"
+    );
+}
+
+#[test]
 fn bound_method_completions_include_descriptor_attributes() {
     // Make sure completions work for bound methods from custom descriptors.
     // See: https://github.com/facebook/pyrefly/issues/821

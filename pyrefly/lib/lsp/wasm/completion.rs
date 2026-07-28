@@ -54,6 +54,7 @@ use crate::state::lsp::ImportFormat;
 use crate::state::lsp::MIN_CHARACTERS_TYPED_AUTOIMPORT;
 use crate::state::state::Transaction;
 use crate::types::callable::Param;
+use crate::types::callable::Params;
 use crate::types::types::Type;
 
 /// Classification of a completion item's source, used for ranking.
@@ -74,22 +75,22 @@ enum CompletionSource {
 pub(crate) struct RankedCompletion {
     item: CompletionItem,
     source: CompletionSource,
-    is_incompatible: bool,
+    is_deprioritized: bool,
 }
 
 impl RankedCompletion {
-    /// Wraps a `CompletionItem` with default (local, compatible) ranking metadata.
+    /// Wraps a `CompletionItem` with default local ranking metadata.
     pub(crate) fn new(item: CompletionItem) -> Self {
         Self {
             item,
             source: CompletionSource::Local,
-            is_incompatible: false,
+            is_deprioritized: false,
         }
     }
 }
 
 /// All completion ranking logic lives here. Assigns `sort_text` to each item
-/// based on its source classification, name prefix, compatibility, and MRU rank.
+/// based on its source classification, name prefix, type relevance, and MRU rank.
 ///
 /// `mru_rank` uses two levels of `Option`:
 /// - `None` means the MRU system is not active (e.g. wasm path). sort_text uses
@@ -122,7 +123,7 @@ fn assign_sort_text(ranked: &mut RankedCompletion, mru_rank: Option<Option<usize
                 }
             }
         };
-        if ranked.is_incompatible {
+        if ranked.is_deprioritized {
             format!("{base}z")
         } else {
             base.to_owned()
@@ -214,7 +215,7 @@ impl Transaction<'_> {
                 ..Default::default()
             },
             source: autoimport_source(module_name_str),
-            is_incompatible: false,
+            is_deprioritized: false,
         });
         Some(module_name)
     }
@@ -581,7 +582,7 @@ impl Transaction<'_> {
                         ..Default::default()
                     },
                     source: CompletionSource::Local,
-                    is_incompatible,
+                    is_deprioritized: is_incompatible,
                 })
             }
         }
@@ -702,7 +703,7 @@ impl Transaction<'_> {
                         ..Default::default()
                     },
                     source: autoimport_source(&imported_module),
-                    is_incompatible: false,
+                    is_deprioritized: false,
                 });
             }
 
@@ -741,7 +742,7 @@ impl Transaction<'_> {
                             ..Default::default()
                         },
                         source,
-                        is_incompatible: false,
+                        is_deprioritized: false,
                     });
                 }
                 if let Some(module_handle) = self.import_handle(handle, module_name, None).finding()
@@ -773,7 +774,7 @@ impl Transaction<'_> {
                             ..Default::default()
                         },
                         source,
-                        is_incompatible: false,
+                        is_deprioritized: false,
                     });
                 }
             }
@@ -949,54 +950,109 @@ impl Transaction<'_> {
         handle: &Handle,
         base_type: Type,
         expected_type: Option<&Type>,
+        context_types: Option<&SmallSet<Type>>,
         completions: &mut Vec<RankedCompletion>,
     ) {
         self.ad_hoc_solve(handle, "completion_attributes", |solver| {
-            solver
-                .completions(base_type, None, true)
-                .iter()
-                .for_each(|attr| {
-                    let kind = match attr.ty {
-                        Some(Type::BoundMethod(_)) => Some(CompletionItemKind::METHOD),
-                        Some(Type::Function(_) | Type::Overload(_)) => {
-                            Some(CompletionItemKind::FUNCTION)
-                        }
-                        Some(Type::Module(_)) => Some(CompletionItemKind::MODULE),
-                        Some(Type::ClassDef(_)) => Some(CompletionItemKind::CLASS),
-                        _ => Some(CompletionItemKind::FIELD),
+            let matches_context = |ty: &Type| {
+                let Some(context_types) = context_types else {
+                    return false;
+                };
+                if context_types.is_empty() {
+                    return false;
+                }
+                let skip_first = matches!(ty, Type::BoundMethod(_));
+                let mut matches_context = false;
+                ty.visit_toplevel_callable(|callable| {
+                    if matches_context {
+                        return;
+                    }
+                    let params = match &callable.params {
+                        Params::List(params) | Params::Partial(params) => params.items(),
+                        _ => return,
                     };
-                    let detail = attr
-                        .ty
-                        .clone()
-                        .map(|t| t.as_lsp_string(LspDisplayMode::Hover));
-                    let documentation = self.get_docstring_for_attribute(handle, attr);
-                    let is_incompatible = self.is_incompatible_with_expected_type(
-                        handle,
-                        expected_type,
-                        attr.ty.as_ref(),
-                    );
-                    let source = if attr.is_reexport {
-                        CompletionSource::Reexport
+                    let params = if skip_first {
+                        params
+                            .get(1..)
+                            .expect("bound methods must have a self or cls parameter")
                     } else {
-                        CompletionSource::Local
+                        params
                     };
-                    completions.push(RankedCompletion {
-                        item: CompletionItem {
-                            label: attr.name.as_str().to_owned(),
-                            detail,
-                            kind,
-                            documentation,
-                            tags: if attr.is_deprecated {
-                                Some(vec![CompletionItemTag::DEPRECATED])
+                    let mut has_typed_required_param = false;
+                    let all_required_params_match = params
+                        .iter()
+                        .filter(|param| param.is_required())
+                        .all(|param| {
+                            let param_type = param.as_type();
+                            if param_type.is_any() {
+                                true
                             } else {
-                                None
-                            },
-                            ..Default::default()
-                        },
-                        source,
-                        is_incompatible,
-                    });
+                                has_typed_required_param = true;
+                                context_types.contains(param_type)
+                                    || context_types.iter().any(|context_type| {
+                                        solver.is_subset_eq(context_type, param_type)
+                                    })
+                            }
+                        });
+                    matches_context = has_typed_required_param && all_required_params_match;
                 });
+                matches_context
+            };
+
+            let completion_start = completions.len();
+            let mut context_matches = Vec::new();
+            for attr in solver.completions(base_type, None, true).iter() {
+                context_matches.push(attr.ty.as_ref().is_some_and(&matches_context));
+
+                let kind = match attr.ty {
+                    Some(Type::BoundMethod(_)) => Some(CompletionItemKind::METHOD),
+                    Some(Type::Function(_) | Type::Overload(_)) => {
+                        Some(CompletionItemKind::FUNCTION)
+                    }
+                    Some(Type::Module(_)) => Some(CompletionItemKind::MODULE),
+                    Some(Type::ClassDef(_)) => Some(CompletionItemKind::CLASS),
+                    _ => Some(CompletionItemKind::FIELD),
+                };
+                let detail = attr
+                    .ty
+                    .clone()
+                    .map(|t| t.as_lsp_string(LspDisplayMode::Hover));
+                let documentation = self.get_docstring_for_attribute(handle, attr);
+                let is_incompatible = self.is_incompatible_with_expected_type(
+                    handle,
+                    expected_type,
+                    attr.ty.as_ref(),
+                );
+                let source = if attr.is_reexport {
+                    CompletionSource::Reexport
+                } else {
+                    CompletionSource::Local
+                };
+                completions.push(RankedCompletion {
+                    item: CompletionItem {
+                        label: attr.name.as_str().to_owned(),
+                        detail,
+                        kind,
+                        documentation,
+                        tags: if attr.is_deprecated {
+                            Some(vec![CompletionItemTag::DEPRECATED])
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    },
+                    source,
+                    is_deprioritized: is_incompatible,
+                });
+            }
+            if context_matches.iter().any(|matches| *matches) {
+                for (completion, matches_context) in completions[completion_start..]
+                    .iter_mut()
+                    .zip(context_matches)
+                {
+                    completion.is_deprioritized |= !matches_context;
+                }
+            }
         });
     }
 
@@ -1117,6 +1173,17 @@ impl Transaction<'_> {
                 context: IdentifierContext::Attribute { base_range, .. },
             }) => {
                 let expected_type = self.get_expected_type_at(handle, position);
+                let mut context_types = SmallSet::new();
+                if let Some(bindings) = self.get_bindings(handle) {
+                    for idx in bindings.available_definitions(position) {
+                        if let Some(ty) = self.get_type(handle, bindings.idx_to_key(idx))
+                            && !ty.is_any()
+                            && !ty.is_never()
+                        {
+                            context_types.insert(ty);
+                        }
+                    }
+                }
                 allow_function_call_parens = true;
                 if let Some(answers) = self.get_answers(handle)
                     && let Some(base_type) = answers.get_type_trace(base_range)
@@ -1125,6 +1192,7 @@ impl Transaction<'_> {
                         handle,
                         base_type,
                         expected_type.as_ref(),
+                        Some(&context_types),
                         &mut result,
                     );
                 }
@@ -1174,6 +1242,7 @@ impl Transaction<'_> {
                             self.add_attribute_completions_for_type(
                                 handle,
                                 class_type,
+                                None,
                                 None,
                                 &mut result,
                             );
