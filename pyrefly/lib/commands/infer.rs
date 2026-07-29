@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -18,9 +19,19 @@ use pyrefly_util::forgetter::Forgetter;
 use pyrefly_util::fs_anyhow;
 use pyrefly_util::includes::Includes;
 use pyrefly_util::thread_pool::ThreadCount;
+use pyrefly_util::visit::Visit;
+use ruff_python_ast::CmpOp;
+use ruff_python_ast::Expr;
+use ruff_python_ast::ExprContext;
+use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
+use ruff_python_ast::UnaryOp;
 use ruff_python_ast::helpers::is_docstring_stmt;
+use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::visitor::walk_expr;
+use ruff_python_ast::visitor::walk_stmt;
 use ruff_text_size::Ranged;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::commands::check::Handles;
@@ -76,6 +87,15 @@ pub struct InferFlags {
         num_args = 0..=1
     )]
     pub parameter_types: Option<bool>,
+    /// Whether to replace existing parameter annotations with narrower literal
+    /// types or broader collection protocols when the function body supports it
+    #[arg(
+        long,
+        default_missing_value = "true",
+        require_equals = true,
+        num_args = 0..=1
+    )]
+    pub improve_existing: Option<bool>,
     /// Whether to automatically add imports for types used in annotations
     #[arg(
         long,
@@ -95,6 +115,7 @@ impl InferFlags {
             containers: Some(false),
             return_types: Some(true),
             parameter_types: Some(true),
+            improve_existing: Some(false),
             imports: Some(true),
             dry_run: false,
         }
@@ -110,6 +131,10 @@ impl InferFlags {
 
     pub fn parameter_types(&self) -> bool {
         self.parameter_types.unwrap_or(true)
+    }
+
+    pub fn improve_existing(&self) -> bool {
+        self.improve_existing.unwrap_or(false)
     }
 
     pub fn imports(&self) -> bool {
@@ -255,12 +280,341 @@ fn format_hints(
 }
 
 // Sort the hints by reverse order so we don't have to recalculate positions
-fn sort_inlay_hints(
-    inlay_hints: Vec<(ruff_text_size::TextSize, String)>,
-) -> Vec<(ruff_text_size::TextSize, String)> {
-    let mut sorted_inlay_hints = inlay_hints;
-    sorted_inlay_hints.sort_by(|(a, _), (b, _)| b.cmp(a));
-    sorted_inlay_hints
+fn sort_text_edits(mut edits: Vec<(TextRange, String)>) -> Vec<(TextRange, String)> {
+    edits.sort_by_key(|(range, _)| Reverse(range.start()));
+    edits
+}
+
+fn matching_name_range(expr: &Expr, name: &str) -> Option<TextRange> {
+    match expr {
+        Expr::Name(expr_name)
+            if expr_name.ctx == ExprContext::Load && expr_name.id.as_str() == name =>
+        {
+            Some(expr_name.range)
+        }
+        _ => None,
+    }
+}
+
+fn string_literal(expr: &Expr) -> Option<(String, TextRange)> {
+    match expr {
+        Expr::StringLiteral(literal) => Some((literal.value.to_str().to_owned(), literal.range)),
+        _ => None,
+    }
+}
+
+fn string_literal_collection(expr: &Expr) -> Option<Vec<(String, TextRange)>> {
+    match expr {
+        Expr::List(list) => list
+            .elts
+            .iter()
+            .map(string_literal)
+            .collect::<Option<Vec<_>>>(),
+        Expr::Set(set) => set
+            .elts
+            .iter()
+            .map(string_literal)
+            .collect::<Option<Vec<_>>>(),
+        Expr::Tuple(tuple) => tuple
+            .elts
+            .iter()
+            .map(string_literal)
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    }
+}
+
+struct LiteralUseVisitor<'a> {
+    parameter: &'a str,
+    literals: Vec<(String, TextRange)>,
+}
+
+impl<'a> Visitor<'a> for LiteralUseVisitor<'_> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            return;
+        }
+        walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if let Expr::Compare(compare) = expr
+            && compare.ops.len() == 1
+            && compare.comparators.len() == 1
+        {
+            let right = &compare.comparators[0];
+            match compare.ops[0] {
+                CmpOp::Eq | CmpOp::NotEq => {
+                    if matching_name_range(&compare.left, self.parameter).is_some()
+                        && let Some(literal) = string_literal(right)
+                    {
+                        self.literals.push(literal);
+                    } else if matching_name_range(right, self.parameter).is_some()
+                        && let Some(literal) = string_literal(&compare.left)
+                    {
+                        self.literals.push(literal);
+                    }
+                }
+                CmpOp::In | CmpOp::NotIn
+                    if matching_name_range(&compare.left, self.parameter).is_some() =>
+                {
+                    if let Some(literals) = string_literal_collection(right) {
+                        self.literals.extend(literals);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Expr::Lambda(lambda) = expr
+            && lambda
+                .parameters
+                .as_ref()
+                .is_some_and(|parameters| parameters.includes(self.parameter))
+        {
+            return;
+        }
+        walk_expr(self, expr);
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CollectionRequirement {
+    #[default]
+    Iterable,
+    Sequence,
+}
+
+struct CollectionUseVisitor<'a> {
+    parameter: &'a str,
+    uses: HashSet<TextRange>,
+    supported_uses: HashSet<TextRange>,
+    requirement: CollectionRequirement,
+}
+
+impl CollectionUseVisitor<'_> {
+    fn support(&mut self, expr: &Expr, requirement: CollectionRequirement) {
+        if let Some(range) = matching_name_range(expr, self.parameter) {
+            self.supported_uses.insert(range);
+            if requirement == CollectionRequirement::Sequence {
+                self.requirement = CollectionRequirement::Sequence;
+            }
+        }
+    }
+}
+
+impl<'a> Visitor<'a> for CollectionUseVisitor<'_> {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            return;
+        }
+        match stmt {
+            Stmt::For(for_stmt) => {
+                self.support(&for_stmt.iter, CollectionRequirement::Iterable);
+            }
+            Stmt::If(if_stmt) => {
+                self.support(&if_stmt.test, CollectionRequirement::Sequence);
+            }
+            Stmt::While(while_stmt) => {
+                self.support(&while_stmt.test, CollectionRequirement::Sequence);
+            }
+            Stmt::Assert(assert_stmt) => {
+                self.support(&assert_stmt.test, CollectionRequirement::Sequence);
+            }
+            _ => {}
+        }
+        walk_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if let Expr::Name(expr_name) = expr
+            && expr_name.ctx == ExprContext::Load
+            && expr_name.id.as_str() == self.parameter
+        {
+            self.uses.insert(expr_name.range);
+        }
+        match expr {
+            Expr::Attribute(attribute) if matches!(attribute.attr.as_str(), "count" | "index") => {
+                self.support(&attribute.value, CollectionRequirement::Sequence);
+            }
+            Expr::Subscript(subscript) => {
+                self.support(&subscript.value, CollectionRequirement::Sequence);
+            }
+            Expr::Starred(starred) => {
+                self.support(&starred.value, CollectionRequirement::Iterable);
+            }
+            Expr::YieldFrom(yield_from) => {
+                self.support(&yield_from.value, CollectionRequirement::Iterable);
+            }
+            Expr::If(if_expr) => {
+                self.support(&if_expr.test, CollectionRequirement::Sequence);
+            }
+            Expr::BoolOp(bool_op) => {
+                for value in &bool_op.values {
+                    self.support(value, CollectionRequirement::Sequence);
+                }
+            }
+            Expr::UnaryOp(unary_op) if unary_op.op == UnaryOp::Not => {
+                self.support(&unary_op.operand, CollectionRequirement::Sequence);
+            }
+            Expr::Compare(compare) if compare.ops.len() == 1 && compare.comparators.len() == 1 => {
+                if matches!(compare.ops[0], CmpOp::In | CmpOp::NotIn) {
+                    self.support(&compare.comparators[0], CollectionRequirement::Iterable);
+                }
+            }
+            Expr::Call(call) => {
+                if let Expr::Name(function) = &*call.func {
+                    let function = function.id.as_str();
+                    let single_argument_requirement = match function {
+                        "len" | "reversed" => Some(CollectionRequirement::Sequence),
+                        "all" | "any" | "enumerate" | "frozenset" | "iter" | "list" | "max"
+                        | "min" | "set" | "sorted" | "sum" | "tuple" => {
+                            Some(CollectionRequirement::Iterable)
+                        }
+                        _ => None,
+                    };
+                    if let Some(requirement) = single_argument_requirement
+                        && call.arguments.args.len() == 1
+                    {
+                        for argument in &call.arguments.args {
+                            self.support(argument, requirement);
+                        }
+                    } else if function == "zip" {
+                        for argument in &call.arguments.args {
+                            self.support(argument, CollectionRequirement::Iterable);
+                        }
+                    } else if matches!(function, "filter" | "map") {
+                        for argument in call.arguments.args.iter().skip(1) {
+                            self.support(argument, CollectionRequirement::Iterable);
+                        }
+                    }
+                }
+            }
+            Expr::ListComp(comprehension) => {
+                for generator in &comprehension.generators {
+                    self.support(&generator.iter, CollectionRequirement::Iterable);
+                }
+            }
+            Expr::SetComp(comprehension) => {
+                for generator in &comprehension.generators {
+                    self.support(&generator.iter, CollectionRequirement::Iterable);
+                }
+            }
+            Expr::DictComp(comprehension) => {
+                for generator in &comprehension.generators {
+                    self.support(&generator.iter, CollectionRequirement::Iterable);
+                }
+            }
+            Expr::Generator(comprehension) => {
+                for generator in &comprehension.generators {
+                    self.support(&generator.iter, CollectionRequirement::Iterable);
+                }
+            }
+            Expr::Lambda(lambda)
+                if lambda
+                    .parameters
+                    .as_ref()
+                    .is_some_and(|parameters| parameters.includes(self.parameter)) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        walk_expr(self, expr);
+    }
+}
+
+fn improved_parameter_annotations(
+    module: &ModModule,
+    source: &str,
+) -> (Vec<(TextRange, String)>, HashSet<(ModuleName, String)>) {
+    fn collect(
+        statements: &[Stmt],
+        source: &str,
+        edits: &mut Vec<(TextRange, String)>,
+        imports: &mut HashSet<(ModuleName, String)>,
+    ) {
+        for statement in statements {
+            if let Stmt::FunctionDef(function) = statement {
+                for parameter in function.parameters.iter_non_variadic_params() {
+                    let Some(annotation) = parameter.annotation() else {
+                        continue;
+                    };
+                    let Expr::Name(annotation_name) = annotation else {
+                        if let Expr::Subscript(annotation) = annotation
+                            && let Expr::Name(base) = &*annotation.value
+                            && base.id.as_str() == "list"
+                        {
+                            let mut visitor = CollectionUseVisitor {
+                                parameter: parameter.name().as_str(),
+                                uses: HashSet::new(),
+                                supported_uses: HashSet::new(),
+                                requirement: CollectionRequirement::default(),
+                            };
+                            for statement in &function.body {
+                                visitor.visit_stmt(statement);
+                            }
+                            if !visitor.uses.is_empty() && visitor.uses == visitor.supported_uses {
+                                let element_range = annotation.slice.range();
+                                let element = source
+                                    .get(
+                                        usize::from(element_range.start())
+                                            ..usize::from(element_range.end()),
+                                    )
+                                    .expect("annotation range must be within the source");
+                                let protocol = match visitor.requirement {
+                                    CollectionRequirement::Iterable => "Iterable",
+                                    CollectionRequirement::Sequence => "Sequence",
+                                };
+                                edits.push((annotation.range, format!("{protocol}[{element}]")));
+                                imports.insert((
+                                    ModuleName::from_str("collections.abc"),
+                                    protocol.to_owned(),
+                                ));
+                            }
+                        }
+                        continue;
+                    };
+                    if annotation_name.id.as_str() != "str" {
+                        continue;
+                    }
+                    let mut visitor = LiteralUseVisitor {
+                        parameter: parameter.name().as_str(),
+                        literals: Vec::new(),
+                    };
+                    for statement in &function.body {
+                        visitor.visit_stmt(statement);
+                    }
+                    let mut seen = HashSet::new();
+                    visitor
+                        .literals
+                        .retain(|(literal, _)| seen.insert(literal.clone()));
+                    if visitor.literals.len() < 2 {
+                        continue;
+                    }
+                    let literals = visitor
+                        .literals
+                        .into_iter()
+                        .map(|(_, range)| {
+                            source
+                                .get(usize::from(range.start())..usize::from(range.end()))
+                                .expect("literal range must be within the source")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    edits.push((annotation.range(), format!("Literal[{literals}]")));
+                    imports.insert((ModuleName::typing(), "Literal".to_owned()));
+                }
+            }
+            statement.recurse(&mut |statement| {
+                collect(std::slice::from_ref(statement), source, edits, imports)
+            });
+        }
+    }
+
+    let mut edits = Vec::new();
+    let mut imports = HashSet::new();
+    collect(&module.body, source, &mut edits, &mut imports);
+    (edits, imports)
 }
 
 fn hint_to_string(
@@ -347,7 +701,7 @@ impl InferArgs {
             if let Some(inferred_types) = inferred_types {
                 parameter_types.extend(inferred_types);
                 let heap = TypeHeap::new();
-                let (formatted, needed_imports) = format_hints(
+                let (formatted, mut needed_imports) = format_hints(
                     parameter_types,
                     &stdlib,
                     &|cls| {
@@ -365,8 +719,21 @@ impl InferArgs {
                     &heap,
                     handle.module(),
                 );
-                let sorted = sort_inlay_hints(formatted);
                 let file_path = handle.path().as_path();
+                let mut edits: Vec<(TextRange, String)> = formatted
+                    .into_iter()
+                    .map(|(position, annotation)| (TextRange::empty(position), annotation))
+                    .collect();
+                if flags.improve_existing()
+                    && let Some(ast) = transaction.get_ast(&handle)
+                {
+                    let source = fs_anyhow::read_to_string(file_path)?;
+                    let (improvements, improvement_imports) =
+                        improved_parameter_annotations(&ast, &source);
+                    edits.extend(improvements);
+                    needed_imports.extend(improvement_imports);
+                }
+                let sorted = sort_text_edits(edits);
                 // Build import edits once so dry-run and write share them.
                 let imports: Vec<(TextSize, String, String)> = if flags.imports()
                     && !needed_imports.is_empty()
@@ -401,7 +768,7 @@ impl InferArgs {
                         );
                     }
                 } else {
-                    Self::add_annotations_to_file(file_path, sorted)?;
+                    Self::apply_annotation_edits(file_path, sorted)?;
                     if !imports.is_empty() {
                         Self::add_imports_to_file(file_path, imports)?;
                     }
@@ -415,19 +782,16 @@ impl InferArgs {
         })
     }
 
-    fn add_annotations_to_file(
+    fn apply_annotation_edits(
         file_path: &Path,
-        sorted: Vec<(TextSize, String)>,
+        sorted: Vec<(TextRange, String)>,
     ) -> anyhow::Result<()> {
         let file_content = fs_anyhow::read_to_string(file_path)?;
         let mut result = file_content;
-        for inlay_hint in sorted {
-            let (position, hint) = inlay_hint;
-            // Convert the TextSize to a byte offset
-            let offset = (position).into();
-            if offset <= result.len() {
-                result.insert_str(offset, &hint);
-            }
+        for (range, replacement) in sorted {
+            let start = usize::from(range.start());
+            let end = usize::from(range.end());
+            result.replace_range(start..end, &replacement);
         }
         fs_anyhow::write(file_path, result)
     }
@@ -707,6 +1071,91 @@ def foo() -> str:
     "#,
             None,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_improve_existing_literal_parameter() -> anyhow::Result<()> {
+        let mut flags = InferFlags::default();
+        flags.improve_existing = Some(true);
+        assert_annotations(
+            r#"
+def solve(method: str) -> None:
+    if method == "bisect":
+        pass
+    elif method in ("newton", "brentq"):
+        pass
+"#,
+            r#"
+from typing import Literal
+def solve(method: Literal["bisect", "newton", "brentq"]) -> None:
+    if method == "bisect":
+        pass
+    elif method in ("newton", "brentq"):
+        pass
+"#,
+            Some(flags),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_improve_existing_list_parameter_to_iterable() -> anyhow::Result<()> {
+        let mut flags = InferFlags::default();
+        flags.improve_existing = Some(true);
+        assert_annotations(
+            r#"
+def total(values: list[int]) -> int:
+    return sum(values)
+"#,
+            r#"
+from collections.abc import Iterable
+def total(values: Iterable[int]) -> int:
+    return sum(values)
+"#,
+            Some(flags),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_improve_existing_list_parameter_to_sequence() -> anyhow::Result<()> {
+        let mut flags = InferFlags::default();
+        flags.improve_existing = Some(true);
+        assert_annotations(
+            r#"
+def first(values: list[int]) -> int:
+    return values[0] if values else 0
+"#,
+            r#"
+from collections.abc import Sequence
+def first(values: Sequence[int]) -> int:
+    return values[0] if values else 0
+"#,
+            Some(flags),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_improve_existing_keeps_mutated_list() -> anyhow::Result<()> {
+        let mut flags = InferFlags::default();
+        flags.improve_existing = Some(true);
+        let input = r#"
+def add(values: list[int], value: int) -> None:
+    values.append(value)
+"#;
+        assert_annotations(input, input, Some(flags));
+        Ok(())
+    }
+
+    #[test]
+    fn test_improve_existing_is_opt_in() -> anyhow::Result<()> {
+        let input = r#"
+def total(values: list[int]) -> int:
+    return sum(values)
+"#;
+        assert_annotations(input, input, None);
         Ok(())
     }
 

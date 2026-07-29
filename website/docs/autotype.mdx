@@ -29,4 +29,11 @@ pyrefly infer path/to/directory/
 
 We recommend running it in small batches to make reviewing and merging changes easier. Flags can be used to turn on / off adding annotations for parameters, return types, and containers.
 
+Pass `--improve-existing` to also review existing parameter annotations. This
+can narrow `str` parameters to `Literal[...]` when the function compares them
+against a fixed set of strings, or broaden `list[T]` parameters to
+`Iterable[T]` or `Sequence[T]` when the function body does not require a list.
+Because these edits change a function's accepted inputs, this mode is opt-in and
+its output should be reviewed.
+
 It is common that new annotations will expose new type errors. See our error suppression guides to learn how to automate silencing these errors.
