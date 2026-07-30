@@ -1,5 +1,6 @@
 {
   "url": "https://api.github.com/repos/python/typeshed/tarball/a7bcce8b6df32dd85dc31691cef30af61e7b1371",
   "sha256": "d30c8865d1139c60a3d0fced5adb33b31381520f8a26189a58737c3a7fd0c154",
-  "update_time": "2026-07-07 17:24:35"
+  "update_time": "2026-07-07 17:24:35",
+  "oldest_supported_python": "3.10"
 }

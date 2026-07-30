@@ -26,6 +26,7 @@ import json
 import logging
 import shutil
 import tarfile
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -45,6 +46,7 @@ class FetchMetadata:
     url: str
     sha256: str
     timestamp: float
+    oldest_supported_python: str
 
 
 def get_default_typeshed_url() -> str:
@@ -90,19 +92,44 @@ def fetch_as_tarfile(
 ) -> tuple[tarfile.TarFile, FetchMetadata]:
     LOG.info(f"Fetch typeshed tarball from URL `{url}`...")
     data = urllib.request.urlopen(url).read()
+    typeshed_tarfile = tarfile.open(
+        # Buffer the url data stream in memory so seeking in tarfile is possible
+        fileobj=io.BytesIO(data),
+        mode="r:gz",
+    )
+    pyproject_member = next(
+        (
+            member
+            for member in typeshed_tarfile.getmembers()
+            if Path(member.name).parts[1:] == ("pyproject.toml",)
+        ),
+        None,
+    )
+    if pyproject_member is None:
+        raise RuntimeError("Cannot find pyproject.toml in the typeshed archive")
+    pyproject_reader = typeshed_tarfile.extractfile(pyproject_member)
+    if pyproject_reader is None:
+        raise RuntimeError("Cannot read pyproject.toml from the typeshed archive")
+    pyproject = tomllib.loads(pyproject_reader.read().decode("utf-8"))
+    try:
+        oldest_supported_python = pyproject["tool"]["typeshed"][
+            "oldest-supported-python"
+        ]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(
+            "Cannot find tool.typeshed.oldest-supported-python in typeshed's pyproject.toml"
+        ) from error
+    if not isinstance(oldest_supported_python, str):
+        raise RuntimeError(
+            "Expected tool.typeshed.oldest-supported-python to be a string"
+        )
     metadata = FetchMetadata(
         url=url,
         sha256=hashlib.sha256(data).hexdigest(),
         timestamp=datetime.datetime.now().timestamp(),
+        oldest_supported_python=oldest_supported_python,
     )
-    return (
-        tarfile.open(
-            # Buffer the url data stream in memory so seeking in tarfile is possible
-            fileobj=io.BytesIO(data),
-            mode="r:gz",
-        ),
-        metadata,
-    )
+    return typeshed_tarfile, metadata
 
 
 def should_include_member(info: tarfile.TarInfo) -> bool:
@@ -196,6 +223,7 @@ def write_metadata(output_path: Path, metadata: FetchMetadata) -> None:
                 "update_time": datetime.datetime.fromtimestamp(
                     metadata.timestamp
                 ).isoformat(sep=" ", timespec="seconds"),
+                "oldest_supported_python": metadata.oldest_supported_python,
             },
             indent=2,
         )

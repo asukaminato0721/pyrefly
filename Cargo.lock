@@ -2290,6 +2290,7 @@ dependencies = [
  "pretty_assertions",
  "pulldown-cmark",
  "pyrefly_build",
+ "pyrefly_bundled",
  "pyrefly_python",
  "pyrefly_util",
  "regex",

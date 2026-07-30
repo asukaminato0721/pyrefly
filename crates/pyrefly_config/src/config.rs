@@ -27,6 +27,7 @@ use pyrefly_build::BuildSystem;
 use pyrefly_build::handle::Handle;
 use pyrefly_build::source_db::SourceDatabase;
 use pyrefly_build::source_db::Target;
+use pyrefly_bundled::BUNDLED_TYPESHED_MINIMUM_PYTHON_VERSION;
 use pyrefly_python::COMPILED_FILE_SUFFIXES;
 use pyrefly_python::PYTHON_EXTENSIONS;
 use pyrefly_python::ignore::Tool;
@@ -1314,6 +1315,17 @@ impl ConfigFile {
                     self.python_environment.set_empty_to_default();
                     configure_errors.push(error.context("While finding Python interpreter"));
                 }
+            }
+        }
+
+        if self.typeshed_path.is_none() {
+            let (major, minor, micro) = BUNDLED_TYPESHED_MINIMUM_PYTHON_VERSION;
+            let minimum_typeshed_version = PythonVersion::new(major, minor, micro);
+            let python_version = self.python_version();
+            if python_version < minimum_typeshed_version {
+                configure_errors.push(anyhow!(
+                    "Configured Python version {python_version} is older than the minimum supported by the bundled typeshed ({minimum_typeshed_version}), so standard library type information may be inaccurate."
+                ));
             }
         }
 
@@ -3373,6 +3385,36 @@ output-format = "omit-errors"
                  e.get_message() == "Cannot use both `python-interpreter-path` and `conda-environment`. Finding environment info using `python-interpreter-path`."
              })
          );
+    }
+
+    #[test]
+    fn test_bundled_typeshed_python_version_warning() {
+        for (python_version, typeshed_path, expected_warning) in [
+            (
+                PythonVersion::new(3, 9, 0),
+                None,
+                Some(
+                    "Configured Python version 3.9.0 is older than the minimum supported by the bundled typeshed (3.10.0), so standard library type information may be inaccurate.",
+                ),
+            ),
+            (PythonVersion::new(3, 10, 0), None, None),
+            (
+                PythonVersion::new(3, 9, 0),
+                Some(PathBuf::from("custom_typeshed")),
+                None,
+            ),
+        ] {
+            let mut config = ConfigFile::default();
+            config.interpreters.skip_interpreter_query = true;
+            config.python_environment.python_version = Some(python_version);
+            config.typeshed_path = typeshed_path;
+            let warning = config
+                .configure()
+                .iter()
+                .map(ConfigError::get_message)
+                .find(|message| message.starts_with("Configured Python version"));
+            assert_eq!(warning.as_deref(), expected_warning);
+        }
     }
 
     #[test]

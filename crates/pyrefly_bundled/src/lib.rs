@@ -19,6 +19,8 @@ static BUNDLED_TYPESHED_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "
 pub const BUNDLED_TYPESHED_DIGEST: &[u8; 32] =
     include_bytes!(concat!(env!("OUT_DIR"), "/stdlib.sha256"));
 
+include!(concat!(env!("OUT_DIR"), "/typeshed_version.rs"));
+
 static BUNDLED_TYPESHED_THIRD_PARTY_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/typeshed_stubs.tar.zst"));
 

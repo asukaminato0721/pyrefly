@@ -49,6 +49,33 @@ fn get_output_path() -> Result<PathBuf, std::env::VarError> {
     }
 }
 
+fn write_typeshed_version(metadata_path: &Path, output_path: &Path) -> Result<(), std::io::Error> {
+    let metadata = std::fs::read_to_string(metadata_path)?;
+    let value = metadata
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("\"oldest_supported_python\":")
+                .map(|value| value.trim().trim_end_matches(',').trim_matches('"'))
+        })
+        .expect("typeshed metadata must contain `oldest_supported_python`");
+    let (major, minor) = value
+        .split_once('.')
+        .expect("typeshed's oldest supported Python must have a major and minor version");
+    let major = major
+        .parse::<u32>()
+        .expect("typeshed's oldest supported Python major version must be an integer");
+    let minor = minor
+        .parse::<u32>()
+        .expect("typeshed's oldest supported Python minor version must be an integer");
+    std::fs::write(
+        output_path,
+        format!(
+            "pub const BUNDLED_TYPESHED_MINIMUM_PYTHON_VERSION: (u32, u32, u32) = ({major}, {minor}, 0);\n"
+        ),
+    )
+}
+
 /// Creates a compressed tar archive from the given input path and writes it to the output path.
 /// Also computes and writes a SHA256 digest of the archive.
 fn create_archive(
@@ -89,6 +116,10 @@ fn main() -> Result<(), std::io::Error> {
     println!("cargo::rerun-if-changed=third_party/typeshed_metadata.json");
 
     let output_dir = get_output_path().unwrap();
+    write_typeshed_version(
+        &PathBuf::from("third_party/typeshed_metadata.json"),
+        &output_dir.join("typeshed_version.rs"),
+    )?;
 
     // Create separate archives so each runtime bundle only decodes its own files.
     let typeshed_input = get_typeshed_input_path();
