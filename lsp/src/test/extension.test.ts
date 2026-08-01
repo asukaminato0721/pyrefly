@@ -14,6 +14,58 @@ import * as vscode from 'vscode';
 suite('Extension Test Suite', () => {
 	const extension: vscode.Extension<unknown> | undefined = vscode.extensions.getExtension('meta.pyrefly');
 
+	for (const quote of ['"', "'"]) {
+		test(`Auto-close triple ${quote} quotes`, async function () {
+			assert.ok(extension);
+			await extension.activate();
+			const directory = await fs.mkdtemp(join(tmpdir(), 'pyrefly-quotes-'));
+			const uri = vscode.Uri.file(join(directory, 'test.py'));
+			await vscode.workspace.fs.writeFile(uri, new Uint8Array());
+			const document = await vscode.workspace.openTextDocument(uri);
+			const editor = await vscode.window.showTextDocument(document);
+			try {
+				for (let i = 0; i < 3; i++) {
+					await vscode.commands.executeCommand('type', {text: quote});
+				}
+
+				assert.strictEqual(document.getText(), quote.repeat(6));
+				assert.strictEqual(editor.selection.active.character, 3);
+
+				await vscode.commands.executeCommand('type', {text: 'docstring'});
+				for (let i = 0; i < 3; i++) {
+					await vscode.commands.executeCommand('type', {text: quote});
+				}
+				assert.strictEqual(
+					document.getText(),
+					`${quote.repeat(3)}docstring${quote.repeat(3)}`,
+				);
+
+				const manualClose = `${quote.repeat(3)}docstring${quote.repeat(2)}`;
+				await editor.edit(edit => {
+					edit.replace(
+						new vscode.Range(
+							document.positionAt(0),
+							document.positionAt(document.getText().length),
+						),
+						manualClose,
+					);
+				});
+				editor.selection = new vscode.Selection(
+					document.positionAt(manualClose.length),
+					document.positionAt(manualClose.length),
+				);
+				await vscode.commands.executeCommand('type', {text: quote});
+				assert.strictEqual(
+					document.getText(),
+					`${quote.repeat(3)}docstring${quote.repeat(3)}`,
+				);
+			} finally {
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				await fs.rm(directory, {recursive: true, force: true});
+			}
+		});
+	}
+
 	test('Test activation', async function () {
 		// On macos-13, we've noticed successful test activation take up to 3500ms.
 		this.timeout(10000);

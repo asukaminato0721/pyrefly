@@ -53,8 +53,10 @@ use ruff_python_ast::Identifier;
 use ruff_python_ast::Keyword;
 use ruff_python_ast::ModModule;
 use ruff_python_ast::StmtImportFrom;
+use ruff_python_ast::StringFlags;
 use ruff_python_ast::UnaryOp;
 use ruff_python_ast::name::Name;
+use ruff_python_ast::str::Quote;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -748,6 +750,55 @@ impl PartialOrd for QuickfixAction {
 }
 
 impl<'a> Transaction<'a> {
+    /// Return whether typing a third quote at `position` starts a triple-quoted string.
+    pub(crate) fn should_auto_close_triple_quote(
+        &self,
+        handle: &Handle,
+        position: TextSize,
+        quote: &str,
+    ) -> bool {
+        let (quote_style, preceding_quotes) = match quote {
+            "\"" => (Quote::Double, "\"\""),
+            "'" => (Quote::Single, "''"),
+            _ => return false,
+        };
+        let Some(start) = position.checked_sub(TextSize::new(2)) else {
+            return false;
+        };
+        let Some(module) = self.get_module_info(handle) else {
+            return false;
+        };
+        let Some(preceding) = module
+            .contents()
+            .as_bytes()
+            .get(start.to_usize()..position.to_usize())
+        else {
+            return false;
+        };
+        if preceding != preceding_quotes.as_bytes() {
+            return false;
+        }
+        let Some(tokens) = self
+            .get_parsed_module(handle)
+            .and_then(|parsed| parsed.tokens())
+        else {
+            return false;
+        };
+        let Some(last_quote) = position.checked_sub(TextSize::new(1)) else {
+            return false;
+        };
+        let Some(token) = tokens
+            .at_offset(last_quote)
+            .find(|token| token.end() == position)
+        else {
+            return false;
+        };
+        let Some(flags) = token.string_flags() else {
+            return false;
+        };
+        flags.quote_style() == quote_style && !flags.is_triple_quoted() && !flags.is_unclosed()
+    }
+
     fn allows_explicit_reexport(handle: &Handle) -> bool {
         matches!(
             handle.path().details(),

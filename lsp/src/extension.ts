@@ -32,6 +32,7 @@ import {runDocstringFoldingCommand} from './docstring';
 import {registerCodeLensCommands} from './codeLens';
 import {registerHoverProvider} from './hover';
 import {PythonEnvironment} from './python-environment';
+import {registerTripleQuoteAutoClose} from './triple-quote';
 import {
   triggerMsPythonRefreshLanguageServersIfInstalled,
 } from './extension-interop';
@@ -333,6 +334,7 @@ export async function activate(context: ExtensionContext) {
     }),
   );
   registerCodeLensCommands(context, pythonEnv);
+  registerTripleQuoteAutoClose(context, () => client);
 
   // When our extension is activated, make sure ms-python knows
   // TODO(kylei): remove this hack once ms-python has this behavior

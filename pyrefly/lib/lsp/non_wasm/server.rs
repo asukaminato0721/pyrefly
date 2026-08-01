@@ -311,6 +311,8 @@ use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_action;
 use crate::lsp::non_wasm::stdlib::should_show_stdlib_error;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
+use crate::lsp::non_wasm::triple_quote::AutoCloseTripleQuoteParams;
+use crate::lsp::non_wasm::triple_quote::AutoCloseTripleQuoteRequest;
 use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatus;
 pub use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatusRequest;
 use crate::lsp::non_wasm::type_error_display_status::TypeErrorDisplayStatusResponse;
@@ -2609,6 +2611,15 @@ impl Server {
                         .docstring_ranges(&transaction, &text_document)
                         .unwrap_or_default();
                     self.send_response(new_response(x.id, Ok(ranges)));
+                } else if let Some(params) = as_request::<AutoCloseTripleQuoteRequest>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<AutoCloseTripleQuoteRequest>(
+                            params, &x.id,
+                        )
+                    {
+                        let response = self.should_auto_close_triple_quote(&transaction, params);
+                        self.send_response(new_response(x.id, Ok(response)));
+                    }
                 } else if x.method == TypeErrorDisplayStatusRequest::METHOD {
                     let text_document: TextDocumentIdentifier = serde_json::from_value(x.params)?;
                     let response = if let Some(path) =
@@ -4491,6 +4502,26 @@ impl Server {
                     Some(GotoImplementationResponse::Array(lsp_targets))
                 }
             },
+        )
+    }
+
+    fn should_auto_close_triple_quote(
+        &self,
+        transaction: &Transaction<'_>,
+        params: AutoCloseTripleQuoteParams,
+    ) -> bool {
+        let uri = &params.text_document_position.text_document.uri;
+        let Ok((handle, _)) = self.make_handle_with_lsp_analysis_config_if_enabled(uri, None)
+        else {
+            return false;
+        };
+        let Some(module_info) = transaction.get_module_info(&handle) else {
+            return false;
+        };
+        transaction.should_auto_close_triple_quote(
+            &handle,
+            self.from_lsp_position(uri, &module_info, params.text_document_position.position),
+            &params.quote,
         )
     }
 
