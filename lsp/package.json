@@ -80,6 +80,11 @@
                 "command": "pyrefly.infer"
             },
             {
+                "title": "Copy Symbol Reference",
+                "category": "pyrefly",
+                "command": "pyrefly.copySymbolReference"
+            },
+            {
                 "title": "Run File",
                 "category": "pyrefly",
                 "command": "pyrefly.runMain"
@@ -90,6 +95,21 @@
                 "command": "pyrefly.runTest"
             }
         ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "pyrefly.copySymbolReference",
+                    "when": "editorLangId == python",
+                    "group": "navigation"
+                }
+            ],
+            "commandPalette": [
+                {
+                    "command": "pyrefly.copySymbolReference",
+                    "when": "editorLangId == python"
+                }
+            ]
+        },
         "semanticTokenScopes": [
             {
                 "language": "python",

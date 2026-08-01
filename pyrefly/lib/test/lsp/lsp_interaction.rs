@@ -50,6 +50,7 @@ mod notebook_type_error_display_status;
 mod open_file_benchmark;
 mod progress;
 mod provide_type;
+mod qualified_name;
 mod references;
 mod rename;
 mod safe_delete_file;
