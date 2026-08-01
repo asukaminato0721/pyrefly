@@ -299,6 +299,30 @@ impl Transaction<'_> {
         });
     }
 
+    /// Adds reusable Python boilerplate snippets that apply at module scope.
+    fn add_code_snippet_completions(
+        identifier: Option<&Identifier>,
+        completions: &mut Vec<RankedCompletion>,
+    ) {
+        if identifier.is_none_or(|identifier| "main".starts_with(identifier.as_str())) {
+            completions.push(RankedCompletion::new(CompletionItem {
+                label: "main".to_owned(),
+                kind: Some(CompletionItemKind::SNIPPET),
+                insert_text: Some(
+                    r#"def main():
+    ${0:pass}
+
+
+if __name__ == "__main__":
+    main()"#
+                        .to_owned(),
+                ),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            }));
+        }
+    }
+
     /// Adds function/method completion inserts with parentheses, using snippets when supported.
     fn add_function_call_parens(completions: &mut [RankedCompletion], supports_snippets: bool) {
         for ranked in completions {
@@ -1194,6 +1218,17 @@ impl Transaction<'_> {
                     let expression_only =
                         matches!(context, IdentifierContext::Expr(_)) && !at_statement_start;
                     Self::add_keyword_completions(handle, expression_only, &mut result);
+                    if supports_snippet_completions
+                        // Exactly two covering nodes means a bare expression at module scope.
+                        && covering_nodes.as_deref().is_some_and(|nodes| {
+                            matches!(
+                                nodes,
+                                [AnyNodeRef::ExprName(_), AnyNodeRef::StmtExpr(_)]
+                            )
+                        })
+                    {
+                        Self::add_code_snippet_completions(Some(&identifier), &mut result);
+                    }
                     let has_local_completions = self.add_local_variable_completions(
                         handle,
                         Some(&identifier),
@@ -1253,6 +1288,9 @@ impl Transaction<'_> {
                         let expected_type = self.get_expected_type_at(handle, position);
                         if nodes.is_empty() {
                             Self::add_keyword_completions(handle, false, &mut result);
+                            if supports_snippet_completions {
+                                Self::add_code_snippet_completions(None, &mut result);
+                            }
                             self.add_local_variable_completions(
                                 handle,
                                 None,

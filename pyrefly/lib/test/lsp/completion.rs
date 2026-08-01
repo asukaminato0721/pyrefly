@@ -8,11 +8,13 @@
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
+use lsp_types::InsertTextFormat;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::sys_info::PythonVersion;
 use ruff_text_size::TextSize;
 
+use crate::lsp::wasm::completion::CompletionOptions;
 use crate::state::lsp::ImportFormat;
 use crate::state::require::Require;
 use crate::state::state::State;
@@ -69,6 +71,58 @@ class Foo:
             "missing {expected} in completions:\n{trimmed}"
         );
     }
+}
+
+fn main_snippet_completion(code: &str, supports_snippets: bool) -> Option<CompletionItem> {
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for) = env.to_state();
+    let handle = handle_for("main");
+    let position = extract_cursors_for_test(code)[0];
+    state
+        .transaction()
+        .completion_with_incomplete(
+            &handle,
+            position,
+            ImportFormat::Absolute,
+            CompletionOptions {
+                supports_snippet_completions: supports_snippets,
+                ..Default::default()
+            },
+            None,
+        )
+        .0
+        .into_iter()
+        .find(|item| item.label == "main" && item.kind == Some(CompletionItemKind::SNIPPET))
+}
+
+#[test]
+fn completion_main_snippet() {
+    let code = r#"
+mai
+#  ^
+"#;
+
+    let snippet = main_snippet_completion(code, true).expect("expected a main boilerplate snippet");
+    assert_eq!(
+        snippet.insert_text.as_deref(),
+        Some("def main():\n    ${0:pass}\n\n\nif __name__ == \"__main__\":\n    main()")
+    );
+    assert_eq!(snippet.insert_text_format, Some(InsertTextFormat::SNIPPET));
+    assert!(
+        main_snippet_completion(code, false).is_none(),
+        "clients without snippet support must not receive snippets"
+    );
+}
+
+#[test]
+fn completion_main_snippet_only_at_module_scope() {
+    let code = r#"
+def f():
+    mai
+#      ^
+"#;
+    assert!(main_snippet_completion(code, true).is_none());
 }
 
 fn get_default_test_report() -> impl Fn(&State, &Handle, TextSize) -> String {
