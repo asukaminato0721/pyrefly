@@ -69,6 +69,8 @@ use lsp_types::DocumentHighlightKind;
 use lsp_types::DocumentHighlightParams;
 use lsp_types::DocumentSymbolParams;
 use lsp_types::DocumentSymbolResponse;
+use lsp_types::ExecuteCommandOptions;
+use lsp_types::ExecuteCommandParams;
 use lsp_types::FileEvent;
 use lsp_types::FileSystemWatcher;
 use lsp_types::FoldingRange;
@@ -179,6 +181,7 @@ use lsp_types::request::Completion;
 use lsp_types::request::DocumentDiagnosticRequest;
 use lsp_types::request::DocumentHighlightRequest;
 use lsp_types::request::DocumentSymbolRequest;
+use lsp_types::request::ExecuteCommand;
 use lsp_types::request::FoldingRangeRequest;
 use lsp_types::request::GotoDeclaration;
 use lsp_types::request::GotoDefinition;
@@ -1367,6 +1370,10 @@ pub fn capabilities(
             ..Default::default()
         }),
         document_highlight_provider: Some(OneOf::Left(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec![QUALIFIED_NAME_COMMAND.to_owned()],
+            ..Default::default()
+        }),
         // Find references won't work properly if we don't know all the files.
         references_provider: match indexing_mode {
             IndexingMode::None => None,
@@ -1475,6 +1482,7 @@ pub enum ProcessEvent {
 
 const PYTHON_SECTION: &str = "python";
 const SOURCE_FIX_ALL_PYREFLY: &str = "source.fixAll.pyrefly";
+const QUALIFIED_NAME_COMMAND: &str = "pyrefly.getQualifiedName";
 
 fn matches_fix_all_kind(kind: &CodeActionKind) -> bool {
     kind == &CodeActionKind::SOURCE_FIX_ALL || kind.as_str() == SOURCE_FIX_ALL_PYREFLY
@@ -2042,6 +2050,7 @@ impl Server {
                     ResolveCompletionItem::METHOD,
                     SignatureHelpRequest::METHOD,
                     GotoDefinition::METHOD,
+                    ExecuteCommand::METHOD,
                     ProvideType::METHOD,
                     TypeErrorDisplayStatusRequest::METHOD,
                 ];
@@ -2442,6 +2451,25 @@ impl Server {
                             result: Some(serde_json::to_value(report).unwrap()),
                             error: None,
                         });
+                    }
+                } else if let Some(params) = as_request::<ExecuteCommand>(&x) {
+                    if let Some(params) = self
+                        .extract_request_params_or_send_err_response::<ExecuteCommand>(
+                            params, &x.id,
+                        )
+                    {
+                        match self.execute_command(&transaction, params) {
+                            Ok(response) => {
+                                self.send_response(new_response(x.id, Ok(response)));
+                            }
+                            Err(message) => {
+                                self.send_response(Response::new_err(
+                                    x.id,
+                                    ErrorCode::InvalidParams as i32,
+                                    message,
+                                ));
+                            }
+                        }
                     }
                 } else if let Some(params) = as_request::<ProvideType>(&x) {
                     if let Some(params) = self
@@ -2988,6 +3016,39 @@ impl Server {
         let handle = self.make_handle_if_enabled(uri, None).ok()?;
         let notebook_cell = self.maybe_get_code_cell_index(uri);
         provide_type(transaction, &handle, params.positions, notebook_cell)
+    }
+
+    fn execute_command(
+        &self,
+        transaction: &Transaction<'_>,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<Value>, String> {
+        if params.command != QUALIFIED_NAME_COMMAND {
+            return Err(format!("Unsupported command: {}", params.command));
+        }
+        let [argument] = params.arguments.as_slice() else {
+            return Err(format!(
+                "{QUALIFIED_NAME_COMMAND} expects one text document position argument"
+            ));
+        };
+        let params = serde_json::from_value::<TextDocumentPositionParams>(argument.clone())
+            .map_err(|error| error.to_string())?;
+        let uri = &params.text_document.uri;
+        let Ok(handle) = self.make_handle_if_enabled(uri, None) else {
+            return Ok(None);
+        };
+        let Some(info) = transaction.get_module_info(&handle) else {
+            return Ok(None);
+        };
+        let position = self.from_lsp_position(uri, &info, params.position);
+        let definitions =
+            match transaction.find_definition(&handle, position, FindPreference::default()) {
+                Ok(definitions) => definitions,
+                Err(_) => return Ok(None),
+            };
+        Ok(definitions.into_iter().find_map(|definition| {
+            compute_qualified_name(transaction, &handle, &definition).map(Value::String)
+        }))
     }
 
     fn type_error_display_status(&self, path: &Path) -> TypeErrorDisplayStatus {

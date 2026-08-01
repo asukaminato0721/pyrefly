@@ -17,6 +17,7 @@ import {
   ConfigurationParams,
   ConfigurationRequest,
   DidChangeConfigurationNotification,
+  ExecuteCommandRequest,
   LanguageClient,
   LanguageClientOptions,
   LSPAny,
@@ -331,6 +332,47 @@ export async function activate(context: ExtensionContext) {
         );
       }
     }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'pyrefly.copySymbolReference',
+      async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor === undefined || editor.document.languageId !== 'python') {
+          return;
+        }
+
+        const position = editor.selection.active;
+        let qualifiedName: string | undefined;
+        try {
+          const response = await client.sendRequest(ExecuteCommandRequest.type, {
+            command: 'pyrefly.getQualifiedName',
+            arguments: [
+              {
+                textDocument: {uri: editor.document.uri.toString()},
+                position,
+              },
+            ],
+          });
+          if (typeof response === 'string') {
+            qualifiedName = response;
+          }
+        } catch (error) {
+          outputChannel.appendLine(
+            `Could not get qualified name: ${String(error)}`,
+          );
+        }
+
+        const path =
+          editor.document.uri.scheme === 'file'
+            ? vscode.workspace.asRelativePath(editor.document.uri, false)
+            : editor.document.uri.toString();
+        const reference =
+          qualifiedName ??
+          `${path}:${position.line + 1}:${position.character + 1}`;
+        await vscode.env.clipboard.writeText(reference);
+      },
+    ),
   );
   registerCodeLensCommands(context, pythonEnv);
 

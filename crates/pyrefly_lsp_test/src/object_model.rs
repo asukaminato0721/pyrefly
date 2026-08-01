@@ -47,6 +47,7 @@ use lsp_types::request::CodeActionRequest;
 use lsp_types::request::Completion;
 use lsp_types::request::DocumentDiagnosticRequest;
 use lsp_types::request::DocumentHighlightRequest;
+use lsp_types::request::ExecuteCommand;
 use lsp_types::request::FoldingRangeRequest;
 use lsp_types::request::GotoDefinition;
 use lsp_types::request::GotoImplementation;
@@ -576,6 +577,27 @@ impl TestClient {
                 "line": line,
                 "character": col
             }
+        }))
+    }
+
+    pub fn qualified_name(
+        &self,
+        file: &'static str,
+        line: u32,
+        col: u32,
+    ) -> ClientRequestHandle<'_, ExecuteCommand> {
+        let path = self.get_root_or_panic().join(file);
+        self.send_request(json!({
+            "command": "pyrefly.getQualifiedName",
+            "arguments": [{
+                "textDocument": {
+                    "uri": Url::from_file_path(&path).unwrap().to_string()
+                },
+                "position": {
+                    "line": line,
+                    "character": col
+                }
+            }]
         }))
     }
 

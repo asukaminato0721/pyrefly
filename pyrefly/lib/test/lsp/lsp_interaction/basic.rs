@@ -51,6 +51,9 @@ fn test_initialize_basic() {
             },
             "declarationProvider": true,
             "documentHighlightProvider": true,
+            "executeCommandProvider": {
+                "commands": ["pyrefly.getQualifiedName"]
+            },
             "signatureHelpProvider": {
                 "triggerCharacters": ["(", ","]
             },
