@@ -1897,6 +1897,12 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         ShapeError::nested_type_var_not_inferred(),
                     ));
                 }
+                if self
+                    .solver
+                    .shape_equivalent_by_smt(&got_canonical, &want_canonical)
+                {
+                    return Ok(());
+                }
                 Err(SubsetError::Shape(ShapeError::structural_mismatch(
                     got_expanded.to_string(),
                     got_canonical.to_string(),
@@ -1920,7 +1926,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 if is_gradual_size(&got_canonical) || is_gradual_size(&want_canonical) {
                     return Ok(());
                 }
-                if got_canonical == want_canonical {
+                if got_canonical == want_canonical
+                    || self
+                        .solver
+                        .shape_equivalent_by_smt(&got_canonical, &want_canonical)
+                {
                     Ok(())
                 } else {
                     Err(SubsetError::Shape(ShapeError::structural_mismatch(
@@ -1946,7 +1956,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 if is_gradual_size(&got_canonical) || is_gradual_size(&want_canonical) {
                     return Ok(());
                 }
-                if got_canonical == want_canonical {
+                if got_canonical == want_canonical
+                    || self
+                        .solver
+                        .shape_equivalent_by_smt(&got_canonical, &want_canonical)
+                {
                     Ok(())
                 } else {
                     Err(SubsetError::Shape(ShapeError::structural_mismatch(

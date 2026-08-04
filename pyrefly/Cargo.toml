@@ -93,12 +93,16 @@ pyrefly_lsp_test = { path = "../crates/pyrefly_lsp_test" }
 backtrace-on-stack-overflow = { version = "0.3", optional = true }
 tikv-jemallocator = "0.6.0"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+z3 = { version = "0.20.2", optional = true }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 mimalloc = { version = "0.1.46", default-features = false }
 
 [features]
 debug-stack-overflow = ["dep:backtrace-on-stack-overflow"]
 default = []
+shape-smt = ["dep:z3"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fbcode_build)"]}

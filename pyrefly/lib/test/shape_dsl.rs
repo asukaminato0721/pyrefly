@@ -1485,6 +1485,27 @@ def ordinary_typevar[T](x: Int[2 ** T]) -> None:  # E: `T` must be an `IntVar` t
 "#,
 );
 
+#[cfg(feature = "shape-smt")]
+testcase!(
+    test_tensor_shapes_smt_dimension_equivalence,
+    shaped_array_env_with_shaped_torch(),
+    r#"
+from shape_extensions import IntVar
+from torch import Tensor
+
+def floor_halves_recompose[N: IntVar](
+    x: Tensor[[N // 2 + (N + 1) // 2]],
+) -> Tensor[[N]]:
+    return x
+
+def adjacent_floor_halves_are_not_equal[N: IntVar](
+    x: Tensor[[(N + 1) // 2]],
+) -> Tensor[[N // 2]]:
+    # E: Returned type `Tensor[[((1 + N) // 2)]]` is not assignable to declared return type `Tensor[[(N // 2)]]`
+    return x
+"#,
+);
+
 testcase!(
     test_tensor_shapes_internal_dim_carrier_flows_to_size,
     shaped_array_env(),

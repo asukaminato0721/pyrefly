@@ -316,6 +316,14 @@ Run them with Cargo:
 cargo test shape_dsl
 ```
 
+The optional in-process SMT fallback needs a system Z3 installation (4.8.17 or
+newer) and is not built for WebAssembly. Enable it explicitly when changing
+symbolic dimension proofs:
+
+```bash
+cargo test -p pyrefly --features shape-smt shape_smt
+```
+
 In an internal Buck checkout:
 
 ```bash

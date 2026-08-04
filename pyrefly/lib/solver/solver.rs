@@ -59,6 +59,8 @@ use crate::error::collector::ErrorBuilder;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
 use crate::error::context::TypeCheckKind;
+#[cfg(all(feature = "shape-smt", not(target_arch = "wasm32")))]
+use crate::solver::shape_smt;
 use crate::solver::type_order::TypeOrder;
 use crate::types::callable::Callable;
 use crate::types::callable::Function;
@@ -1083,6 +1085,9 @@ pub struct Solver {
     /// Cross-call cache for TypedDict subset results.
     /// Like protocol_cache, only caches Var-free types.
     typed_dict_cache: Mutex<HashMap<(TypedDict, TypedDict), Result<(), SubsetError>>>,
+    /// SMT is only a fallback after ordinary shape canonicalization fails.
+    #[cfg(all(feature = "shape-smt", not(target_arch = "wasm32")))]
+    shape_equivalence_cache: Mutex<HashMap<(Type, Type), bool>>,
     pub infer_with_first_use: bool,
     pub heap: TypeHeap,
     pub tensor_shapes: bool,
@@ -1155,6 +1160,8 @@ impl Solver {
             instantiation_errors: Default::default(),
             protocol_cache: Default::default(),
             typed_dict_cache: Default::default(),
+            #[cfg(all(feature = "shape-smt", not(target_arch = "wasm32")))]
+            shape_equivalence_cache: Default::default(),
             infer_with_first_use,
             heap: TypeHeap::new(),
             tensor_shapes,
@@ -1162,6 +1169,31 @@ impl Solver {
             strict_partial_subtyping,
             spec_compliant_overloads,
             legacy_overload_expansion,
+        }
+    }
+
+    pub(crate) fn shape_equivalent_by_smt(&self, left: &Type, right: &Type) -> bool {
+        #[cfg(all(feature = "shape-smt", not(target_arch = "wasm32")))]
+        {
+            let key = if left <= right {
+                (left.clone(), right.clone())
+            } else {
+                (right.clone(), left.clone())
+            };
+            if let Some(result) = self.shape_equivalence_cache.lock().get(&key) {
+                return *result;
+            }
+            let result = matches!(
+                shape_smt::prove_equivalent(&key.0, &key.1),
+                shape_smt::ShapeProof::Proven
+            );
+            self.shape_equivalence_cache.lock().insert(key, result);
+            result
+        }
+        #[cfg(any(not(feature = "shape-smt"), target_arch = "wasm32"))]
+        {
+            let _ = (left, right);
+            false
         }
     }
 
