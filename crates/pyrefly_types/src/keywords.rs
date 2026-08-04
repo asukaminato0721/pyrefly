@@ -84,6 +84,15 @@ impl DataclassTransformMetadata {
     const FROZEN_DEFAULT: Name = Name::new_static("frozen_default");
     const FIELD_SPECIFIERS: Name = Name::new_static("field_specifiers");
 
+    /// Whether `name` is a parameter recognized by the typing specification.
+    pub fn is_parameter_name(name: &Name) -> bool {
+        name == &Self::EQ_DEFAULT
+            || name == &Self::ORDER_DEFAULT
+            || name == &Self::KW_ONLY_DEFAULT
+            || name == &Self::FROZEN_DEFAULT
+            || name == &Self::FIELD_SPECIFIERS
+    }
+
     pub fn from_type_map(map: &TypeMap) -> Self {
         Self {
             eq_default: map.get_bool(&Self::EQ_DEFAULT).unwrap_or(true),

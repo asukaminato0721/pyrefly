@@ -27,6 +27,16 @@ C(x="oops")  # E: `Literal['oops']` is not assignable to parameter `x` with type
 );
 
 testcase!(
+    test_unrecognized_parameter,
+    r#"
+from typing import dataclass_transform
+
+@dataclass_transform(unrecognized=True)  # E: Unexpected keyword argument `unrecognized`
+def create[T](cls: type[T]) -> type[T]: ...
+    "#,
+);
+
+testcase!(
     test_field_named_like_builtin,
     {
         let mut env = TestEnv::new();

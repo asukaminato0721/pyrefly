@@ -63,6 +63,7 @@ use crate::types::callable::FunctionKind;
 use crate::types::callable::ParamList;
 use crate::types::callable::Params;
 use crate::types::class::ClassType;
+use crate::types::keywords::DataclassTransformMetadata;
 use crate::types::keywords::KwCall;
 use crate::types::keywords::TypeMap;
 use crate::types::literal::Lit;
@@ -1723,6 +1724,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         };
         if let Some(func_metadata) = kw_metadata {
+            if matches!(func_metadata.kind, FunctionKind::DataclassTransform) {
+                for kw in keywords {
+                    if let Some(name) = kw.arg
+                        && !DataclassTransformMetadata::is_parameter_name(&name.id)
+                    {
+                        self.error(
+                            errors,
+                            kw.range,
+                            ErrorKind::UnexpectedKeyword,
+                            format!("Unexpected keyword argument `{}`", name.id),
+                        );
+                    }
+                }
+            }
             // The call form `dataclass(C)` transforms `C` in place, so reject the same
             // class kinds as the `@dataclass` decorator (see `report_forbidden_dataclass_target`).
             // The decorator path never reaches here: a bare decorator is not a call.
