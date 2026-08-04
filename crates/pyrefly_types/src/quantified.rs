@@ -41,6 +41,8 @@ pub enum QuantifiedOrigin {
     Pep695,
     /// Synthetic Self quantified synthesized for `__new__` on a class.
     SyntheticSelf,
+    /// Synthetic type parameter inferred for an unannotated callable parameter.
+    SyntheticUnannotatedParameter,
     /// Synthetic binder created during callable/tuple instantiation (TypeVarTuple residual).
     SyntheticCallableResidual,
 }

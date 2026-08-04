@@ -148,6 +148,8 @@ struct FunctionParamsResult {
     paramspec: Option<Quantified>,
     /// Maps parameter names to their resolved types for unannotated parameters.
     resolved_param_types: SmallMap<Name, Type>,
+    /// Type parameters synthesized for unannotated parameters without contextual types.
+    implicit_tparams: Vec<Quantified>,
 }
 
 fn type_shape_dsl_domain(ty: &Type) -> Option<TypeShapeDslDomain> {
@@ -681,6 +683,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             params,
             paramspec,
             resolved_param_types,
+            implicit_tparams,
         } = self.get_params_and_paramspec(
             def,
             flags.facts().is_stub(),
@@ -694,6 +697,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .iter()
             .filter_map(|key| self.get_idx(*key).deref().parameter().cloned());
         tparams.extend(legacy_tparams);
+        tparams.extend(implicit_tparams);
         let tparams = self.validated_tparams(def.range, tparams, TParamsSource::Function, errors);
 
         let kind = if let Some(dsl_fn) = shape_dsl_def {
@@ -1242,6 +1246,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         is_stub: bool,
         self_type: &mut Option<Type>,
         hint: Option<Type>,
+        implicit_tparam_index: &mut u32,
         errors: &ErrorCollector,
     ) -> ParamTypeResult {
         // We only want to use self for the first param, so take & replace with None
@@ -1296,7 +1301,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             .promote_implicit_literals(self.stdlib),
                     )
                 } else {
-                    self.heap.mk_any_implicit()
+                    let q = self.synthetic_unannotated_parameter(
+                        name.range(),
+                        *implicit_tparam_index,
+                    );
+                    *implicit_tparam_index += 1;
+                    self.heap.mk_quantified(q)
                 };
                 (ty, required, true)
             }
@@ -1323,6 +1333,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let mut paramspec_args = None;
         let mut paramspec_kwargs = None;
         let mut resolved_param_types = SmallMap::new();
+        let mut implicit_tparam_index = 0;
         let mut params = Vec::with_capacity(def.parameters.len());
         params.extend(def.parameters.posonlyargs.iter().map(|x| {
             let decorator_hint = decorator_param_hints
@@ -1345,6 +1356,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 decorator_hint.or(parent_hint),
+                &mut implicit_tparam_index,
                 errors,
             );
             if is_unannotated {
@@ -1379,6 +1391,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 decorator_hint.or(parent_hint),
+                &mut implicit_tparam_index,
                 errors,
             );
             if is_unannotated {
@@ -1422,7 +1435,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 None,
                 is_stub,
                 &mut None,
-                parent_hint,
+                parent_hint.or_else(|| Some(self.heap.mk_any_implicit())),
+                &mut implicit_tparam_index,
                 errors,
             );
             if is_unannotated {
@@ -1460,6 +1474,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 parent_hint,
+                &mut implicit_tparam_index,
                 errors,
             );
             if is_unannotated {
@@ -1478,7 +1493,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 None,
                 is_stub,
                 self_type,
-                parent_hint,
+                parent_hint.or_else(|| Some(self.heap.mk_any_implicit())),
+                &mut implicit_tparam_index,
                 errors,
             );
             if is_unannotated {
@@ -1558,10 +1574,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .collect();
             None
         };
+        let implicit_tparams = resolved_param_types
+            .values()
+            .filter_map(|ty| match ty {
+                Type::Quantified(q)
+                    if q.identity().origin
+                        == QuantifiedOrigin::SyntheticUnannotatedParameter =>
+                {
+                    Some((**q).clone())
+                }
+                _ => None,
+            })
+            .collect();
         FunctionParamsResult {
             params,
             paramspec,
             resolved_param_types,
+            implicit_tparams,
         }
     }
 

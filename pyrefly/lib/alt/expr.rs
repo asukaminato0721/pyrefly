@@ -9,6 +9,7 @@ use std::cell::LazyCell;
 use std::fmt;
 use std::fmt::Display;
 use std::slice;
+use std::sync::Arc;
 
 use dupe::Dupe;
 use itertools::Either;
@@ -120,6 +121,7 @@ use crate::types::type_var::Restriction;
 use crate::types::type_var::TypeVar;
 use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
+use crate::types::types::TParams;
 use crate::types::types::Type;
 
 #[derive(Debug, Clone, Copy)]
@@ -596,14 +598,20 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     hint,
                     errors,
                     |cur_hint, callable_errors| {
-                        let implicit_any = |name: &Name, range: TextRange| {
+                        let mut implicit_tparams = Vec::new();
+                        let mut implicit_parameter = |name: &Name, range| {
                             self.error(
                                 callable_errors,
                                 range,
                                 ErrorKind::ImplicitAnyLambda,
                                 format!("Type of lambda parameter `{name}` is unknown"),
                             );
-                            self.heap.mk_any_implicit()
+                            let q = self.synthetic_unannotated_parameter(
+                                range,
+                                implicit_tparams.len() as u32,
+                            );
+                            implicit_tparams.push(q.clone());
+                            self.heap.mk_quantified(q)
                         };
                         let (param_hints, vararg_hint, kwarg_hint, return_hint) = cur_hint
                             .map_or_else(
@@ -646,7 +654,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                             promoted
                                         }
                                     } else {
-                                        implicit_any(&name.id, name.range())
+                                        implicit_parameter(&name.id, name.range())
                                     };
                                     self.set_lambda_param_type(id, ty.clone());
                                     let required = match default_ty {
@@ -663,8 +671,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 }),
                         );
                         if let Some((name, id)) = vararg {
-                            let ty =
-                                vararg_hint.unwrap_or_else(|| implicit_any(&name.id, name.range()));
+                            let ty = vararg_hint.unwrap_or_else(|| {
+                                self.error(
+                                    callable_errors,
+                                    name.range(),
+                                    ErrorKind::ImplicitAnyLambda,
+                                    format!(
+                                        "Type of lambda parameter `{}` is unknown",
+                                        name.id
+                                    ),
+                                );
+                                self.heap.mk_any_implicit()
+                            });
                             let body_ty = match &ty {
                                 Type::Unpack(inner) => (**inner).clone(),
                                 _ => self.heap.mk_unbounded_tuple(ty.clone()),
@@ -673,8 +691,18 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             params.push(Param::Varargs(Some(name.id.clone()), ty));
                         }
                         if let Some((name, id)) = kwarg {
-                            let ty =
-                                kwarg_hint.unwrap_or_else(|| implicit_any(&name.id, name.range()));
+                            let ty = kwarg_hint.unwrap_or_else(|| {
+                                self.error(
+                                    callable_errors,
+                                    name.range(),
+                                    ErrorKind::ImplicitAnyLambda,
+                                    format!(
+                                        "Type of lambda parameter `{}` is unknown",
+                                        name.id
+                                    ),
+                                );
+                                self.heap.mk_any_implicit()
+                            });
                             let body_ty = match &ty {
                                 Type::Unpack(inner) => (**inner).clone(),
                                 _ => {
@@ -715,7 +743,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         } else {
                             ret
                         };
-                        self.heap.mk_callable(params, ret)
+                        let callable = self.heap.mk_callable(params, ret);
+                        if implicit_tparams.is_empty() {
+                            callable
+                        } else if let Type::Callable(callable) = callable {
+                            Forallable::Callable(*callable)
+                                .forall(Arc::new(TParams::new(implicit_tparams)))
+                        } else {
+                            unreachable!("mk_callable must return Type::Callable")
+                        }
                     },
                     |callable| callable,
                 )

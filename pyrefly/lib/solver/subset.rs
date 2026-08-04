@@ -68,6 +68,7 @@ use crate::types::callable::params_are_gradual_variadic;
 use crate::types::class::ClassType;
 use crate::types::quantified::Quantified;
 use crate::types::quantified::QuantifiedKind;
+use crate::types::quantified::QuantifiedOrigin;
 use crate::types::simplify::unions;
 use crate::types::tuple::Tuple;
 use crate::types::type_alias::TypeAliasData;
@@ -1806,6 +1807,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             }
             (Type::Quantified(q), Type::Ellipsis) | (Type::Ellipsis, Type::Quantified(q))
                 if q.kind() == QuantifiedKind::ParamSpec =>
+            {
+                Ok(())
+            }
+            (Type::Quantified(q), _)
+            | (_, Type::Quantified(q))
+                if q.identity().origin
+                    == QuantifiedOrigin::SyntheticUnannotatedParameter =>
             {
                 Ok(())
             }

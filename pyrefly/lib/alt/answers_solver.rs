@@ -1777,6 +1777,30 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .clone()
     }
 
+    /// Create the type parameter used to infer a generic signature for an unannotated callable.
+    pub(crate) fn synthetic_unannotated_parameter(
+        &self,
+        range: TextRange,
+        index: u32,
+    ) -> Quantified {
+        Quantified::new(
+            QuantifiedIdentity::new(
+                self.module().name(),
+                AnchorIndex::first(range),
+                QuantifiedOrigin::SyntheticUnannotatedParameter,
+            ),
+            Name::new(if index == 0 {
+                "T".to_owned()
+            } else {
+                format!("T{index}")
+            }),
+            QuantifiedKind::TypeVar,
+            None,
+            Restriction::Unrestricted,
+            PreInferenceVariance::Invariant,
+        )
+    }
+
     /// Get or create a tuple-carrier TypeVar or IntVar for a jaxtyping variadic shape name.
     ///
     /// A variadic jaxtyping shape (`*name`) whose enclosing shaped-array class uses a

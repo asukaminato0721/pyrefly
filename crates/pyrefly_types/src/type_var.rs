@@ -27,6 +27,7 @@ use crate::equality::TypeEqCtx;
 use crate::heap::TypeHeap;
 use crate::quantified::Quantified;
 use crate::quantified::QuantifiedKind;
+use crate::quantified::QuantifiedOrigin;
 use crate::simplify::unions;
 use crate::stdlib::Stdlib;
 use crate::types::Type;
@@ -82,7 +83,11 @@ impl Restriction {
 impl Quantified {
     /// The upper bound of this type parameter as a type.
     pub fn upper_bound(&self, stdlib: &Stdlib, heap: &TypeHeap) -> Type {
-        self.restriction.as_type(stdlib, heap, self.kind)
+        if self.identity().origin == QuantifiedOrigin::SyntheticUnannotatedParameter {
+            heap.mk_any_implicit()
+        } else {
+            self.restriction.as_type(stdlib, heap, self.kind)
+        }
     }
 }
 

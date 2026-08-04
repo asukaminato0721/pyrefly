@@ -15,6 +15,7 @@ use pyrefly_types::lit_int::LitInt;
 use pyrefly_types::literal::LitStyle;
 use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
+use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_types::simplify::intersect;
 use pyrefly_types::type_var::Restriction;
 use pyrefly_util::prelude::VecExt;
@@ -503,7 +504,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if matches!(
                     left_q.restriction(),
                     Restriction::Constraints(_) | Restriction::Bound(Type::Union(_))
-                ) =>
+                ) || left_q.identity().origin
+                    == QuantifiedOrigin::SyntheticUnannotatedParameter =>
             {
                 Some(
                     self.on_quantified(left_q, left_narrow, &|left_restriction| {
@@ -515,7 +517,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 if matches!(
                     right_q.restriction(),
                     Restriction::Constraints(_) | Restriction::Bound(Type::Union(_))
-                ) =>
+                ) || right_q.identity().origin
+                    == QuantifiedOrigin::SyntheticUnannotatedParameter =>
             {
                 Some(
                     self.on_quantified(right_q, right_narrow, &|right_restriction| {

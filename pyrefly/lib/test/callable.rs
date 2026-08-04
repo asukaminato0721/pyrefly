@@ -13,8 +13,8 @@ testcase!(
     r#"
 from typing import Callable, reveal_type
 f1 = lambda x: 1
-reveal_type(f1)  # E: revealed type: (x: Unknown) -> Literal[1]
-f2 = lambda x: reveal_type(x)  # E: revealed type: Unknown
+reveal_type(f1)  # E: revealed type: [T](x: T) -> Literal[1]
+f2 = lambda x: reveal_type(x)  # E: revealed type: T
 f3: Callable[[int], int] = lambda x: 1
 reveal_type(f3)  # E: revealed type: (int) -> int
 f4: Callable[[int], int] = lambda x: reveal_type(x)  # E: revealed type: int
@@ -26,17 +26,33 @@ f8: Callable[[int], int] = lambda x: x + "foo" # E: Argument `Literal['foo']` is
 );
 
 testcase!(
+    test_infer_generic_callable_signatures,
+    r#"
+from typing import assert_type, reveal_type
+
+identity = lambda value: value
+reveal_type(identity)  # E: revealed type: [T](value: T) -> T
+assert_type(identity("value"), str)
+
+def named_identity(value):
+    return value
+reveal_type(named_identity)  # E: revealed type: [T](value: T) -> T
+assert_type(named_identity("value"), str)
+"#,
+);
+
+testcase!(
     test_lambda_defaults,
     r#"
 from typing import reveal_type
 f = lambda x, y=1: x + y
-reveal_type(f)  # E: revealed type: (x: Unknown, y: int = 1) -> Unknown
+reveal_type(f)  # E: revealed type: [T](x: T, y: int = 1) -> Unknown
 f(1)  # OK, y has default
 f(1, 2)  # OK
 f()  # E: Missing argument `x`
 
 g = lambda x, y="hello", z=None: (x, y, z)
-reveal_type(g)  # E: revealed type: (x: Unknown, y: str = 'hello', z: Unknown | None = None) -> tuple[Unknown, str, Unknown | None]
+reveal_type(g)  # E: revealed type: [T](x: T, y: str = 'hello', z: Unknown | None = None) -> tuple[T, str, Unknown | None]
 g(1)  # OK
 g(1, "world")  # OK
 g(1, "world", True)  # OK, z is `Any | None`
@@ -548,7 +564,6 @@ testcase!(
     r#"
 from typing import Any, assert_type
 def f(x, y = "", z = None):
-    assert_type(x, Any)
     assert_type(y, Any | str)
     assert_type(z, Any | None)
     "#,
@@ -1664,7 +1679,7 @@ testcase!(
     r#"
 from typing import Callable
 
-f: Callable[[int], None] = lambda x, y: None  # E: Type of lambda parameter `y` is unknown  # E: `(x: int, y: Unknown) -> None` is not assignable to `(int) -> None`
+f: Callable[[int], None] = lambda x, y: None  # E: Type of lambda parameter `y` is unknown  # E: `[T](x: int, y: T) -> None` is not assignable to `(int) -> None`
 "#,
 );
 
@@ -1828,7 +1843,7 @@ def infer[**P](f: Callable[P, None]) -> None: ...
 def source(x: int, y: str) -> None: ...
 
 apply(source, lambda x, y: None)
-apply(source, lambda x, z: None)  # E: Type of lambda parameter `z` is unknown  # E: Argument `(x: int, z: Unknown) -> None` is not assignable to parameter `g` with type `(x: int, y: str) -> None`
+apply(source, lambda x, z: None)  # E: Type of lambda parameter `z` is unknown  # E: Argument `[T](x: int, z: T) -> None` is not assignable to parameter `g` with type `(x: int, y: str) -> None`
 infer(lambda x: None)  # E: Type of lambda parameter `x` is unknown
 infer(lambda *args, **kwargs: None)  # E: Type of lambda parameter `args` is unknown  # E: Type of lambda parameter `kwargs` is unknown
 "#,
