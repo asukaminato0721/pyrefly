@@ -14,4 +14,5 @@ pub(crate) mod conda;
 pub mod environment;
 pub(crate) mod finder;
 pub mod interpreters;
+pub(crate) mod pixi;
 pub(crate) mod venv;

@@ -18,6 +18,18 @@ interface InterpreterProvider {
   onDidChange(callback: () => void): vscode.Disposable;
 }
 
+export function selectInterpreterPath(
+  managerId: string | undefined,
+  preferredPath: string | undefined,
+  legacyPath: string | undefined,
+): string | undefined {
+  return managerId === 'ms-python.python:system' &&
+    legacyPath !== undefined &&
+    /(^|[\\/])\.pixi[\\/]envs[\\/]/.test(legacyPath)
+    ? legacyPath
+    : preferredPath;
+}
+
 export class PythonEnvironment {
   private provider: Promise<InterpreterProvider | undefined>;
   private listeners: (() => void)[] = [];
@@ -36,36 +48,64 @@ export class PythonEnvironment {
   }
 
   private async tryResolveProvider(): Promise<InterpreterProvider | undefined> {
-    // Prefer vscode-python-environments if available
-    try {
-      const api = await PythonEnvironments.api();
+    const [pythonEnvironments, pythonExtension] = await Promise.all([
+      PythonEnvironments.api().catch(() => undefined),
+      PythonExtension.api().catch(() => undefined),
+    ]);
+
+    if (pythonEnvironments) {
+      const preferred = pythonEnvironments;
+      const legacy = pythonExtension;
       return {
         async getPath(uri?: vscode.Uri) {
-          const env = await api.getEnvironment(uri);
-          return env?.execInfo?.run?.executable;
+          const env = await preferred.getEnvironment(uri);
+          const path = env?.execInfo?.run?.executable;
+          if (
+            env?.envId.managerId === 'ms-python.python:system' &&
+            legacy
+          ) {
+            // The legacy Python extension detects Pixi without a separate
+            // environment-manager extension.
+            const legacyPath = await legacy.environments.getActiveEnvironmentPath(
+              uri,
+            );
+            return selectInterpreterPath(
+              env.envId.managerId,
+              path,
+              legacyPath.path,
+            );
+          }
+          return path;
         },
         onDidChange(callback: () => void) {
-          return api.onDidChangeEnvironment(() => callback());
+          const disposables = [
+            preferred.onDidChangeEnvironment(() => callback()),
+          ];
+          if (legacy) {
+            disposables.push(
+              legacy.environments.onDidChangeActiveEnvironmentPath(callback),
+            );
+          }
+          return vscode.Disposable.from(...disposables);
         },
       };
-    } catch {}
+    }
 
-    // Fall back to ms-python.python
-    try {
-      const ext = await PythonExtension.api();
+    if (pythonExtension) {
+      const legacy = pythonExtension;
       return {
         async getPath(uri?: vscode.Uri) {
           const envPath =
-            await ext.environments.getActiveEnvironmentPath(uri);
+            await legacy.environments.getActiveEnvironmentPath(uri);
           return envPath.path.length > 0 ? envPath.path : undefined;
         },
         onDidChange(callback: () => void) {
-          return ext.environments.onDidChangeActiveEnvironmentPath(callback);
+          return legacy.environments.onDidChangeActiveEnvironmentPath(callback);
         },
       };
-    } catch {
-      return undefined;
     }
+
+    return undefined;
   }
 
   private showInstallWarning() {

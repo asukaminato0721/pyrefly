@@ -10,6 +10,7 @@ import {promises as fs} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 import * as vscode from 'vscode';
+import {selectInterpreterPath} from '../python-environment';
 
 suite('Extension Test Suite', () => {
 	const extension: vscode.Extension<unknown> | undefined = vscode.extensions.getExtension('meta.pyrefly');
@@ -19,6 +20,25 @@ suite('Extension Test Suite', () => {
 		this.timeout(10000);
 		await extension?.activate();
 		assert.ok(true);
+	});
+
+	test('Prefer legacy Pixi discovery over a system interpreter', () => {
+		assert.strictEqual(
+			selectInterpreterPath(
+				'ms-python.python:system',
+				'C:\\Program Files\\Python314\\python.exe',
+				'C:\\project\\.pixi\\envs\\default\\python.exe',
+			),
+			'C:\\project\\.pixi\\envs\\default\\python.exe',
+		);
+		assert.strictEqual(
+			selectInterpreterPath(
+				'ms-python.python:venv',
+				'/project/.venv/bin/python',
+				'/project/.pixi/envs/default/bin/python',
+			),
+			'/project/.venv/bin/python',
+		);
 	});
 
 	test('Infer types in the current file', async function () {

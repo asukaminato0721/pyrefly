@@ -19,6 +19,7 @@ use which::which;
 use crate::environment::active_environment::ActiveEnvironment;
 use crate::environment::conda;
 use crate::environment::environment::PythonEnvironment;
+use crate::environment::pixi;
 use crate::environment::venv;
 use crate::util::ConfigOrigin;
 
@@ -108,8 +109,9 @@ impl Interpreters {
     /// 4. Check for an IDE / LSP provided `python-interpreter`.
     /// 5. Check for an active venv or Conda environment
     /// 6. Check for a `venv` in the current project
-    /// 7. Use an interpreter we can find on the `$PATH`
-    /// 8. Give up and return an error
+    /// 7. Check for a default Pixi environment in the current project
+    /// 8. Use an interpreter we can find on the `$PATH`
+    /// 9. Give up and return an error
     pub(crate) fn find_interpreter(
         &self,
         path: Option<&Path>,
@@ -161,6 +163,12 @@ impl Interpreters {
             && let Some(venv) = venv::find(start_path)
         {
             return Ok(ConfigOrigin::auto(venv));
+        }
+
+        if let Some(start_path) = path
+            && let Some(pixi) = pixi::find(start_path)
+        {
+            return Ok(ConfigOrigin::auto(pixi));
         }
 
         if let Some(interpreter) = Self::get_default_interpreter() {
