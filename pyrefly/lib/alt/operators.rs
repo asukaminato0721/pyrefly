@@ -210,7 +210,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         errors: &ErrorCollector,
         context: &dyn Fn() -> ErrorContext,
     ) -> Type {
-        let mut first_call = None;
+        let mut first_error = None;
+        let mut unresolved_call = None;
         for (dunder, target, arg) in calls {
             let method_type_dunder = self.type_of_magic_dunder_attr(
                 target,
@@ -238,14 +239,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             );
             // Soft errors (e.g. unknown-argument-type) must not reject an otherwise
             // valid dunder call, so gate on hard errors only.
-            if !call_errors.has_hard() {
+            let call_succeeded = !call_errors.has_hard();
+            // An unresolved return gives us no information, so keep it as a fallback while
+            // trying the reflected dunder for a precise result.
+            if call_succeeded && matches!(self.solver().expand(ret.clone()), Type::Var(_)) {
+                if unresolved_call.is_none() {
+                    unresolved_call = Some((callee_errors, ret));
+                }
+            } else if call_succeeded {
                 errors.extend(callee_errors);
                 return ret;
-            } else if first_call.is_none() {
-                first_call = Some((callee_errors, call_errors, ret));
+            } else if first_error.is_none() {
+                first_error = Some((callee_errors, call_errors, ret));
             }
         }
-        if let Some((callee_errors, call_errors, ret)) = first_call {
+        if let Some((callee_errors, ret)) = unresolved_call {
+            errors.extend(callee_errors);
+            ret
+        } else if let Some((callee_errors, call_errors, ret)) = first_error {
             errors.extend(callee_errors);
             errors.extend(call_errors);
             ret

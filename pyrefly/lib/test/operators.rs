@@ -943,6 +943,33 @@ def f(x: int, c: Color) -> None:
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/4422
+testcase!(
+    test_reflected_dunder_after_unresolved_forward_result,
+    TestEnv::one(
+        "numpy",
+        r#"
+from typing import Self
+
+class integer:
+    def __new__(cls, value: int, /) -> Self: ...
+
+class int64(integer):
+    def __add__[T](self, other: object, /) -> T: ...
+"#,
+    ),
+    r#"
+from typing import Self, assert_type
+import numpy as np
+
+class Period:
+    def __radd__(self, other: np.integer) -> Self:
+        return self
+
+assert_type(np.int64(1) + Period(), Period)
+"#,
+);
+
 testcase!(
     test_type_of_typevar_equality,
     r#"
