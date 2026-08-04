@@ -598,6 +598,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     hint,
                     errors,
                     |cur_hint, callable_errors| {
+                        let infer_generic = cur_hint.is_none();
                         let mut implicit_tparams = Vec::new();
                         let mut implicit_parameter = |name: &Name, range| {
                             self.error(
@@ -606,6 +607,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 ErrorKind::ImplicitAnyLambda,
                                 format!("Type of lambda parameter `{name}` is unknown"),
                             );
+                            if !infer_generic || name == "self" || name == "cls" {
+                                return self.heap.mk_any_implicit();
+                            }
                             let q = self.synthetic_unannotated_parameter(
                                 range,
                                 implicit_tparams.len() as u32,
@@ -676,10 +680,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                     callable_errors,
                                     name.range(),
                                     ErrorKind::ImplicitAnyLambda,
-                                    format!(
-                                        "Type of lambda parameter `{}` is unknown",
-                                        name.id
-                                    ),
+                                    format!("Type of lambda parameter `{}` is unknown", name.id),
                                 );
                                 self.heap.mk_any_implicit()
                             });
@@ -696,10 +697,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                     callable_errors,
                                     name.range(),
                                     ErrorKind::ImplicitAnyLambda,
-                                    format!(
-                                        "Type of lambda parameter `{}` is unknown",
-                                        name.id
-                                    ),
+                                    format!("Type of lambda parameter `{}` is unknown", name.id),
                                 );
                                 self.heap.mk_any_implicit()
                             });

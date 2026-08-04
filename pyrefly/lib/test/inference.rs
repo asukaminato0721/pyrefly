@@ -291,7 +291,7 @@ testcase!(
     TestEnv::new().enable_unknown_variable_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 y = untyped(1)  # E: The type of `y` is unknown
 "#,
@@ -302,7 +302,7 @@ testcase!(
     TestEnv::new().enable_unknown_variable_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 y: int = untyped(1)
 "#,
@@ -322,7 +322,7 @@ testcase!(
     TestEnv::new().enable_unknown_variable_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 # pyrefly: ignore[implicit-any]
 y = untyped(1)  # E: The type of `y` is unknown
@@ -344,7 +344,7 @@ testcase!(
     TestEnv::new().enable_unknown_variable_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 # A class-body assignment defines a class attribute, which is reported by
 # implicit-any-attribute, not unknown-variable-type.

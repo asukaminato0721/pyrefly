@@ -729,7 +729,7 @@ testcase!(
     TestEnv::new().enable_unknown_argument_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 
@@ -751,7 +751,7 @@ testcase!(
     test_unknown_argument_type_disabled_no_error,
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 
@@ -767,7 +767,7 @@ testcase!(
     TestEnv::new().enable_unknown_argument_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 
@@ -782,7 +782,7 @@ testcase!(
 from typing import overload
 
 def untyped(x):
-    return x
+    return x.unknown
 
 @overload
 def f(n: int) -> int: ...
@@ -800,7 +800,7 @@ testcase!(
     TestEnv::new().enable_unknown_argument_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 
@@ -814,7 +814,7 @@ testcase!(
     TestEnv::new().enable_unknown_argument_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 
@@ -827,7 +827,7 @@ testcase!(
     TestEnv::new().enable_unknown_argument_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 def f(n: int) -> None: ...
 

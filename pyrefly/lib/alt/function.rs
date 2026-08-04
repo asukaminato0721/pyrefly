@@ -69,6 +69,7 @@ use crate::binding::binding::Key;
 use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyLegacyTypeParam;
+use crate::binding::binding::ReturnTypeKind;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::error::context::TypeCheckContext;
@@ -1246,6 +1247,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         is_stub: bool,
         self_type: &mut Option<Type>,
         hint: Option<Type>,
+        infer_generic: bool,
         implicit_tparam_index: &mut u32,
         errors: &ErrorCollector,
     ) -> ParamTypeResult {
@@ -1300,13 +1302,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             .with_literal_style(LitStyle::Implicit)
                             .promote_implicit_literals(self.stdlib),
                     )
-                } else {
-                    let q = self.synthetic_unannotated_parameter(
-                        name.range(),
-                        *implicit_tparam_index,
-                    );
+                } else if infer_generic {
+                    let q =
+                        self.synthetic_unannotated_parameter(name.range(), *implicit_tparam_index);
                     *implicit_tparam_index += 1;
                     self.heap.mk_quantified(q)
+                } else {
+                    self.heap.mk_any_implicit()
                 };
                 (ty, required, true)
             }
@@ -1334,6 +1336,26 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         let mut paramspec_kwargs = None;
         let mut resolved_param_types = SmallMap::new();
         let mut implicit_tparam_index = 0;
+        let returned_names = match self.bindings().get(
+            self.bindings()
+                .key_to_idx(&Key::ReturnType(ShortIdentifier::new(&def.name))),
+        ) {
+            Binding::ReturnType(return_type) => match &return_type.kind {
+                ReturnTypeKind::ShouldInferType { returns, .. } => returns
+                    .iter()
+                    .filter_map(|idx| match self.bindings().get(*idx) {
+                        Binding::ReturnExplicit(returned) => match returned.expr.as_deref() {
+                            Some(Expr::Name(name)) => Some(name.id.clone()),
+                            _ => None,
+                        },
+                        _ => unreachable!("return key must have a return binding"),
+                    })
+                    .collect::<SmallSet<_>>(),
+                _ => SmallSet::new(),
+            },
+            Binding::Any(_) => SmallSet::new(),
+            _ => unreachable!("return type key must have a return type binding"),
+        };
         let mut params = Vec::with_capacity(def.parameters.len());
         params.extend(def.parameters.posonlyargs.iter().map(|x| {
             let decorator_hint = decorator_param_hints
@@ -1356,6 +1378,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 decorator_hint.or(parent_hint),
+                returned_names.contains(&x.parameter.name.id),
                 &mut implicit_tparam_index,
                 errors,
             );
@@ -1391,6 +1414,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 decorator_hint.or(parent_hint),
+                returned_names.contains(&x.parameter.name.id),
                 &mut implicit_tparam_index,
                 errors,
             );
@@ -1436,6 +1460,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 &mut None,
                 parent_hint.or_else(|| Some(self.heap.mk_any_implicit())),
+                false,
                 &mut implicit_tparam_index,
                 errors,
             );
@@ -1474,6 +1499,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 parent_hint,
+                returned_names.contains(&x.parameter.name.id),
                 &mut implicit_tparam_index,
                 errors,
             );
@@ -1494,6 +1520,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 is_stub,
                 self_type,
                 parent_hint.or_else(|| Some(self.heap.mk_any_implicit())),
+                false,
                 &mut implicit_tparam_index,
                 errors,
             );
@@ -1578,8 +1605,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .values()
             .filter_map(|ty| match ty {
                 Type::Quantified(q)
-                    if q.identity().origin
-                        == QuantifiedOrigin::SyntheticUnannotatedParameter =>
+                    if q.identity().origin == QuantifiedOrigin::SyntheticUnannotatedParameter =>
                 {
                     Some((**q).clone())
                 }

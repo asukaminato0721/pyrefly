@@ -895,7 +895,7 @@ testcase!(
     crate::test::util::TestEnv::new().enable_no_any_return_implicit_error(),
     r#"
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> int:
     return get_implicit_any(3)  # E: Returning implicit Any from function declared to return "int"
@@ -933,7 +933,7 @@ testcase!(
 from typing import Any
 
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> None:
     x = get_implicit_any(3)
@@ -1005,7 +1005,7 @@ testcase!(
 from typing import Any
 
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> Any:
     x = get_implicit_any(3)
@@ -1048,7 +1048,7 @@ testcase!(
     crate::test::util::TestEnv::new().enable_no_any_return_implicit_error(),
     r#"
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> int:
     x = get_implicit_any(3)
@@ -1061,7 +1061,7 @@ testcase!(
     crate::test::util::TestEnv::new().enable_no_any_return_error(),
     r#"
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> int:
     x = get_implicit_any(3)
@@ -1104,7 +1104,7 @@ testcase!(
     crate::test::util::TestEnv::new().enable_no_any_return_implicit_error(),
     r#"
 def get_implicit_any(x):
-    return x
+    return x.unknown
 
 def f() -> int:
     return get_implicit_any(3)  # pyrefly: ignore[no-any-return-implicit]

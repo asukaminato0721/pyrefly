@@ -743,7 +743,7 @@ testcase!(
 from typing import assert_type
 
 def make_decorator(target, decorator_func):
-    decorator_func.__name__ = target.__name__
+    setattr(decorator_func, "__name__", target.__name__)
     return decorator_func
 
 def add_dispatch_support(target=None):
@@ -1018,7 +1018,7 @@ testcase!(
     TestEnv::new().enable_untyped_class_decorator_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 d = untyped(1)
 
@@ -1105,7 +1105,7 @@ testcase!(
     TestEnv::new().enable_untyped_function_decorator_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 # `d` has an implicit `Any` type (from an untyped call), which obscures the function too.
 d = untyped(1)

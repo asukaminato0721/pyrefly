@@ -50,7 +50,7 @@ class C:
 handler: Callable[[int, str], bool]
 collect: Callable[..., str]
 optional_ref: Callable[..., bool]
-to_text: Callable[[Incomplete], str]
+to_text: Callable[..., str]
 gen_ref: Callable[..., int]
 ov_same: Callable[..., bytes]
 ov_diff: Callable[..., Incomplete]

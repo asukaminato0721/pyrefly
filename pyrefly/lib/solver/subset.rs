@@ -1810,10 +1810,8 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             {
                 Ok(())
             }
-            (Type::Quantified(q), _)
-            | (_, Type::Quantified(q))
-                if q.identity().origin
-                    == QuantifiedOrigin::SyntheticUnannotatedParameter =>
+            (Type::Quantified(q), _) | (_, Type::Quantified(q))
+                if q.identity().origin == QuantifiedOrigin::SyntheticUnannotatedParameter =>
             {
                 Ok(())
             }

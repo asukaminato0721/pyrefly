@@ -564,6 +564,7 @@ testcase!(
     r#"
 from typing import Any, assert_type
 def f(x, y = "", z = None):
+    assert_type(x, Any)
     assert_type(y, Any | str)
     assert_type(z, Any | None)
     "#,
@@ -1679,7 +1680,7 @@ testcase!(
     r#"
 from typing import Callable
 
-f: Callable[[int], None] = lambda x, y: None  # E: Type of lambda parameter `y` is unknown  # E: `[T](x: int, y: T) -> None` is not assignable to `(int) -> None`
+f: Callable[[int], None] = lambda x, y: None  # E: Type of lambda parameter `y` is unknown  # E: `(x: int, y: Unknown) -> None` is not assignable to `(int) -> None`
 "#,
 );
 
@@ -1843,7 +1844,7 @@ def infer[**P](f: Callable[P, None]) -> None: ...
 def source(x: int, y: str) -> None: ...
 
 apply(source, lambda x, y: None)
-apply(source, lambda x, z: None)  # E: Type of lambda parameter `z` is unknown  # E: Argument `[T](x: int, z: T) -> None` is not assignable to parameter `g` with type `(x: int, y: str) -> None`
+apply(source, lambda x, z: None)  # E: Type of lambda parameter `z` is unknown  # E: Argument `(x: int, z: Unknown) -> None` is not assignable to parameter `g` with type `(x: int, y: str) -> None`
 infer(lambda x: None)  # E: Type of lambda parameter `x` is unknown
 infer(lambda *args, **kwargs: None)  # E: Type of lambda parameter `args` is unknown  # E: Type of lambda parameter `kwargs` is unknown
 "#,

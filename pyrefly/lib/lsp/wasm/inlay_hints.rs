@@ -13,6 +13,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::module::TextRangeWithModule;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::quantified::QuantifiedOrigin;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
@@ -674,6 +675,14 @@ impl<'a> Transaction<'a> {
         containers: bool,
     ) -> Option<Vec<(TextSize, Type, AnnotationKind)>> {
         let is_interesting_type = |x: &Type| !x.is_any();
+        let has_synthetic_tparam = |x: &Type| {
+            let mut has_synthetic = false;
+            x.for_each_quantified(&mut |q| {
+                has_synthetic |=
+                    q.identity().origin == QuantifiedOrigin::SyntheticUnannotatedParameter;
+            });
+            has_synthetic
+        };
         let is_interesting_expr = |x: &Expr| !Ast::is_literal(x);
         let bindings = self.get_bindings(handle)?;
         let mut res = Vec::new();
@@ -686,6 +695,7 @@ impl<'a> Transaction<'a> {
                             if matches!(&bindings.get(idx), Binding::ReturnType(ret) if !ret.kind.has_return_annotation())
                                 && let Some(ty) = self.get_type_for_display(handle, key)
                                 && is_interesting_type(&ty)
+                                && !has_synthetic_tparam(&ty)
                             {
                                 let fun =
                                     bindings.get(bindings.get(*decorated_idx).undecorated_idx);

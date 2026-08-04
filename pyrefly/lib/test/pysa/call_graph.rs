@@ -5036,12 +5036,14 @@ def foo(base: Base, child: Child):
         let base_query = vec![
             create_call_target("test.Base.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.Base", context),
+                .with_receiver_class_for_test("test.Base", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         let child_query = vec![
             create_call_target("test.Base.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.Child", context),
+                .with_receiver_class_for_test("test.Child", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         vec![(
             "test.foo",
@@ -5079,12 +5081,14 @@ def foo(base: BaseA, child: Child):
         let base_a_query = vec![
             create_call_target("test.BaseA.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.BaseA", context),
+                .with_receiver_class_for_test("test.BaseA", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         let child_query = vec![
             create_call_target("test.BaseA.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.Child", context),
+                .with_receiver_class_for_test("test.Child", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         vec![(
             "test.foo",
@@ -5126,13 +5130,14 @@ def foo(base: A[int], child_b: B, child_c: C, child_d: D):
         let base_query = vec![
             create_call_target("test.A.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.A", context),
+                .with_receiver_class_for_test("test.A", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         let child_b_query = vec![
-            // TODO(T118125320): Return type is None, which is incorrect
             create_call_target("test.A.query", TargetType::Overrides)
                 .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
-                .with_receiver_class_for_test("test.B", context),
+                .with_receiver_class_for_test("test.B", context)
+                .with_return_type(ScalarTypeProperties::int()),
         ];
         let child_c_query = vec![
             create_call_target("test.C.query", TargetType::Overrides)
@@ -5846,18 +5851,19 @@ class C:
 def foo():
   return C(0)  # Redirect `__init__` and `__new__`
 "#,
-    &|_context: &ModuleContext| {
+    &|context: &ModuleContext| {
         vec![(
             "test.foo",
             vec![(
                 "12:10-12:14",
                 constructor_call_callees(
                     vec![
-                        create_call_target("builtins.object.__init__", TargetType::Function)
-                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver),
+                        create_call_target("test.C.__init__", TargetType::Function)
+                            .with_implicit_receiver(ImplicitReceiver::TrueWithObjectReceiver)
+                            .with_receiver_class_for_test("test.C", context),
                     ],
                     vec![
-                        create_call_target("builtins.object.__new__", TargetType::Function)
+                        create_call_target("test.C.__new__", TargetType::Function)
                             .with_is_static_method(true),
                     ],
                 ),

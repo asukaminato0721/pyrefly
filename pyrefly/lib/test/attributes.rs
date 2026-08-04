@@ -3022,7 +3022,7 @@ testcase!(
     TestEnv::new().enable_unknown_attribute_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 class C:
     def __init__(self) -> None:
@@ -3035,7 +3035,7 @@ testcase!(
     TestEnv::new().enable_unknown_attribute_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 class C:
     x = untyped(1)  # E: implicitly inferred to be `Any`
@@ -3047,7 +3047,7 @@ testcase!(
     TestEnv::new().enable_unknown_attribute_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 class C:
     def __init__(self) -> None:
@@ -3071,7 +3071,7 @@ testcase!(
     TestEnv::new().enable_unknown_attribute_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 class C:
     def __init__(self) -> None:
@@ -3099,7 +3099,7 @@ testcase!(
         .enable_unknown_attribute_type_error(),
     r#"
 def untyped(x):
-    return x
+    return x.unknown
 
 # With both rules enabled, a class-body attribute is reported ONLY by
 # unknown-attribute-type, not unknown-variable-type (the is_class_body_assignment

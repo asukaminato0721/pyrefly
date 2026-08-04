@@ -2489,7 +2489,7 @@ testcase!(
     r#"
 from typing import reveal_type
 f1 = lambda x, *args, **kwargs: x
-reveal_type(f1) # E: revealed type: (x: Unknown, *args: Unknown, **kwargs: Unknown) -> Unknown
+reveal_type(f1) # E: revealed type: [T](x: T, *args: Unknown, **kwargs: Unknown) -> T
     "#,
 );
 

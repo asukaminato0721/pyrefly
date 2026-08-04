@@ -456,6 +456,10 @@ fn format_type(ty: &Type, ctx: &mut ExtractionContext) -> Option<String> {
     if let Some(s) = format_callable_type(ty, ctx) {
         return Some(s);
     }
+    if contains_quantified(ty) {
+        ctx.uses_incomplete = true;
+        return Some("Incomplete".to_owned());
+    }
     if ty.any(|sub_type| matches!(sub_type, Type::SelfType(_))) {
         ctx.typing_imports.insert("Self");
     }
@@ -471,6 +475,10 @@ fn format_type(ty: &Type, ctx: &mut ExtractionContext) -> Option<String> {
         return Some("Incomplete".to_owned());
     }
     Some(s)
+}
+
+fn contains_quantified(ty: &Type) -> bool {
+    ty.any(|sub_type| matches!(sub_type, Type::Quantified(_)))
 }
 
 /// Render a callable-typed value as a valid `typing.Callable[...]` annotation,
@@ -519,7 +527,8 @@ fn callable_from_signature(sig: &Callable, ctx: &mut ExtractionContext) -> Strin
                 matches!(
                     p,
                     Param::PosOnly(_, _, Required::Required) | Param::Pos(_, _, Required::Required)
-                )
+                ) && !p.as_type().is_any()
+                    && !contains_quantified(p.as_type())
             }) =>
         {
             let rendered: Vec<String> = params

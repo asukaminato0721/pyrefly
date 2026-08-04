@@ -2226,7 +2226,7 @@ fn test_special_export_usage_change_invalidates() {
     i.check(&["main"], &["main"]);
 
     // Change to use a different cast that's not special - main should be recomputed
-    i.set("foo", "def cast(ty, val): return val");
+    i.set("foo", "def cast(ty, val): return val.unknown");
     i.set("main", "from foo import cast\nx: int = cast(int, 'hello')");
     i.check(&["foo", "main"], &["foo", "main"]);
 }
