@@ -1095,6 +1095,8 @@ pub enum KeyExpect {
     MatchExhaustiveness(TextRange),
     /// Match case reachability check.
     MatchCaseReachability(TextRange),
+    /// Exception handler reachability check.
+    ExceptionHandlerReachability(TextRange),
     /// Private attribute access validation.
     PrivateAttributeAccess(TextRange),
     /// Deferred uninitialized variable check.
@@ -1118,6 +1120,7 @@ impl Ranged for KeyExpect {
             | KeyExpect::Bool(range)
             | KeyExpect::MatchExhaustiveness(range)
             | KeyExpect::MatchCaseReachability(range)
+            | KeyExpect::ExceptionHandlerReachability(range)
             | KeyExpect::PrivateAttributeAccess(range)
             | KeyExpect::UninitializedCheck(range)
             | KeyExpect::ForwardRefUnion(range)
@@ -1138,6 +1141,7 @@ impl DisplayWith<ModuleInfo> for KeyExpect {
             KeyExpect::Bool(r) => ("Bool", r),
             KeyExpect::MatchExhaustiveness(r) => ("MatchExhaustiveness", r),
             KeyExpect::MatchCaseReachability(r) => ("MatchCaseReachability", r),
+            KeyExpect::ExceptionHandlerReachability(r) => ("ExceptionHandlerReachability", r),
             KeyExpect::PrivateAttributeAccess(r) => ("PrivateAttributeAccess", r),
             KeyExpect::UninitializedCheck(r) => ("UninitializedCheck", r),
             KeyExpect::ForwardRefUnion(r) => ("ForwardRefUnion", r),
@@ -1227,6 +1231,8 @@ pub enum BindingExpect {
         narrow_ops_for_case: (Box<NarrowOp>, TextRange),
         case_range: TextRange,
     },
+    /// An exception handler whose declared exceptions may all be covered by earlier handlers.
+    ExceptionHandlerReachability { current: Expr, previous: Vec<Expr> },
     /// Track private attribute accesses that need semantic validation.
     PrivateAttributeAccess(PrivateAttributeAccessCheck),
     /// Deferred check for uninitialized variables. This is a "dangling" binding
@@ -1359,6 +1365,14 @@ impl DisplayWith<Bindings> for BindingExpect {
                     "MatchCaseReachability({}, {})",
                     ctx.display(*subject_idx),
                     ctx.module().display(case_range)
+                )
+            }
+            Self::ExceptionHandlerReachability { current, previous } => {
+                write!(
+                    f,
+                    "ExceptionHandlerReachability({}, {} previous handlers)",
+                    m.display(current),
+                    previous.len(),
                 )
             }
             Self::UninitializedCheck {

@@ -2635,6 +2635,34 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 case_range,
                 errors,
             ),
+            BindingExpect::ExceptionHandlerReachability { current, previous } => {
+                let ignore_errors = self.error_swallower();
+                let current =
+                    self.binding_to_type_exception_handler(current, false, &ignore_errors);
+                let base_exception = self
+                    .heap
+                    .mk_class_type(self.stdlib.base_exception().clone());
+                if !self.behaves_like_any(&current) && self.is_subset_eq(&current, &base_exception)
+                {
+                    let previous: Vec<Type> = previous
+                        .iter()
+                        .map(|handler| {
+                            self.binding_to_type_exception_handler(handler, false, &ignore_errors)
+                        })
+                        .filter(|ty| {
+                            !self.behaves_like_any(ty) && self.is_subset_eq(ty, &base_exception)
+                        })
+                        .collect();
+                    if !previous.is_empty() && self.is_subset_eq(&current, &self.unions(previous)) {
+                        self.error(
+                            errors,
+                            range,
+                            ErrorKind::Unreachable,
+                            "This `except` clause is unreachable because all its exception types are already handled".to_owned(),
+                        );
+                    }
+                }
+            }
             BindingExpect::PrivateAttributeAccess(expectation) => {
                 self.check_private_attribute_access(expectation, errors);
             }

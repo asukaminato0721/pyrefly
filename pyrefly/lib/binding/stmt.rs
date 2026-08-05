@@ -1472,10 +1472,23 @@ impl<'a> BindingsBuilder<'a> {
                 self.stmts(x.orelse, parent);
                 self.finish_branch();
 
+                let mut previous_handlers = Vec::new();
                 for h in x.handlers {
                     self.start_branch();
                     let range = h.range();
                     let h = h.except_handler().unwrap(); // Only one variant for now
+                    if let Some(type_) = &h.type_ {
+                        if !previous_handlers.is_empty() {
+                            self.insert_binding(
+                                KeyExpect::ExceptionHandlerReachability(type_.range()),
+                                BindingExpect::ExceptionHandlerReachability {
+                                    current: type_.as_ref().clone(),
+                                    previous: previous_handlers.clone(),
+                                },
+                            );
+                        }
+                        previous_handlers.push(type_.as_ref().clone());
+                    }
                     match (&h.name, h.type_) {
                         (Some(name), Some(mut type_)) => {
                             let mut handler = self

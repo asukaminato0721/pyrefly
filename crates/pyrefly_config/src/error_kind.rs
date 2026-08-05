@@ -406,9 +406,9 @@ pub enum ErrorKind {
     UnnecessaryComparison,
     /// Warning when calling a builtin type constructor (str, int, float, bool, bytes) on a value that is already of that type.
     UnnecessaryTypeConversion,
-    /// A return or yield that can never be reached.
-    /// This occurs when a return/yield follows a statement that always exits,
-    /// such as return, raise, break, or continue.
+    /// A statement or clause that can never be reached.
+    /// Examples include a return/yield after a statement that always exits and an
+    /// exception handler whose types are all covered by earlier handlers.
     Unreachable,
     /// A match case whose pattern can never match the subject type.
     UnreachableMatchCase,

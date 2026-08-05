@@ -310,16 +310,75 @@ except int:  # E: Invalid exception class
     pass
 except Exception as e2:
     assert_type(e2, Exception)
-except ExceptionGroup as e3:
+except ExceptionGroup as e3:  # E: This `except` clause is unreachable because all its exception types are already handled
     assert_type(e3, ExceptionGroup[Exception])
-except (Exception1, Exception2) as e4:
+except (Exception1, Exception2) as e4:  # E: This `except` clause is unreachable because all its exception types are already handled
     assert_type(e4, Exception1 | Exception2)
-except Exception1 as e5:
+except Exception1 as e5:  # E: This `except` clause is unreachable because all its exception types are already handled
     assert_type(e5, Exception1)
-except x1 as e6:
+except x1 as e6:  # E: This `except` clause is unreachable because all its exception types are already handled
     assert_type(e6, Exception)
-except x2 as e7:
+except x2 as e7:  # E: This `except` clause is unreachable because all its exception types are already handled
     assert_type(e7, Exception1 | Exception2)
+"#,
+);
+
+testcase!(
+    test_unreachable_exception_handler,
+    r#"
+from typing import Any
+
+class CustomError(Exception):
+    pass
+
+try:
+    pass
+except BaseException:
+    pass
+except Exception:  # E: This `except` clause is unreachable because all its exception types are already handled
+    pass
+
+try:
+    pass
+except (ValueError, TypeError):
+    pass
+except ValueError:  # E: This `except` clause is unreachable because all its exception types are already handled
+    pass
+except CustomError:
+    pass
+except Exception:
+    pass
+
+try:
+    pass
+except ValueError:
+    pass
+except TypeError:
+    pass
+except (ValueError, TypeError):  # E: This `except` clause is unreachable because all its exception types are already handled
+    pass
+
+try:
+    pass
+except ValueError:
+    pass
+except (ValueError, TypeError):
+    pass
+
+dynamic: Any = Exception
+try:
+    pass
+except dynamic:
+    pass
+except Exception:
+    pass
+
+try:
+    pass
+except* Exception:
+    pass
+except* ValueError:  # E: This `except` clause is unreachable because all its exception types are already handled
+    pass
 "#,
 );
 
