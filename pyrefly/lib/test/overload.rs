@@ -446,6 +446,53 @@ class P(Protocol):
 );
 
 testcase!(
+    test_overlapping_overloads,
+    r#"
+from typing import Protocol, overload
+
+@overload
+def foo(value: object) -> object: ...
+@overload
+def foo(value: int) -> int: ...  # E: Overload 2 for `foo` will never be used because its parameters overlap overload 1
+def foo(value: object) -> object: ...
+
+# Narrower overloads must remain selectable when they come first.
+@overload
+def ordered(value: int) -> int: ...
+@overload
+def ordered(value: object) -> object: ...
+def ordered(value: object) -> object: ...
+
+@overload
+def generic[T](value: T) -> T: ...
+@overload
+def generic(value: int) -> int: ...  # E: Overload 2 for `generic` will never be used because its parameters overlap overload 1
+def generic(value: object) -> object: ...
+
+class C:
+    @overload
+    def method(self, value: object) -> object: ...
+    @overload
+    def method(self, value: int) -> int: ...  # E: Overload 2 for `method` will never be used because its parameters overlap overload 1
+    def method(self, value: object) -> object: ...
+
+class P(Protocol):
+    @overload
+    def stub(self, value: object) -> object: ...
+    @overload
+    def stub(self, value: int) -> int: ...  # E: Overload 2 for `stub` will never be used because its parameters overlap overload 1
+
+class Descriptor:
+    # Descriptor overloads are conventionally exempt from overlap checks.
+    @overload
+    def __get__(self, instance: object, owner: type[object]) -> object: ...
+    @overload
+    def __get__(self, instance: int, owner: type[object]) -> int: ...
+    def __get__(self, instance: object, owner: type[object]) -> object: ...
+"#,
+);
+
+testcase!(
     test_overload_ignore,
     r#"
 from typing import Never, overload, assert_type
@@ -1567,7 +1614,7 @@ def f2(x: Any) -> int | str: ...
 @overload
 def f3(x: Callable[[Never], None]) -> int: ...
 @overload
-def f3(x: Callable[[str], None]) -> str: ...
+def f3(x: Callable[[str], None]) -> str: ...  # E: will never be used because its parameters overlap
 def f3(x: Any) -> int | str: ...
 
 def g(x: Callable[[Any], None]):

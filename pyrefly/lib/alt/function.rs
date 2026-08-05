@@ -431,10 +431,10 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     self.check_decorator_consistency_no_implementation(&acc, errors);
                     let metadata = self.merge_overload_metadata_no_implementation(&acc);
                     let func_name = acc.first().2.kind.function_name().into_owned();
+                    let signatures = self.extract_signatures(&func_name, acc, errors);
+                    self.check_overload_order(&func_name, &signatures, def.defining_cls(), errors);
                     Type::Overload(Overload {
-                        signatures: self
-                            .extract_signatures(&func_name, acc, errors)
-                            .mapped(|(_, sig)| sig),
+                        signatures: signatures.mapped(|(_, sig)| sig),
                         metadata: Box::new(metadata.clone()),
                     })
                 }
@@ -467,6 +467,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         defs,
                         errors,
                     );
+                    if !Self::is_singledispatch_dispatcher(&def.ty) {
+                        self.check_overload_order(
+                            metadata.kind.function_name().as_ref(),
+                            &sigs,
+                            def.defining_cls(),
+                            errors,
+                        );
+                    }
                     self.check_signature_consistency(&sigs, &def, errors);
                     Type::Overload(Overload {
                         signatures: sigs.mapped(|(_, sig)| sig),
@@ -2196,6 +2204,96 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .find_map(|(_, _, metadata)| metadata.flags.dataclass_transform_metadata.clone());
         }
         metadata
+    }
+
+    /// Report overloads whose accepted inputs are contained by an earlier signature.
+    fn check_overload_order(
+        &self,
+        func_name: &Name,
+        overloads: &Vec1<(TextRange, OverloadType)>,
+        defining_cls: Option<&Class>,
+        errors: &ErrorCollector,
+    ) {
+        // Descriptors conventionally order their broad fallback first. Other type checkers exempt
+        // `__get__` from overlap checks, and typeshed relies on that behavior.
+        if defining_cls.is_some() && func_name == &dunder::GET {
+            return;
+        }
+        let all_tparams = |tparams: Option<&Arc<TParams>>| match (tparams, defining_cls) {
+            (None, None) => None,
+            (Some(_), None) => tparams.cloned(),
+            (None, Some(cls)) => Some(self.get_class_tparams(cls)),
+            (Some(tparams), Some(cls)) => {
+                let mut all_tparams = (**tparams).clone();
+                all_tparams.extend(&self.get_class_tparams(cls));
+                Some(Arc::new(all_tparams))
+            }
+        };
+        let input_signature = |overload: &OverloadType, use_upper_bounds: bool| {
+            let (tparams, mut func) = match overload {
+                OverloadType::Function(func) => (None, func.clone()),
+                OverloadType::Forall(forall) => (Some(&forall.tparams), forall.body.clone()),
+            };
+            let tparams = all_tparams(tparams);
+            if use_upper_bounds && let Some(tparams) = &tparams {
+                func = self.subst_function(tparams, func);
+            }
+            func.signature.ret = self.heap.mk_none();
+            let ty = if !use_upper_bounds && let Some(tparams) = tparams {
+                Forallable::Function(func).forall(tparams)
+            } else {
+                self.heap.mk_function(func)
+            };
+            // Assignability is permissive for gradual and opaque constructs, including protocols,
+            // aliases, and open TypedDict unpacking. A match involving one does not prove that one
+            // overload's parameter set contains the other.
+            (!ty.any(|t| {
+                matches!(
+                    t,
+                    Type::Any(_)
+                        | Type::TypeAlias(_)
+                        | Type::UntypedAlias(_)
+                        | Type::Unpack(_)
+                )
+                    || matches!(
+                        t,
+                        Type::Callable(callable)
+                            if matches!(callable.params, Params::Ellipsis | Params::Materialization)
+                    )
+                    || matches!(
+                        t,
+                        Type::Function(function)
+                            if matches!(function.signature.params, Params::Ellipsis | Params::Materialization)
+                    )
+                    || matches!(
+                        t,
+                        Type::ClassType(cls)
+                            if self.get_metadata_for_class(cls.class_object()).is_protocol()
+                    )
+            }))
+            .then_some(ty)
+        };
+
+        for (index, (range, overload)) in overloads.iter().enumerate().skip(1) {
+            let Some(input) = input_signature(overload, true) else {
+                continue;
+            };
+            if let Some(previous) = overloads[..index].iter().position(|(_, previous)| {
+                input_signature(previous, false)
+                    .is_some_and(|previous| self.is_subset_eq(&previous, &input))
+            }) {
+                self.error(
+                    errors,
+                    *range,
+                    ErrorKind::OverlappingOverload,
+                    format!(
+                        "Overload {} for `{func_name}` will never be used because its parameters overlap overload {}",
+                        index + 1,
+                        previous + 1,
+                    ),
+                );
+            }
+        }
     }
 
     /// Substitute each type parameter with its upper bound, for overload consistency checking.

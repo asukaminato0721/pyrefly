@@ -334,6 +334,8 @@ pub enum ErrorKind {
     NotRequiredKeyAccess,
     /// Unpacking an open TypedDict that may contain a bad key via inheritance.
     OpenUnpacking,
+    /// A function overload is unreachable because an earlier overload accepts all of its inputs.
+    OverlappingOverload,
     /// An error related to parsing or syntax.
     ParseError,
     /// A potential conflict between an explicit keyword argument and a NotRequired

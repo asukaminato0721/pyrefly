@@ -1617,6 +1617,21 @@ class OpenTypedDict(TypedDict, closed=True): ...
 Note: In Python versions before 3.15, import `TypedDict` from `typing_extensions` rather than
 `typing` to use the `closed` feature.
 
+## overlapping-overload
+
+A function overload is unreachable when an earlier overload accepts every input that it accepts.
+Order narrower overloads before broader overloads so each signature can be selected.
+
+```python
+from typing import overload
+
+@overload
+def f(x: object) -> object: ...
+@overload
+def f(x: int) -> int: ...  # error, the first overload already accepts every int
+def f(x: object) -> object: ...
+```
+
 ## parse-error
 
 An error related to parsing or syntax. This covers a variety of cases, such as function calls with duplicate keyword args, some poorly defined functions, and so on.

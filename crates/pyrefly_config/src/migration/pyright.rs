@@ -208,6 +208,8 @@ pub struct RuleOverrides {
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_inconsistent_overload: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
+    pub report_overlapping_overload: Option<Severity>,
+    #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_index_issue: Option<Severity>,
     #[serde_as(as = "Option<FromInto<DiagnosticLevelOrBool>>")]
     pub report_invalid_type_arguments: Option<Severity>,
@@ -384,6 +386,10 @@ impl RuleOverrides {
         add(
             self.report_inconsistent_overload,
             ErrorKind::InvalidOverload,
+        );
+        add(
+            self.report_overlapping_overload,
+            ErrorKind::OverlappingOverload,
         );
         add(self.report_index_issue, ErrorKind::BadIndex);
         add(
@@ -737,6 +743,21 @@ executionEnvironments = [
         let pyr = serde_jsonrc::from_str::<PyrightConfig>(raw_file)?;
         let config = pyr.convert();
         assert!(!config.project_includes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_overlapping_overload() -> anyhow::Result<()> {
+        let pyr =
+            serde_json::from_str::<PyrightConfig>(r#"{"reportOverlappingOverload": "warning"}"#)?;
+        let errors = pyr
+            .errors
+            .to_config()
+            .expect("configured diagnostic should produce an error display config");
+        assert_eq!(
+            errors.severity(ErrorKind::OverlappingOverload),
+            Severity::Warn
+        );
         Ok(())
     }
 }
