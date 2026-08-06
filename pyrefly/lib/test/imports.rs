@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
@@ -77,6 +79,50 @@ from foo import *
 __derp__() # E: Could not find name `__derp__`
 "#,
 );
+
+// Regression test for https://github.com/facebook/pyrefly/issues/4465
+#[test]
+fn test_native_extension_wildcard_exports_are_dynamic() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path();
+    fs::create_dir(root.join("sqlcipher3")).unwrap();
+    fs::write(
+        root.join("sqlcipher3/__init__.py"),
+        "from sqlcipher3.dbapi2 import *\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("sqlcipher3/dbapi2.py"),
+        "from sqlcipher3._sqlite3 import *\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("sqlcipher3/_sqlite3.cpython-313-x86_64-linux-gnu.so"),
+        "",
+    )
+    .unwrap();
+
+    let mut env = TestEnv::new().with_site_package_paths(vec![root.to_path_buf()]);
+    env.add(
+        "main",
+        r#"
+import sqlcipher3
+from sqlcipher3 import dbapi2
+from sqlcipher3.dbapi2 import OperationalError
+
+dbapi2.connect(":memory:")
+dbapi2.Row
+OperationalError("database is locked")
+sqlcipher3.connect(":memory:")
+"#,
+    );
+    let (state, handle_fn) = env.to_state();
+    state
+        .transaction()
+        .get_errors(&[handle_fn("main")])
+        .check_against_expectations()
+        .unwrap();
+}
 
 testcase!(
     test_imports_module_single,

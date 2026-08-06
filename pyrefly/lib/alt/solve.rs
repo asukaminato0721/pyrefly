@@ -4962,6 +4962,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 .callable_return_type(self.heap)
                 .unwrap_or_else(|| self.heap.mk_any_implicit());
         }
+        if self.exports.has_dynamic_exports(m) {
+            return self.heap.mk_any_implicit();
+        }
         self.solve_import_missing(name, m, fallback, submodule_error, errors)
     }
 

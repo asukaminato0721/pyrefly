@@ -46,6 +46,13 @@ pub trait LookupExport {
     /// Get the wildcard exports for a module. Records a dependency on `module` regardless of if it exists.
     fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>>;
 
+    /// Whether a wildcard import from this module may provide names that cannot
+    /// be enumerated statically.
+    fn wildcard_is_dynamic(&self, module: ModuleName) -> bool;
+
+    /// Whether this module may have attributes introduced by a dynamic wildcard import.
+    fn has_dynamic_exports(&self, module: ModuleName) -> bool;
+
     /// Get all export names for a module. Records no dependencies.
     fn get_every_export_untracked(&self, module: ModuleName) -> Option<SmallSet<Name>>;
 
@@ -110,8 +117,8 @@ pub struct Exports {
     /// but they take up very little space, so not worth the hassle to detect when
     /// calculation completes.
     definitions: Definitions,
-    /// Names that are available via `from <this_module> import *`
-    wildcard: Calculation<Arc<SmallSet<Name>>>,
+    /// Names and dynamic fallback available via `from <this_module> import *`.
+    wildcard: Calculation<Arc<WildcardExports>>,
     /// Names that are available via `from <this_module> import <name>` along with their locations
     exports: Calculation<Arc<SmallMap<Name, ExportLocation>>>,
     /// If this module has a docstring, the range is stored here. Docstrings for exports themselves are stored in exports.
@@ -119,6 +126,13 @@ pub struct Exports {
     /// we can't put it on the Module as that doesn't have the AST, and we can't get it from the AST as we often throw that away,
     /// so here makes sense.
     docstring_range: Option<TextRange>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WildcardExports {
+    names: Arc<SmallSet<Name>>,
+    is_dynamic: bool,
+    has_dynamic_exports: bool,
 }
 
 impl Display for Exports {
@@ -167,10 +181,15 @@ impl Exports {
         }
     }
 
-    /// What symbols will I get if I do `from <this_module> import *`?
-    pub fn wildcard(&self, lookup: &dyn LookupExport) -> Arc<SmallSet<Name>> {
+    fn wildcard_exports(&self, lookup: &dyn LookupExport) -> Arc<WildcardExports> {
         let f = || {
             let mut result = SmallSet::new();
+            let mut is_dynamic = false;
+            let has_dynamic_exports = self
+                .definitions
+                .import_all
+                .keys()
+                .any(|module| lookup.wildcard_is_dynamic(*module));
             for x in &self.definitions.dunder_all.entries {
                 match x {
                     DunderAllEntry::Name(_, x) => {
@@ -194,6 +213,7 @@ impl Exports {
                                 result.insert_hashed(y.cloned());
                             }
                         }
+                        is_dynamic |= lookup.wildcard_is_dynamic(*x);
                     }
                     DunderAllEntry::Remove(_, x) => {
                         // This is O(n), but we'd appreciate the determism, and remove is rare in `__all__`.
@@ -201,9 +221,28 @@ impl Exports {
                     }
                 }
             }
-            Arc::new(result)
+            Arc::new(WildcardExports {
+                names: Arc::new(result),
+                is_dynamic,
+                has_dynamic_exports,
+            })
         };
         self.wildcard.calculate(f).unwrap_or_default()
+    }
+
+    /// What symbols will I get if I do `from <this_module> import *`?
+    pub fn wildcard(&self, lookup: &dyn LookupExport) -> Arc<SmallSet<Name>> {
+        self.wildcard_exports(lookup).names.clone()
+    }
+
+    /// Whether `from <this_module> import *` has an unknown set of names.
+    pub fn wildcard_is_dynamic(&self, lookup: &dyn LookupExport) -> bool {
+        self.wildcard_exports(lookup).is_dynamic
+    }
+
+    /// Whether this module has unknown attributes introduced by a wildcard import.
+    pub fn has_dynamic_exports(&self, lookup: &dyn LookupExport) -> bool {
+        self.wildcard_exports(lookup).has_dynamic_exports
     }
 
     /// Diff two Exports and merge changes into `changed`.
@@ -266,7 +305,7 @@ impl Exports {
         // Check wildcard set changes. Only compare if the old wildcard was
         // forced (some rdep called get_wildcard and depends on the set).
         if let Some(old_wildcard) = self.wildcard.get() {
-            let new_wildcard = other.wildcard(lookup);
+            let new_wildcard = other.wildcard_exports(lookup);
             changed.0.wildcard = old_wildcard != new_wildcard;
         }
     }
@@ -506,6 +545,16 @@ mod tests {
 
         fn get_wildcard(&self, module: ModuleName) -> Option<Arc<SmallSet<Name>>> {
             self.get(&module).map(|x| x.wildcard(self))
+        }
+
+        fn wildcard_is_dynamic(&self, module: ModuleName) -> bool {
+            self.get(&module)
+                .is_some_and(|exports| exports.wildcard_is_dynamic(self))
+        }
+
+        fn has_dynamic_exports(&self, module: ModuleName) -> bool {
+            self.get(&module)
+                .is_some_and(|exports| exports.has_dynamic_exports(self))
         }
 
         fn get_every_export_untracked(&self, module: ModuleName) -> Option<SmallSet<Name>> {

@@ -122,6 +122,7 @@ use crate::state::epoch::Epoch;
 use crate::state::errors::Errors;
 use crate::state::load::FileContents;
 use crate::state::load::Load;
+use crate::state::loader::FindError;
 use crate::state::loader::FindingOrError;
 use crate::state::loader::LoaderFindCache;
 use crate::state::memory::MemoryFiles;
@@ -2856,6 +2857,29 @@ impl<'a> LookupExport for TransactionHandle<'a> {
             |exports, lookup| exports.wildcard(lookup),
             ModuleDep::Wildcard,
         )
+    }
+
+    fn wildcard_is_dynamic(&self, module: ModuleName) -> bool {
+        self.with_exports(
+            module,
+            |exports, lookup| exports.wildcard_is_dynamic(lookup),
+            ModuleDep::Wildcard,
+        )
+        .unwrap_or_else(|| {
+            matches!(
+                self.module_exists(module),
+                FindingOrError::Error(FindError::Ignored)
+            )
+        })
+    }
+
+    fn has_dynamic_exports(&self, module: ModuleName) -> bool {
+        self.with_exports(
+            module,
+            |exports, lookup| exports.has_dynamic_exports(lookup),
+            ModuleDep::Wildcard,
+        )
+        .unwrap_or(false)
     }
 
     fn module_exists(&self, module: ModuleName) -> FindingOrError<()> {

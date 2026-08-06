@@ -111,6 +111,14 @@ fn is_partial_py_typed(
     })
 }
 
+/// Return the import name from an ABI-tagged extension filename such as
+/// `_sqlite3.cpython-313-x86_64-linux-gnu.so`.
+fn abi_tagged_extension_module_name(filename: &str) -> Option<&str> {
+    let stem = filename.strip_suffix(".so")?;
+    let (name, tag) = stem.split_once('.')?;
+    (!name.is_empty() && !tag.is_empty()).then_some(name)
+}
+
 /// Cache of directory listings to avoid repeated stat() calls during module resolution.
 ///
 /// Each directory is read at most once. Entries store
@@ -420,6 +428,20 @@ fn find_one_part_in_root(
         } else if let Some(v) = phantom_paths.as_deref_mut() {
             v.push(candidate_path);
         }
+    }
+
+    // Linux extension modules normally include the interpreter ABI in the
+    // filename, so their suffix cannot be checked by constructing one path.
+    if !matches!(style_filter, Some(ModuleStyle::Interface))
+        && let Some(entries) = dir_cache.get_entries(root)
+        && let Some(filename) = entries
+            .iter()
+            .filter(|(_, is_dir)| !**is_dir)
+            .filter_map(|(filename, _)| filename.to_str())
+            .filter(|filename| abi_tagged_extension_module_name(filename) == Some(name))
+            .min()
+    {
+        return Some(FindResult::CompiledModule(root.join(filename)));
     }
 
     if dir_exists {
@@ -812,6 +834,7 @@ fn find_one_part_prefix<'a>(
                                 ModuleName::from_str(stem),
                             ));
                         } else if COMPILED_FILE_SUFFIXES.contains(&ext) {
+                            let stem = abi_tagged_extension_module_name(name).unwrap_or(stem);
                             results.push((
                                 FindResult::CompiledModule(path.clone()),
                                 ModuleName::from_str(stem),
@@ -1318,6 +1341,7 @@ mod tests {
                 TestPath::file("another_nested_module.py"),
                 TestPath::file("cython_module.pyx"),
                 TestPath::file("windows_dll.pyd"),
+                TestPath::file("linux_extension.cpython-313-x86_64-linux-gnu.so"),
             ],
         );
         let result = find_one_part(
@@ -1361,6 +1385,22 @@ mod tests {
         assert_eq!(
             result,
             FindResult::CompiledModule(root.join("windows_dll.pyd"))
+        );
+        let result = find_one_part(
+            "linux_extension",
+            [root.to_path_buf()].iter(),
+            None,
+            &mut None,
+            &DirEntryCache::new(),
+            None,
+        )
+        .unwrap()
+        .0;
+        assert_eq!(
+            result,
+            FindResult::CompiledModule(
+                root.join("linux_extension.cpython-313-x86_64-linux-gnu.so")
+            )
         );
         let result = find_one_part(
             "another_nested_module",

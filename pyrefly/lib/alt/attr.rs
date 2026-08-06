@@ -2211,6 +2211,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
 
         if let Some(attr) = self.try_get_from_export(module_name, attr_name.clone()) {
             Some(Attribute::simple(attr.arc_clone()))
+        } else if self.exports.has_dynamic_exports(module_name) {
+            Some(Attribute::simple(self.heap.mk_any_implicit()))
         } else if self
             .exports
             .is_submodule_imported_implicitly(module_name, attr_name)
