@@ -686,6 +686,23 @@ def test(x: int, y: str):
 "#,
 );
 
+testcase!(
+    test_generic_function_satisfies_polymorphic_decorator_protocol,
+    r#"
+from typing import Any, Protocol
+
+class Polymorphism(Protocol):
+    def __call__[T: Any](self, obj: T, /) -> T: ...
+
+def decorator(deco: Polymorphism) -> Polymorphism:
+    return deco
+
+@decorator
+def decorated[T: int](arg: T) -> T:
+    raise NotImplementedError
+"#,
+);
+
 // If a decorator converts a generic callable into a non-generic, we should drop the callable's tparams
 testcase!(
     test_decorator_strips_tparams_and_forall,

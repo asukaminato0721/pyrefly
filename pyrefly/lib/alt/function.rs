@@ -1959,9 +1959,15 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             (ret, call_errors)
         };
         let (primary_return, primary_errors) = try_call(&application.decoratee_arg);
-        // Many decorators can't accept Self but are semantically valid on the method;
-        // retry with the receiver normalized to its bound class.
+        // Retry failures in forms that preserve ordinary-call or method compatibility.
         let raw_return = if primary_errors.is_empty() {
+            primary_return
+        } else if application.decoratee_tparams.is_some()
+            && let (_, polymorphic_errors) = try_call(&application.original_decoratee)
+            && polymorphic_errors.is_empty()
+        {
+            // Validate generic decoratees with their `Forall` intact, as ordinary calls do. Keep
+            // the result inferred from the unwrapped body so its type parameters can be restored.
             primary_return
         } else if let Some(rewritten) =
             self.decorator_compatible_decoratee_arg(&application.decoratee_arg)
