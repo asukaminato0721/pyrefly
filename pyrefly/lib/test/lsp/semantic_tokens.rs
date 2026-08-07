@@ -392,6 +392,212 @@ token-type: string, token-modifiers: [rawStringtemplateString]
 }
 
 #[test]
+fn string_content_syntax_tokens_test() {
+    let code = r##""\n\120\x50\N{ZERO WIDTH NO-BREAK SPACE}\u1234"
+b"\x50\u1234"
+r"\n"
+"100% organic %s"
+"%(name)-10.2s%%%d" % {"name": "x"}
+f"{1!r:{2}.3f}"
+f"""{1:
+.2f}"""
+"##;
+    assert_full_semantic_tokens_with_syntax(
+        &[("main", code)],
+        true,
+        r#"
+# main.py
+line: 0, column: 0, length: 1, text: "
+token-type: string
+
+line: 0, column: 1, length: 2, text: \n
+token-type: string, token-modifiers: [escapeSequence]
+
+line: 0, column: 3, length: 4, text: \120
+token-type: string, token-modifiers: [escapeSequence]
+
+line: 0, column: 7, length: 4, text: \x50
+token-type: string, token-modifiers: [escapeSequence]
+
+line: 0, column: 11, length: 29, text: \N{ZERO WIDTH NO-BREAK SPACE}
+token-type: string, token-modifiers: [escapeSequence]
+
+line: 0, column: 40, length: 6, text: \u1234
+token-type: string, token-modifiers: [escapeSequence]
+
+line: 0, column: 46, length: 1, text: "
+token-type: string
+
+line: 1, column: 0, length: 1, text: b
+token-type: string, token-modifiers: [stringPrefix]
+
+line: 1, column: 1, length: 1, text: "
+token-type: string, token-modifiers: [byteString]
+
+line: 1, column: 2, length: 4, text: \x50
+token-type: string, token-modifiers: [byteStringescapeSequence]
+
+line: 1, column: 6, length: 7, text: \u1234"
+token-type: string, token-modifiers: [byteString]
+
+line: 2, column: 0, length: 1, text: r
+token-type: string, token-modifiers: [stringPrefix]
+
+line: 2, column: 1, length: 4, text: "\n"
+token-type: string, token-modifiers: [rawString]
+
+line: 3, column: 0, length: 17, text: "100% organic %s"
+token-type: string
+
+line: 4, column: 0, length: 1, text: "
+token-type: string
+
+line: 4, column: 1, length: 13, text: %(name)-10.2s
+token-type: string, token-modifiers: [formatPlaceholder]
+
+line: 4, column: 14, length: 2, text: %%
+token-type: string, token-modifiers: [formatPlaceholder]
+
+line: 4, column: 16, length: 2, text: %d
+token-type: string, token-modifiers: [formatPlaceholder]
+
+line: 4, column: 18, length: 1, text: "
+token-type: string
+
+line: 4, column: 20, length: 1, text: %
+token-type: operator
+
+line: 4, column: 22, length: 1, text: {
+token-type: operator
+
+line: 4, column: 23, length: 6, text: "name"
+token-type: string
+
+line: 4, column: 29, length: 1, text: :
+token-type: operator
+
+line: 4, column: 31, length: 3, text: "x"
+token-type: string
+
+line: 4, column: 34, length: 1, text: }
+token-type: operator
+
+line: 5, column: 0, length: 1, text: f
+token-type: string, token-modifiers: [stringPrefix]
+
+line: 5, column: 1, length: 1, text: "
+token-type: string, token-modifiers: [formatString]
+
+line: 5, column: 2, length: 1, text: {
+token-type: operator
+
+line: 5, column: 3, length: 1, text: 1
+token-type: number
+
+line: 5, column: 4, length: 2, text: !r
+token-type: string, token-modifiers: [formatSpecifier]
+
+line: 5, column: 6, length: 1, text: :
+token-type: string, token-modifiers: [formatSpecifier]
+
+line: 5, column: 7, length: 1, text: {
+token-type: operator
+
+line: 5, column: 8, length: 1, text: 2
+token-type: number
+
+line: 5, column: 9, length: 1, text: }
+token-type: operator
+
+line: 5, column: 10, length: 3, text: .3f
+token-type: string, token-modifiers: [formatSpecifierformatString]
+
+line: 5, column: 13, length: 1, text: }
+token-type: operator
+
+line: 5, column: 14, length: 1, text: "
+token-type: string, token-modifiers: [formatString]
+
+line: 6, column: 0, length: 1, text: f
+token-type: string, token-modifiers: [stringPrefix]
+
+line: 6, column: 1, length: 3, text: """
+token-type: string, token-modifiers: [formatString]
+
+line: 6, column: 4, length: 1, text: {
+token-type: operator
+
+line: 6, column: 5, length: 1, text: 1
+token-type: number
+
+line: 6, column: 6, length: 1, text: :
+token-type: string, token-modifiers: [formatSpecifier]
+
+line: 7, column: 0, length: 3, text: .2f
+token-type: string, token-modifiers: [formatSpecifierformatString]
+
+line: 7, column: 3, length: 1, text: }
+token-type: operator
+
+line: 7, column: 4, length: 3, text: """
+token-type: string, token-modifiers: [formatString]
+"#,
+    );
+}
+
+#[test]
+fn template_string_content_syntax_tokens_test() {
+    let code = r#"t"\n{1!r:{2}.3f}"
+"#;
+    assert_full_semantic_tokens_with_syntax_and_env(
+        &[("main", code)],
+        true,
+        TestEnv::new_with_version(PythonVersion::new(3, 14, 0)),
+        r#"
+# main.py
+line: 0, column: 0, length: 1, text: t
+token-type: string, token-modifiers: [stringPrefix]
+
+line: 0, column: 1, length: 1, text: "
+token-type: string, token-modifiers: [templateString]
+
+line: 0, column: 2, length: 2, text: \n
+token-type: string, token-modifiers: [escapeSequencetemplateString]
+
+line: 0, column: 4, length: 1, text: {
+token-type: operator
+
+line: 0, column: 5, length: 1, text: 1
+token-type: number
+
+line: 0, column: 6, length: 2, text: !r
+token-type: string, token-modifiers: [formatSpecifier]
+
+line: 0, column: 8, length: 1, text: :
+token-type: string, token-modifiers: [formatSpecifier]
+
+line: 0, column: 9, length: 1, text: {
+token-type: operator
+
+line: 0, column: 10, length: 1, text: 2
+token-type: number
+
+line: 0, column: 11, length: 1, text: }
+token-type: operator
+
+line: 0, column: 12, length: 3, text: .3f
+token-type: string, token-modifiers: [formatSpecifiertemplateString]
+
+line: 0, column: 15, length: 1, text: }
+token-type: operator
+
+line: 0, column: 16, length: 1, text: "
+token-type: string, token-modifiers: [templateString]
+"#,
+    );
+}
+
+#[test]
 fn soft_keyword_syntax_tokens_test() {
     let code = r#"match = 1
 case = match

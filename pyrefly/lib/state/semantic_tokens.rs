@@ -25,7 +25,10 @@ use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
 use ruff_python_ast::ExprContext;
+use ruff_python_ast::InterpolatedStringElement;
+use ruff_python_ast::InterpolatedStringElements;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::Operator;
 use ruff_python_ast::Pattern;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtImport;
@@ -43,6 +46,12 @@ use crate::state::lsp::attribute_symbol_kind_from_type;
 
 const SELF_PARAMETER_MODIFIER: SemanticTokenModifier = SemanticTokenModifier::new("selfParameter");
 const BYTE_STRING_MODIFIER: SemanticTokenModifier = SemanticTokenModifier::new("byteString");
+const ESCAPE_SEQUENCE_MODIFIER: SemanticTokenModifier =
+    SemanticTokenModifier::new("escapeSequence");
+const FORMAT_PLACEHOLDER_MODIFIER: SemanticTokenModifier =
+    SemanticTokenModifier::new("formatPlaceholder");
+const FORMAT_SPECIFIER_MODIFIER: SemanticTokenModifier =
+    SemanticTokenModifier::new("formatSpecifier");
 const FORMAT_STRING_MODIFIER: SemanticTokenModifier = SemanticTokenModifier::new("formatString");
 const RAW_STRING_MODIFIER: SemanticTokenModifier = SemanticTokenModifier::new("rawString");
 const STRING_PREFIX_MODIFIER: SemanticTokenModifier = SemanticTokenModifier::new("stringPrefix");
@@ -112,6 +121,9 @@ impl SemanticTokensLegends {
                 SemanticTokenModifier::DEFAULT_LIBRARY,
                 SELF_PARAMETER_MODIFIER.clone(),
                 BYTE_STRING_MODIFIER.clone(),
+                ESCAPE_SEQUENCE_MODIFIER.clone(),
+                FORMAT_PLACEHOLDER_MODIFIER.clone(),
+                FORMAT_SPECIFIER_MODIFIER.clone(),
                 FORMAT_STRING_MODIFIER.clone(),
                 RAW_STRING_MODIFIER.clone(),
                 STRING_PREFIX_MODIFIER.clone(),
@@ -252,12 +264,246 @@ fn syntax_token_type(kind: TokenKind) -> Option<SemanticTokenType> {
     }
 }
 
+fn is_string_token(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::String
+            | TokenKind::FStringStart
+            | TokenKind::FStringMiddle
+            | TokenKind::FStringEnd
+            | TokenKind::TStringStart
+            | TokenKind::TStringMiddle
+            | TokenKind::TStringEnd
+    )
+}
+
 fn range_overlaps(limit_range: Option<TextRange>, range: TextRange) -> bool {
     limit_range.is_none_or(|limit| {
         limit
             .intersect(range)
             .is_some_and(|intersection| !intersection.is_empty())
     })
+}
+
+fn range_from_offsets(base: TextSize, start: usize, end: usize) -> TextRange {
+    TextRange::new(
+        base + TextSize::try_from(start).expect("string offset must fit in TextSize"),
+        base + TextSize::try_from(end).expect("string offset must fit in TextSize"),
+    )
+}
+
+/// Find recognized Python escape sequences inside a lexer-classified string segment.
+fn escape_sequence_ranges(range: TextRange, source: &str, is_bytes: bool) -> Vec<TextRange> {
+    let text = &source[range.start().to_usize()..range.end().to_usize()];
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        let end = match bytes[i] {
+            b'\\' | b'\'' | b'"' | b'a' | b'b' | b'f' | b'n' | b'r' | b't' | b'v' => i + 1,
+            b'\n' => i + 1,
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => i + 2,
+            b'0'..=b'7' => {
+                let mut end = i + 1;
+                while end < bytes.len() && end < i + 3 && matches!(bytes[end], b'0'..=b'7') {
+                    end += 1;
+                }
+                end
+            }
+            b'x' if bytes.get(i + 1..i + 3).is_some_and(|digits| {
+                digits.len() == 2 && digits.iter().all(u8::is_ascii_hexdigit)
+            }) =>
+            {
+                i + 3
+            }
+            b'u' if !is_bytes
+                && bytes.get(i + 1..i + 5).is_some_and(|digits| {
+                    digits.len() == 4 && digits.iter().all(u8::is_ascii_hexdigit)
+                }) =>
+            {
+                i + 5
+            }
+            b'U' if !is_bytes
+                && bytes.get(i + 1..i + 9).is_some_and(|digits| {
+                    digits.len() == 8 && digits.iter().all(u8::is_ascii_hexdigit)
+                }) =>
+            {
+                i + 9
+            }
+            b'N' if !is_bytes && bytes.get(i + 1) == Some(&b'{') => {
+                let Some(name_end) = bytes[i + 2..].iter().position(|byte| *byte == b'}') else {
+                    continue;
+                };
+                i + 3 + name_end
+            }
+            _ => continue,
+        };
+        ranges.push(range_from_offsets(range.start(), start, end));
+        i = end;
+    }
+    ranges
+}
+
+/// Find percent-format placeholders after the AST has established modulo formatting.
+fn printf_placeholder_ranges(range: TextRange, source: &str) -> Vec<TextRange> {
+    let text = &source[range.start().to_usize()..range.end().to_usize()];
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        i += 1;
+        if bytes.get(i) == Some(&b'%') {
+            i += 1;
+            ranges.push(range_from_offsets(range.start(), start, i));
+            continue;
+        }
+        if bytes.get(i) == Some(&b'(') {
+            let Some(key_end) = bytes[i + 1..].iter().position(|byte| *byte == b')') else {
+                continue;
+            };
+            i += key_end + 2;
+        }
+        while bytes
+            .get(i)
+            .is_some_and(|byte| matches!(byte, b'#' | b'0' | b'-' | b' ' | b'+'))
+        {
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b'*') {
+            i += 1;
+        } else {
+            while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                i += 1;
+            }
+        }
+        if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            if bytes.get(i) == Some(&b'*') {
+                i += 1;
+            } else {
+                while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                    i += 1;
+                }
+            }
+        }
+        if bytes
+            .get(i)
+            .is_some_and(|byte| matches!(byte, b'h' | b'l' | b'L'))
+        {
+            i += 1;
+        }
+        if bytes.get(i).is_some_and(|byte| {
+            matches!(
+                byte,
+                b'd' | b'i'
+                    | b'o'
+                    | b'u'
+                    | b'x'
+                    | b'X'
+                    | b'e'
+                    | b'E'
+                    | b'f'
+                    | b'F'
+                    | b'g'
+                    | b'G'
+                    | b'c'
+                    | b'r'
+                    | b's'
+                    | b'a'
+            )
+        }) {
+            i += 1;
+            ranges.push(range_from_offsets(range.start(), start, i));
+        }
+    }
+    ranges
+}
+
+/// Collect conversions and format specifiers from parsed f- or t-string elements.
+fn collect_interpolated_string_ranges(
+    elements: &InterpolatedStringElements,
+    source: &str,
+    ranges: &mut Vec<(TextRange, SemanticTokenModifier)>,
+) {
+    for element in elements {
+        let InterpolatedStringElement::Interpolation(interpolation) = element else {
+            continue;
+        };
+        if let Some(conversion) = interpolation.conversion.to_byte() {
+            let end = interpolation
+                .format_spec
+                .as_ref()
+                .map_or(interpolation.end() - TextSize::new(1), |spec| {
+                    spec.start() - TextSize::new(1)
+                });
+            let search_start = interpolation.expression.end();
+            let conversion_offset = source.as_bytes()[search_start.to_usize()..end.to_usize()]
+                .windows(2)
+                .rposition(|candidate| candidate == [b'!', conversion])
+                .expect("a parsed conversion flag must occur after the interpolated expression");
+            let range = range_from_offsets(search_start, conversion_offset, conversion_offset + 2);
+            ranges.push((range, FORMAT_SPECIFIER_MODIFIER.clone()));
+        }
+        if let Some(format_spec) = &interpolation.format_spec {
+            let colon = TextRange::new(format_spec.start() - TextSize::new(1), format_spec.start());
+            assert_eq!(
+                &source[colon.start().to_usize()..colon.end().to_usize()],
+                ":",
+                "format specifier range must start immediately after a colon"
+            );
+            ranges.push((colon, FORMAT_SPECIFIER_MODIFIER.clone()));
+            for element in &format_spec.elements {
+                if let InterpolatedStringElement::Literal(literal) = element
+                    && !literal.range.is_empty()
+                {
+                    ranges.push((literal.range, FORMAT_SPECIFIER_MODIFIER.clone()));
+                }
+            }
+            collect_interpolated_string_ranges(&format_spec.elements, source, ranges);
+        }
+    }
+}
+
+/// Collect AST-bounded string content ranges without reparsing interpolation structure.
+fn collect_string_content_ranges(
+    expr: &Expr,
+    source: &str,
+    ranges: &mut Vec<(TextRange, SemanticTokenModifier)>,
+    printf_ranges: &mut Vec<TextRange>,
+) {
+    match expr {
+        Expr::BinOp(bin_op) if bin_op.op == Operator::Mod => {
+            if matches!(
+                &*bin_op.left,
+                Expr::StringLiteral(_) | Expr::BytesLiteral(_)
+            ) {
+                printf_ranges.push(bin_op.left.range());
+            }
+        }
+        Expr::FString(f_string) => {
+            for value in f_string.value.f_strings() {
+                collect_interpolated_string_ranges(&value.elements, source, ranges);
+            }
+        }
+        Expr::TString(t_string) => {
+            for value in t_string.value.iter() {
+                collect_interpolated_string_ranges(&value.elements, source, ranges);
+            }
+        }
+        _ => {}
+    }
+    expr.recurse(&mut |child| collect_string_content_ranges(child, source, ranges, printf_ranges));
 }
 
 /// Classify an attribute's resolved type into a semantic token kind. For a union,
@@ -336,8 +582,18 @@ impl SemanticTokenBuilder {
             .any(|disabled| disabled.contains_range(range))
     }
 
-    /// Add syntax-level semantic tokens, classifying Python string kinds from lexer metadata.
-    pub fn process_syntax_tokens(&mut self, tokens: &Tokens) {
+    /// Add syntax-level semantic tokens, classifying strings from lexer and parser metadata.
+    pub fn process_syntax_tokens(&mut self, tokens: &Tokens, ast: &ModModule, source: &str) {
+        let mut content_ranges = Vec::new();
+        let mut printf_ranges = Vec::new();
+        ast.visit(&mut |expr| {
+            collect_string_content_ranges(expr, source, &mut content_ranges, &mut printf_ranges)
+        });
+        let string_token_ranges = tokens
+            .iter()
+            .filter(|token| is_string_token(token.kind()))
+            .map(|token| token.range())
+            .collect::<Vec<_>>();
         for token in tokens.iter() {
             let kind = token.kind();
             match kind {
@@ -384,17 +640,72 @@ impl SemanticTokenBuilder {
                             vec![STRING_PREFIX_MODIFIER.clone()],
                         );
                     }
-                    self.push_if_in_range(
-                        TextRange::new(token.start() + prefix_len, token.end()),
-                        SemanticTokenType::STRING,
-                        modifiers,
-                    );
+                    let string_range = TextRange::new(token.start() + prefix_len, token.end());
+                    let mut token_content_ranges = content_ranges
+                        .iter()
+                        .filter_map(|(range, modifier)| {
+                            range.intersect(string_range).and_then(|intersection| {
+                                (!intersection.is_empty()).then(|| (intersection, modifier.clone()))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if !flags.is_raw_string() {
+                        token_content_ranges.extend(
+                            escape_sequence_ranges(string_range, source, flags.is_byte_string())
+                                .into_iter()
+                                .map(|range| (range, ESCAPE_SEQUENCE_MODIFIER.clone())),
+                        );
+                    }
+                    if printf_ranges
+                        .iter()
+                        .any(|range| range.contains_range(token.range()))
+                    {
+                        token_content_ranges.extend(
+                            printf_placeholder_ranges(string_range, source)
+                                .into_iter()
+                                .map(|range| (range, FORMAT_PLACEHOLDER_MODIFIER.clone())),
+                        );
+                    }
+                    let mut boundaries = vec![string_range.start(), string_range.end()];
+                    for (range, _) in &token_content_ranges {
+                        boundaries.push(range.start());
+                        boundaries.push(range.end());
+                    }
+                    boundaries.sort_unstable();
+                    boundaries.dedup();
+                    for boundary in boundaries.windows(2) {
+                        let range = TextRange::new(boundary[0], boundary[1]);
+                        let mut segment_modifiers = modifiers.clone();
+                        for (content_range, modifier) in &token_content_ranges {
+                            if content_range.contains_range(range)
+                                && !segment_modifiers.contains(modifier)
+                            {
+                                segment_modifiers.push(modifier.clone());
+                            }
+                        }
+                        self.push_if_in_range(range, SemanticTokenType::STRING, segment_modifiers);
+                    }
                 }
                 _ => {
+                    if content_ranges.iter().any(|(range, _)| {
+                        range
+                            .intersect(token.range())
+                            .is_some_and(|intersection| !intersection.is_empty())
+                    }) {
+                        continue;
+                    }
                     if let Some(token_type) = syntax_token_type(kind) {
                         self.push_if_in_range(token.range(), token_type, Vec::new());
                     }
                 }
+            }
+        }
+        for (range, modifier) in content_ranges {
+            if !string_token_ranges
+                .iter()
+                .any(|token_range| token_range.contains_range(range))
+            {
+                self.push_if_in_range(range, SemanticTokenType::STRING, vec![modifier]);
             }
         }
     }
