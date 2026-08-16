@@ -2245,6 +2245,8 @@ pub struct AssignToAttribute {
     pub value: Box<ExprOrBinding>,
     /// `Final` fields may be assigned inside `__init__`
     pub allow_assign_to_final: bool,
+    /// `ReadOnly` attributes may be assigned through the receiver in their initialization method.
+    pub allow_assign_to_read_only: bool,
 }
 
 /// Data for an exhaustiveness check binding.
@@ -2799,11 +2801,12 @@ impl DisplayWith<Bindings> for Binding {
             Self::AssignToAttribute(x) => {
                 write!(
                     f,
-                    "AssignToAttribute({}, {}, {}, allow_assign_to_final={})",
+                    "AssignToAttribute({}, {}, {}, allow_assign_to_final={}, allow_assign_to_read_only={})",
                     m.display(&x.attr.value),
                     x.attr.attr,
                     x.value.display_with(ctx),
-                    x.allow_assign_to_final
+                    x.allow_assign_to_final,
+                    x.allow_assign_to_read_only,
                 )
             }
             Self::AssignToSubscript(x) => {

@@ -3086,11 +3086,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 }
             }
         }
-        for q in &[
-            Qualifier::Required,
-            Qualifier::NotRequired,
-            Qualifier::ReadOnly,
-        ] {
+        for q in &[Qualifier::Required, Qualifier::NotRequired] {
             if annotation.has_qualifier(q) {
                 self.error(
                     errors,
@@ -4013,7 +4009,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             ),
                         );
                     continue;
-                } else if !want_is_class_var && got_is_class_var {
+                } else if !want_is_class_var && got_is_class_var && !want_class_field.is_read_only()
+                {
                     self.error(
                             errors,
                             range,
@@ -5125,6 +5122,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         attr_name: &Name,
         got: TypeOrExpr,
         allow_assign_to_final: bool,
+        allow_assign_to_read_only: bool,
         range: TextRange,
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
@@ -5158,12 +5156,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     true
                 };
 
-                if allow_assign_to_final
+                let can_initialize_final = allow_assign_to_final
                     && matches!(
                         reason,
                         ReadOnlyReason::Final(IsFinalVariableInitialized::No)
-                    )
-                {
+                    );
+                let can_initialize_read_only = allow_assign_to_read_only
+                    && matches!(reason, ReadOnlyReason::ReadOnlyQualifier)
+                    && (instance_class.is_some_and(|cls| {
+                        !self
+                            .get_metadata_for_class(cls.class_object())
+                            .is_protocol()
+                    }) || class_base.is_some_and(|base| {
+                        self.get_class_member(base.class_object(), attr_name)
+                            .is_some_and(|field| field.is_class_var())
+                    }));
+                if can_initialize_final || can_initialize_read_only {
                     self.check_set_read_write_and_infer_narrow(
                         attr_ty,
                         attr_name,
@@ -5412,7 +5420,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         };
         let got_is_classvar = is_classvar_compatible(got);
         let want_is_classvar = is_classvar_compatible(want);
-        if got_is_classvar != want_is_classvar {
+        // A read-only instance attribute requirement may be implemented by a ClassVar.
+        if got_is_classvar != want_is_classvar
+            && !matches!(
+                want,
+                ClassAttribute::ReadOnly(_, ReadOnlyReason::ReadOnlyQualifier)
+            )
+        {
             return Err(Box::new(AttrSubsetError::ClassVarMismatch {
                 got_is_classvar,
             }));
@@ -5421,10 +5435,23 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             (_, ClassAttribute::NoAccess(_)) | (ClassAttribute::NoAccess(_), _) => {
                 unreachable!("handled above")
             }
-            (
-                ClassAttribute::Property(_, _, _),
-                ClassAttribute::ReadOnly(..) | ClassAttribute::ReadWrite(..),
-            ) => Err(Box::new(AttrSubsetError::Property)),
+            (ClassAttribute::Property(got, _, _), ClassAttribute::ReadOnly(want, _)) => {
+                let got = got
+                    .callable_return_type(self.heap)
+                    .expect("property getter must have a callable return type");
+                is_subset(&got, want).map_err(|subset_error| {
+                    Box::new(AttrSubsetError::Covariant {
+                        got,
+                        want: want.clone(),
+                        got_is_property: true,
+                        want_is_property: false,
+                        subset_error,
+                    })
+                })
+            }
+            (ClassAttribute::Property(_, _, _), ClassAttribute::ReadWrite(..)) => {
+                Err(Box::new(AttrSubsetError::Property))
+            }
             (
                 ClassAttribute::ReadOnly(..),
                 ClassAttribute::Property(_, Some(_), _) | ClassAttribute::ReadWrite(_),
@@ -5554,6 +5581,29 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     (None, Some(_)) => Err(Box::new(AttrSubsetError::ReadOnly)),
                     (_, None) => Ok(()),
                 }
+            }
+            (
+                got @ ClassAttribute::Descriptor(descriptor, _),
+                ClassAttribute::ReadOnly(want, _),
+            ) => {
+                let got = self
+                    .resolve_get_class_attr(
+                        &Name::new_static("attribute"),
+                        got.clone(),
+                        descriptor.range,
+                        &self.error_swallower(),
+                        None,
+                    )
+                    .expect("a descriptor found during attribute lookup must be readable");
+                is_subset(&got, want).map_err(|subset_error| {
+                    Box::new(AttrSubsetError::Covariant {
+                        got,
+                        want: want.clone(),
+                        got_is_property: false,
+                        want_is_property: false,
+                        subset_error,
+                    })
+                })
             }
             (
                 ClassAttribute::Descriptor(Descriptor { cls: got_cls, .. }, ..),

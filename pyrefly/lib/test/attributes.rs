@@ -2023,6 +2023,169 @@ def f(c: Config):
 );
 
 testcase!(
+    test_read_only_attribute,
+    r#"
+from typing import ReadOnly
+
+class Book:
+    id: ReadOnly[int]
+
+    def __init__(self, id: int) -> None:
+        self.id = id
+        self.id = id + 1
+
+    def replace_id(self, id: int) -> None:
+        self.id = id  # E: Cannot set field `id`
+
+    def remove_id(self) -> None:
+        del self.id  # E: Cannot delete field `id`
+
+class Member:
+    def __init__(self, name: str) -> None:
+        self.name: ReadOnly[str] = name
+
+book = Book(1)
+book.id = 2  # E: Cannot set field `id`
+del book.id  # E: Cannot delete field `id`
+Member("Alice").name = "Bob"  # E: Cannot set field `name`
+    "#,
+);
+
+testcase!(
+    test_read_only_attribute_subtyping,
+    r#"
+from functools import cached_property
+from typing import ClassVar, ReadOnly
+
+class Parent:
+    value: ReadOnly[object]
+
+class Narrowed(Parent):
+    value: ReadOnly[str]
+
+class Writable(Parent):
+    value: str
+
+class Descriptor(Parent):
+    @cached_property
+    def value(self) -> str:
+        return "value"
+
+class Shared(Parent):
+    value: ClassVar[str] = "value"
+
+Writable().value = "new"
+
+class Inherited(Parent):
+    def __init__(self) -> None:
+        self.value = "value"
+
+Inherited().value = "new"  # E: Cannot set field `value`
+    "#,
+);
+
+testcase!(
+    test_read_only_protocol_attribute,
+    r#"
+from functools import cached_property
+from typing import ClassVar, Protocol, ReadOnly
+
+class HasName(Protocol):
+    name: ReadOnly[str]
+
+class NamedAttribute:
+    name: str
+
+class NamedProperty:
+    @property
+    def name(self) -> str:
+        return "name"
+
+class NamedDescriptor:
+    @cached_property
+    def name(self) -> str:
+        return "name"
+
+class NamedClassVar:
+    name: ClassVar[str] = "name"
+
+class NameDescriptor:
+    def __get__(self, obj: object, owner: type[object]) -> str:
+        return "name"
+
+class NamedCustomDescriptor:
+    name = NameDescriptor()
+
+def use_name(value: HasName) -> None:
+    value.name = "new"  # E: Cannot set field `name`
+    del value.name  # E: Cannot delete field `name`
+
+has_name: HasName
+has_name = NamedAttribute()
+has_name = NamedProperty()
+has_name = NamedDescriptor()
+has_name = NamedClassVar()
+has_name = NamedCustomDescriptor()
+    "#,
+);
+
+testcase!(
+    test_read_only_attribute_initialization_contexts,
+    r#"
+from typing import Protocol, ReadOnly, Self
+
+class Other:
+    id: ReadOnly[int]
+
+class Member:
+    id: ReadOnly[int]
+
+    def __new__(cls, id: int) -> Self:
+        self = super().__new__(cls)
+        self.id = id
+        return self
+
+    @classmethod
+    def create(cls, id: int) -> Self:
+        self = super().__new__(cls)
+        self.id = id
+        return self
+
+    @classmethod
+    def mutate_other(cls, other: Other) -> None:
+        other.id = 0  # E: Cannot set field `id`
+
+class HasId(Protocol):
+    id: ReadOnly[int]
+
+    def __init__(self, id: int) -> None:
+        self.id = id  # E: Cannot set field `id`
+
+class ConcreteHasId(HasId):
+    def __init__(self, id: int) -> None:
+        self.id = id
+    "#,
+);
+
+testcase!(
+    test_read_only_class_attribute,
+    r#"
+from typing import ClassVar, ReadOnly
+
+class URI:
+    protocol: ReadOnly[ClassVar[str]] = ""
+
+    def __init_subclass__(cls, protocol: str = "") -> None:
+        cls.protocol = protocol
+
+class File(URI, protocol="file"):
+    pass
+
+URI.protocol = "http"  # E: Cannot set field `protocol`
+    "#,
+);
+
+testcase!(
     test_nested_class_mutability,
     r#"
 class Backend:

@@ -2118,6 +2118,22 @@ impl Scopes {
         None
     }
 
+    /// Whether the current method may initialize a `ReadOnly` attribute on a newly-created
+    /// instance. PEP 767 permits this in `__new__` and class methods.
+    pub fn in_read_only_instance_initializer(&self) -> bool {
+        for scope in self.iter_rev() {
+            match &scope.kind {
+                ScopeKind::Method(method) => {
+                    return method.name.id == dunder::NEW
+                        || matches!(method.receiver_kind, MethodSelfKind::Class);
+                }
+                ScopeKind::Function(_) => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn loop_depth(&self) -> usize {
         self.current().loops.len()
     }

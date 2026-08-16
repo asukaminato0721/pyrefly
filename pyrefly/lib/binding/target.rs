@@ -7,6 +7,7 @@
 
 use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
+use pyrefly_python::dunder;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprAttribute;
@@ -182,13 +183,21 @@ impl<'a> BindingsBuilder<'a> {
         } else {
             self.declare_current_idx(Key::Anon(attr.range))
         };
-        let allow_assign_to_final =
-            self.scopes
-                .method_that_sets_attr(&attr)
-                .is_some_and(|method| {
-                    method.recognized_attribute_defining_method
-                        && matches!(method.instance_or_class, MethodSelfKind::Instance)
-                });
+        let method = self.scopes.method_that_sets_attr(&attr);
+        let allow_assign_to_final = method.as_ref().is_some_and(|method| {
+            method.recognized_attribute_defining_method
+                && matches!(method.instance_or_class, MethodSelfKind::Instance)
+        });
+        let allow_assign_to_read_only =
+            method
+                .as_ref()
+                .is_some_and(|method| match method.instance_or_class {
+                    MethodSelfKind::Instance => {
+                        method.method_name == dunder::INIT || method.method_name == dunder::NEW
+                    }
+                    MethodSelfKind::Class => method.method_name == dunder::INIT_SUBCLASS,
+                })
+                || (method.is_none() && self.scopes.in_read_only_instance_initializer());
         self.ensure_expr(&mut attr.value, user.usage());
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
@@ -200,6 +209,7 @@ impl<'a> BindingsBuilder<'a> {
                 attr,
                 value: Box::new(value.clone()),
                 allow_assign_to_final,
+                allow_assign_to_read_only,
             })),
         );
         if let Some(identifier) = narrowing_identifier {

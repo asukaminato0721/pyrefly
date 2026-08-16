@@ -5102,6 +5102,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         attr: &ExprAttribute,
         got: &ExprOrBinding,
         allow_assign_to_final: bool,
+        allow_assign_to_read_only: bool,
         errors: &ErrorCollector,
     ) -> TypeInfo {
         // NOTE: Deterministic pinning of placeholder types based on first use relies on an
@@ -5116,6 +5117,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             &attr.attr.id,
             got,
             allow_assign_to_final,
+            allow_assign_to_read_only,
             attr.range,
             errors,
         );
@@ -5343,6 +5345,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 &x.attr,
                 &x.value,
                 x.allow_assign_to_final,
+                x.allow_assign_to_read_only,
                 errors,
             ),
             Binding::AssignToSubscript(x) => {

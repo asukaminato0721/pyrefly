@@ -871,6 +871,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         name: &Name,
         got: &ExprOrBinding,
         allow_assign_to_final: bool,
+        allow_assign_to_read_only: bool,
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Option<Type> {
@@ -887,6 +888,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             name,
             got,
             allow_assign_to_final,
+            allow_assign_to_read_only,
             range,
             errors,
             None,
@@ -998,6 +1000,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         attr_name: &Name,
         got: TypeOrExpr,
         allow_assign_to_final: bool,
+        allow_assign_to_read_only: bool,
         range: TextRange,
         errors: &ErrorCollector,
         context: Option<&dyn Fn() -> ErrorContext>,
@@ -1091,7 +1094,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     // If we are writing to an instance, we may need access to
                     // the class to special-case dataclass converters.
                     let instance_class = match &found_on {
-                        AttributeBase1::ClassInstance(cls) => Some(cls),
+                        AttributeBase1::ClassInstance(cls) | AttributeBase1::SelfType(cls) => {
+                            Some(cls)
+                        }
                         AttributeBase1::ShapedArrayInstance(tensor) => Some(&tensor.base_class),
                         _ => None,
                     };
@@ -1106,6 +1111,13 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         attr_name,
                         got,
                         allow_assign_to_final,
+                        // Constructor receivers and newly allocated values retain `Self`; class
+                        // objects are eligible only for `ReadOnly[ClassVar[...]]` initialization.
+                        allow_assign_to_read_only
+                            && matches!(
+                                found_on,
+                                AttributeBase1::SelfType(_) | AttributeBase1::ClassObject(_)
+                            ),
                         range,
                         errors,
                         context,
