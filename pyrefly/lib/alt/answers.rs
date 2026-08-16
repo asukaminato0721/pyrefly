@@ -1394,6 +1394,9 @@ pub trait LookupAnswer: Sized {
     /// The module and Python environment used by this lookup.
     fn handle(&self) -> &Handle;
 
+    /// Return the configured Django model modules that can currently be resolved.
+    fn django_model_modules(&self) -> Vec<(ModuleName, ModulePath)>;
+
     /// Look up the value of `k` in `module`.
     ///
     /// Return None if the file is undergoing concurrent modification.
