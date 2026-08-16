@@ -778,7 +778,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     self.heap.mk_class_type(self.stdlib.object().clone())
                 }
             }
-            TypedDict::Anonymous(inner) => inner.compute_value_type(self.heap),
+            TypedDict::Anonymous(inner) => unions_with_literals(
+                inner
+                    .fields
+                    .iter()
+                    .map(|(_, field)| field.ty.clone())
+                    .collect(),
+                self.stdlib,
+                &|cls| self.get_enum_member_count(cls),
+                self.heap,
+            ),
         }
     }
 

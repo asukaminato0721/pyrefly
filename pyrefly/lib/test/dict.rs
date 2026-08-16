@@ -72,6 +72,20 @@ def test(cond: bool):
 );
 
 testcase!(
+    test_anonymous_typed_dict_bool_literal_union_promotion,
+    r#"
+from typing import Literal
+
+def func(mapping: dict[str, str | bool]) -> None: ...
+
+def test(a: Literal[True], b: Literal[False], c: str) -> None:
+    func({"a": a, "b": b, "c": c})
+    inferred = {"a": a, "b": b, "c": c}
+    func(inferred)
+"#,
+);
+
+testcase!(
     test_unpack_empty,
     r#"
 from typing import assert_type
