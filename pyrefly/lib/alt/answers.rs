@@ -1250,6 +1250,9 @@ impl LookupModule {
 }
 
 pub trait LookupAnswer: Sized {
+    /// Return the configured Django model modules that can currently be resolved.
+    fn django_model_modules(&self) -> Vec<(ModuleName, ModulePath)>;
+
     /// Look up the value of `k` in `module`.
     ///
     /// Return None if the file is undergoing concurrent modification.
