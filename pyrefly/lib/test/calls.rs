@@ -569,6 +569,21 @@ obj()  # E: Expected a callable, got `Uncallable`
 "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/3184
+testcase!(
+    test_call_annotated,
+    r#"
+from typing import Annotated, assert_type
+
+direct = Annotated[str, "metadata"]("hello")
+assert_type(direct, str)
+
+X = Annotated[str, "metadata"]
+aliased = X("hello")
+assert_type(aliased, str)
+"#,
+);
+
 // Verify **kwargs unpacking correctly suppresses missing-argument errors.
 testcase!(
     test_kwargs_unpacking_provides_required_args,

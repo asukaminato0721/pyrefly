@@ -523,6 +523,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     .with_error_type(|fallback| Type::Intersect(Box::new((types, fallback))))
             }
             Type::Any(style) => CallTargetLookup::Ok(Box::new(CallTarget::Any(style))),
+            Type::Annotated(inner, metadata) => self
+                .as_call_target_impl(self.heap.mk_type_of((*inner).clone()), quantified)
+                .with_error_type(|_| Type::Annotated(inner, metadata)),
             Type::TypeAlias(ta) => {
                 let body = self.get_type_alias(&ta).as_value(self.stdlib);
                 match body {

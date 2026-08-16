@@ -857,8 +857,8 @@ pub enum Type {
     TypeGuard(Box<Type>),
     TypeIs(Box<Type>),
     /// Used for special form `Annotated[T, ...]`.
-    /// This is transparent when resolving annotations, but is not callable and
-    /// cannot be assigned to `type[T]`.
+    /// This is transparent when resolving annotations. In value position, it delegates calls to
+    /// the underlying type expression but cannot be assigned to `type[T]`.
     /// The second field carries the metadata items (the `...` in `Annotated[T, ...]`).
     Annotated(Box<Type>, Box<[Type]>),
     Unpack(Box<Type>),

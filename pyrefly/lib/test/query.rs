@@ -265,6 +265,8 @@ fn test_callees_annotated_type() {
 from typing import Annotated, TypeAlias
 
 class Foo:
+    def __init__(self) -> None:
+        pass
     def bar(self) -> int:
         return 42
 
@@ -280,24 +282,16 @@ def f() -> None:
     let path = ModulePath::filesystem(file_path.clone());
 
     let errors = query.add_files(vec![(module_name, path.clone())]);
-    assert!(
-        !errors.is_empty(),
-        "Annotated[Foo, ...] is not callable, expected errors"
-    );
-    assert!(
-        errors.iter().any(|e| e.contains("not-callable")),
-        "Expected a not-callable error, got: {errors:?}",
-    );
+    assert!(errors.is_empty(), "Unexpected errors: {errors:?}");
 
-    // get_callees_with_location triggers callee_from_type which must handle
-    // Type::Annotated rather than panicking. Annotated is not callable, so
-    // MyType() should produce no callees.
     let callees = query
         .get_callees_with_location(module_name, path, None)
         .unwrap();
     assert!(
-        callees.is_empty(),
-        "Annotated is not callable, expected no callees"
+        callees
+            .iter()
+            .any(|(_, callee)| callee.target == "main.Foo.__init__"),
+        "Expected the Annotated alias call to resolve to Foo.__init__, got: {callees:?}"
     );
 }
 

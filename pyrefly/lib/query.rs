@@ -993,8 +993,15 @@ impl<'a> CalleesWithLocation<'a> {
             }
             Type::Callable(..) => self.for_callable(callee_range),
             Type::Type(ty) => self.init_or_new_from_type(ty, callee_range),
-            // Annotated[T, ...] is not callable (matching as_call_target_impl).
-            Type::Annotated(_, _) => vec![],
+            Type::Annotated(inner, _) => match &**inner {
+                Type::SelfType(_)
+                | Type::ClassType(_)
+                | Type::Quantified(_)
+                | Type::Union(_)
+                | Type::Intersect(_)
+                | Type::Any(_) => self.init_or_new_from_type(inner, callee_range),
+                _ => vec![],
+            },
 
             Type::ClassDef(cls) => self.find_init_or_new(cls),
             Type::Forall(v) => match &v.body {

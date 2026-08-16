@@ -1501,8 +1501,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             );
             return TypeAlias::error(name.clone(), style);
         };
-        // If the original type was Annotated[T, ...], preserve the wrapper so that
-        // the alias is not callable and not assignable to type[T] in value position.
+        // Preserve the runtime Annotated wrapper in value position, where it is not a `type[T]`.
         let stored_ty = if let Some(metadata) = annotated_metadata {
             Type::Annotated(Box::new(ty), metadata)
         } else {
