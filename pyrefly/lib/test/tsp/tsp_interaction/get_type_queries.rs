@@ -431,6 +431,8 @@ fn test_get_computed_type_in_unopened_file() {
     // Query the `g` function definition in the unopened `lib.py`.
     let result = get_computed_type_ok(&mut tsp, &lib_uri, 0, 4, snapshot);
     assert_kind(&result, TypeKind::Function);
+    let repeated = get_computed_type_ok(&mut tsp, &lib_uri, 0, 4, snapshot);
+    assert_kind(&repeated, TypeKind::Function);
 
     tsp.shutdown();
 }

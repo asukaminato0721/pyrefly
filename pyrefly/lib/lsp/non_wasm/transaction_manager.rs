@@ -75,6 +75,90 @@ impl<'a> TransactionManager<'a> {
 
     /// This function should be called once we finished using transaction for an LSP request.
     pub fn save(&mut self, transaction: Transaction<'a>, telemetry: &mut TelemetryEvent) {
-        self.saved_state = Some(transaction.save(telemetry))
+        self.saved_state = Some(transaction.save(Some(telemetry)))
+    }
+
+    /// Save a transaction used outside the normal LSP telemetry lifecycle.
+    pub fn save_without_telemetry(&mut self, transaction: Transaction<'a>) {
+        self.saved_state = Some(transaction.save(None))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use pyrefly_build::handle::Handle;
+    use pyrefly_python::module_name::ModuleName;
+    use pyrefly_python::module_path::ModulePath;
+    use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+
+    use super::TransactionManager;
+    use crate::state::load::FileContents;
+    use crate::state::require::Require;
+    use crate::state::state::State;
+    use crate::test::util::TestEnv;
+
+    #[test]
+    fn saved_answers_are_reused_only_for_the_current_state() {
+        let mut env = TestEnv::new();
+        env.add("query", "value = 1\n");
+        env.add("main", "x = 1\n");
+        let state = State::new(env.config_finder(), TEST_THREAD_COUNT);
+        let handle = |name: &str| {
+            Handle::new(
+                ModuleName::from_str(name),
+                ModulePath::memory(PathBuf::from(format!("{name}.py"))),
+                env.sys_info(),
+            )
+        };
+        let query = handle("query");
+        let main = handle("main");
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        transaction.as_mut().set_memory(env.get_memory());
+        state.run_with_committing_transaction(
+            transaction,
+            std::slice::from_ref(&main),
+            Require::Everything,
+            None,
+            None,
+        );
+        let mut manager = TransactionManager::default();
+
+        let mut transaction = manager.non_committable_transaction(&state);
+        assert!(transaction.get_answers(&query).is_none());
+        let runs = state.run_count();
+        transaction.ensure_answers(&query, None);
+        assert_eq!(state.run_count(), runs + 1);
+        manager.save_without_telemetry(transaction);
+
+        let mut transaction = manager.non_committable_transaction(&state);
+        assert!(transaction.get_answers(&query).is_some());
+        let runs = state.run_count();
+        transaction.ensure_answers(&query, None);
+        assert_eq!(state.run_count(), runs);
+        manager.save_without_telemetry(transaction);
+
+        let mut transaction = state.new_committable_transaction(Require::Exports, None);
+        transaction.as_mut().set_memory(vec![(
+            PathBuf::from("query.py"),
+            Some(Arc::new(FileContents::from_source(
+                "value = 'changed'".to_owned(),
+            ))),
+        )]);
+        state.run_with_committing_transaction(
+            transaction,
+            &[main],
+            Require::Everything,
+            None,
+            None,
+        );
+
+        let mut transaction = manager.non_committable_transaction(&state);
+        assert!(transaction.get_answers(&query).is_none());
+        let runs = state.run_count();
+        transaction.ensure_answers(&query, None);
+        assert_eq!(state.run_count(), runs + 1);
     }
 }

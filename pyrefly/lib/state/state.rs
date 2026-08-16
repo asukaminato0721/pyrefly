@@ -726,7 +726,7 @@ pub struct Transaction<'a> {
 
 impl<'a> Transaction<'a> {
     /// Drops the lock and retains just the underlying data.
-    pub(crate) fn save(self, telemetry: &mut TelemetryEvent) -> TransactionData<'a> {
+    pub(crate) fn save(self, telemetry: Option<&mut TelemetryEvent>) -> TransactionData<'a> {
         let Transaction {
             data,
             stats,
@@ -739,7 +739,9 @@ impl<'a> Transaction<'a> {
         let mut stats = stats.into_inner();
         stats.cancelled = data.todo.get_cancellation_handle().is_cancelled();
         copy_timing_counters(&timing, &mut stats);
-        telemetry.set_transaction_stats(stats);
+        if let Some(telemetry) = telemetry {
+            telemetry.set_transaction_stats(stats);
+        }
         data
     }
 
@@ -895,6 +897,15 @@ impl<'a> Transaction<'a> {
 
     pub fn get_answers(&self, handle: &Handle) -> Option<Arc<Answers>> {
         self.with_module_inner(handle, |x| x.get_answers().map(|a| a.1.dupe()))
+    }
+
+    /// Ensure that this transaction contains the retained answers needed by IDE queries.
+    pub fn ensure_answers(&mut self, handle: &Handle, custom_thread_pool: Option<&ThreadPool>) {
+        // Retained answers belong to this transaction's consistent state snapshot. If they are
+        // present, invalidation has already established that they are current for this epoch.
+        if self.get_answers(handle).is_none() {
+            self.run(&[handle.dupe()], Require::Everything, custom_thread_pool);
+        }
     }
 
     /// Look up the `ClassFields` for a class, which may be defined in another module.
@@ -3272,6 +3283,11 @@ impl State {
             run_count: AtomicUsize::new(0),
             committing_transaction_lock: Mutex::new(()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_count(&self) -> usize {
+        self.run_count.load(Ordering::SeqCst)
     }
 
     pub fn config_finder(&self) -> &ConfigFinder {
