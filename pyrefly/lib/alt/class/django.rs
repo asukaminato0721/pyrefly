@@ -588,8 +588,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             );
         }
 
-        let reverse_relations = self.django_reverse_relations_index();
-        if let Some(reverse_fields) = reverse_relations.get(cls) {
+        if let Some(reverse_fields) = self.django_reverse_relations(cls) {
             for (name, field) in reverse_fields.fields() {
                 fields.insert(name.clone(), field.clone());
             }

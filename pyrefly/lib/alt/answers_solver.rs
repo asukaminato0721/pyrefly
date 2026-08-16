@@ -59,6 +59,7 @@ use crate::alt::answers::SolutionsEntry;
 use crate::alt::answers::SolutionsTable;
 use crate::alt::answers::TraceSideEffects;
 use crate::alt::traits::Solve;
+use crate::alt::types::class_metadata::ClassSynthesizedFields;
 use crate::alt::types::class_metadata::DjangoReverseRelationIndex;
 use crate::binding::binding::AnyIdx;
 use crate::binding::binding::Binding;
@@ -1531,6 +1532,8 @@ pub struct ThreadState {
     stack: CalcStack,
     /// For debugging only: thread-global that allows us to control debug logging across components.
     debug: RefCell<bool>,
+    /// Reverse relationships from the explicitly configured Django model modules.
+    django_reverse_relations: RefCell<Option<Arc<[Arc<DjangoReverseRelationIndex>]>>>,
     /// Configuration for recursion depth limiting. None means disabled.
     recursion_limit_config: Option<RecursionLimitConfig>,
     /// Partial answers for inline first-use pinning, keyed by (NameAssign def_idx, CalcStack height).
@@ -1565,6 +1568,7 @@ impl ThreadState {
         Self {
             stack: CalcStack::new(),
             debug: RefCell::new(false),
+            django_reverse_relations: RefCell::new(None),
             recursion_limit_config,
             partial_answers: RefCell::new(FxHashMap::default()),
             lambda_param_types: RefCell::new(FxHashMap::default()),
@@ -1907,8 +1911,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         !self.stack().sccs_is_empty()
     }
 
-    pub fn django_reverse_relations_index(&self) -> Arc<DjangoReverseRelationIndex> {
-        self.answers
+    pub fn django_reverse_relations(&self, cls: &Class) -> Option<ClassSynthesizedFields> {
+        let current = self
+            .answers
             .get(
                 self.module().name(),
                 Some(self.module().path()),
@@ -1916,6 +1921,39 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 self.thread_state,
             )
             .expect("the current module must be available while solving its Django relations")
+            .get(cls)
+            .cloned();
+
+        let configured = if let Some(indices) =
+            self.thread_state.django_reverse_relations.borrow().clone()
+        {
+            indices
+        } else {
+            let indices: Arc<[Arc<DjangoReverseRelationIndex>]> = self
+                .answers
+                .django_model_modules()
+                .into_iter()
+                .filter_map(|(module, path)| {
+                    self.answers
+                        .get(module, Some(&path), &KeyDjangoRelations, self.thread_state)
+                })
+                .collect::<Vec<_>>()
+                .into();
+            *self.thread_state.django_reverse_relations.borrow_mut() = Some(indices.dupe());
+            indices
+        };
+
+        let configured = configured
+            .iter()
+            .filter_map(|index| index.get(cls).cloned())
+            .reduce(ClassSynthesizedFields::combine);
+
+        match (current, configured) {
+            (Some(current), Some(configured)) => Some(current.combine(configured)),
+            (Some(current), None) => Some(current),
+            (None, Some(configured)) => Some(configured),
+            (None, None) => None,
+        }
     }
 
     /// Access the thread-local state for trace recording.
