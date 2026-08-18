@@ -15,7 +15,9 @@ use pyrefly_types::literal::LitStyle;
 use pyrefly_types::meta_shape_dsl::MetaShapeFunction;
 use pyrefly_types::meta_shape_dsl::ShapeTransform;
 use pyrefly_types::tuple::Tuple;
+use pyrefly_types::typed_dict::AnonymousTypedDictInner;
 use pyrefly_types::typed_dict::ExtraItems;
+use pyrefly_types::typed_dict::TypedDict;
 use pyrefly_types::types::TArgs;
 use pyrefly_types::types::TParams;
 use pyrefly_util::display::count;
@@ -143,10 +145,17 @@ impl CallWithTypes {
         solver: &AnswersSolver<Ans>,
         errors: &ErrorCollector,
     ) -> CallKeyword<'a> {
+        let value = match x.value {
+            TypeOrExpr::Expr(expr) if x.arg.is_none() => {
+                let ty = x.infer_splat_kwargs(solver, errors);
+                TypeOrExpr::Type(self.0.push(ty), expr.range())
+            }
+            _ => self.type_or_expr(x.value, solver, errors),
+        };
         CallKeyword {
             range: x.range,
             arg: x.arg,
-            value: self.type_or_expr(x.value, solver, errors),
+            value,
         }
     }
 
@@ -189,6 +198,42 @@ impl<'a> CallKeyword<'a> {
             arg: x.arg.as_ref(),
             value: TypeOrExpr::Expr(&x.value),
         }
+    }
+
+    /// Infer `**kwargs`, preserving flow-sensitive values for known keys of inferred dictionaries.
+    fn infer_splat_kwargs<Ans: LookupAnswer>(
+        &self,
+        solver: &AnswersSolver<Ans>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let TypeOrExpr::Expr(expr) = self.value else {
+            return self.value.infer(solver, errors);
+        };
+        let info = solver.expr_with_options(expr, ExprOptions::infer(errors, None));
+        let Type::TypedDict(TypedDict::Anonymous(inner)) = info.ty() else {
+            return info.into_ty();
+        };
+        let facet_types = info
+            .key_facets_at(&[])
+            .into_iter()
+            .filter_map(|(name, ty)| ty.map(|ty| (name, ty)))
+            .collect::<HashMap<_, _>>();
+        let fields = inner
+            .fields
+            .iter()
+            .map(|(name, field)| {
+                let mut field = field.clone();
+                if let Some(ty) = facet_types.get(name.as_str()) {
+                    field.ty = ty.clone();
+                }
+                (name.clone(), field)
+            })
+            .collect();
+        solver
+            .heap
+            .mk_typed_dict(TypedDict::Anonymous(Box::new(AnonymousTypedDictInner {
+                fields,
+            })))
     }
 
     pub fn materialize<Ans: LookupAnswer>(
@@ -1275,7 +1320,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         for kw in keywords {
             match kw.arg {
                 None => {
-                    let ty = kw.value.infer(self, arg_errors);
+                    let ty = kw.infer_splat_kwargs(self, arg_errors);
                     self.maybe_error_unknown_argument_type(&ty, kw.range, arg_errors);
                     if let Type::TypedDict(typed_dict) = ty {
                         // Splatting an open TypedDict into a callable without `**kwargs` is

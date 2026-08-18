@@ -832,6 +832,33 @@ def test(kwargs: dict[str, int]):
 );
 
 testcase!(
+    test_splat_kwargs_preserves_literal_values,
+    r#"
+from typing import Literal, assert_type, overload
+
+def f(arg: Literal["a", "b", "c"]): ...
+
+params = {"arg": "a"}
+f(**params)
+
+bad_params = {"arg": "d"}
+f(**bad_params)  # E: Argument `Literal['d']` is not assignable to parameter `arg`
+
+params["arg"] = "d"
+f(**params)  # E: Argument `Literal['d']` is not assignable to parameter `arg`
+
+@overload
+def overloaded(arg: Literal["a"]) -> int: ...
+@overload
+def overloaded(arg: str) -> str: ...
+def overloaded(arg: str) -> int | str: ...
+
+overload_params = {"arg": "a"}
+assert_type(overloaded(**overload_params), int)
+"#,
+);
+
+testcase!(
     test_splat_kwargs_mixed_with_keywords,
     r#"
 def f(x: str, y: int, z: int): ...
