@@ -23,6 +23,7 @@ use crate::commands::dump_config::DumpConfigArgs;
 use crate::commands::infer::InferArgs;
 use crate::commands::init::InitArgs;
 use crate::commands::lsp::LspArgs;
+use crate::commands::scip::ScipArgs;
 use crate::commands::stubgen::StubgenArgs;
 use crate::commands::suppress::SuppressArgs;
 use crate::commands::tsp::TspArgs;
@@ -72,6 +73,9 @@ pub enum Command {
     Suppress(SuppressArgs),
     /// Generate .pyi stub files from Python source files.
     Stubgen(StubgenArgs),
+
+    /// Generate a SCIP code navigation index.
+    Scip(ScipArgs),
 }
 
 impl Command {
@@ -129,6 +133,10 @@ impl Command {
             Command::Stubgen(args) => {
                 Ok((args.run(config_configurer_wrapper, thread_count)?, None))
             }
+            Command::Scip(args) => Ok((
+                args.run(version, config_configurer_wrapper, thread_count)?,
+                None,
+            )),
         }
     }
 }
