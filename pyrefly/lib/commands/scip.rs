@@ -19,6 +19,7 @@ use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
 use crate::report::scip;
+use crate::report::scip::IndexOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
 
@@ -37,6 +38,18 @@ pub struct ScipArgs {
     /// Output SCIP protobuf file.
     #[arg(short = 'o', long, default_value = "index.scip")]
     output: PathBuf,
+
+    /// Package name used in global SCIP symbols.
+    #[arg(long, default_value = "")]
+    project_name: String,
+
+    /// Package version used in global SCIP symbols.
+    #[arg(long, default_value = "")]
+    project_version: String,
+
+    /// Prefix to add to project module names in global SCIP symbols.
+    #[arg(long)]
+    project_namespace: Option<String>,
 }
 
 impl ScipArgs {
@@ -70,7 +83,17 @@ impl ScipArgs {
             .run(&handles, Require::Everything, None);
 
         let project_root = std::env::current_dir()?.absolutize();
-        let index = scip::index(transaction.as_ref(), &handles, &project_root, version)?;
+        let index = scip::index(
+            transaction.as_ref(),
+            &handles,
+            IndexOptions {
+                project_root: &project_root,
+                tool_version: version,
+                project_name: &self.project_name,
+                project_version: &self.project_version,
+                project_namespace: self.project_namespace.as_deref(),
+            },
+        )?;
         ::scip::write_message_to_file(&self.output, index)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         Ok(CommandExitStatus::Success)

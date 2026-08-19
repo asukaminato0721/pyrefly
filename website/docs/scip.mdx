@@ -1,0 +1,49 @@
+---
+title: SCIP Code Indexing
+description: Generate SCIP code navigation indexes with Pyrefly.
+---
+
+{/*
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */}
+
+# SCIP Code Indexing
+
+:::warning Experimental
+SCIP indexing is experimental. Index contents may become richer in future releases.
+:::
+
+Pyrefly can generate a [SCIP](https://github.com/scip-code/scip) index for code navigation tools. The index includes definitions and type-aware references across the Python files in your project.
+
+Global symbols follow the same `scip-python python <package> <version>` convention as [Sourcegraph's scip-python indexer](https://github.com/sourcegraph/scip-python), allowing Pyrefly indexes to participate in the existing Python SCIP ecosystem.
+
+Run the indexer from your project root:
+
+```
+pyrefly scip
+```
+
+By default, Pyrefly writes `index.scip` in the current directory. Pass files or directories to index a narrower scope, and use `-o` to choose another output path:
+
+```
+pyrefly scip src/ tests/ -o pyrefly.scip
+```
+
+Use `--project-name` and `--project-version` to give exported symbols a package identity for cross-repository navigation. `--project-namespace` prepends an import namespace when the repository layout does not contain it:
+
+```
+pyrefly scip --project-name my-package --project-version 1.2.3
+pyrefly scip --project-name my-package --project-namespace company.services
+```
+
+The command uses the same project discovery, configuration, import resolution, and configuration override flags as `pyrefly check`. Source files must be inside the directory where the command is run because SCIP document paths are relative to that project root.
+
+You can inspect and validate the result with the SCIP CLI:
+
+```
+scip print index.scip
+scip lint index.scip
+```

@@ -8,11 +8,16 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use dupe::Dupe;
 use lsp_types::SemanticTokenType;
 use pyrefly_build::handle::Handle;
+use pyrefly_python::ast::Ast;
 use pyrefly_python::module::Module;
+use pyrefly_python::module_path::ModulePathDetails;
 use pyrefly_python::symbol_kind::SymbolKind;
+use ruff_python_ast::AnyNodeRef;
 use ruff_source_file::PositionEncoding as RuffPositionEncoding;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use scip::symbol::format_symbol;
 use scip::types::Descriptor;
@@ -21,6 +26,7 @@ use scip::types::Index;
 use scip::types::Metadata;
 use scip::types::MultiLineRange;
 use scip::types::Occurrence;
+use scip::types::Package;
 use scip::types::PositionEncoding;
 use scip::types::SingleLineRange;
 use scip::types::Symbol;
@@ -33,31 +39,57 @@ use scip::types::descriptor;
 use scip::types::symbol_information;
 
 use crate::state::lsp::DefinitionMetadata;
+use crate::state::lsp::FindDefinitionItemWithDocstring;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::ImportBehavior;
 use crate::state::semantic_tokens::SemanticTokenBuilder;
 use crate::state::state::Transaction;
 
+/// Project identity and output metadata for a SCIP index.
+pub struct IndexOptions<'a> {
+    pub project_root: &'a Path,
+    pub tool_version: &'a str,
+    pub project_name: &'a str,
+    pub project_version: &'a str,
+    pub project_namespace: Option<&'a str>,
+}
+
 /// Build a SCIP index for the checked files rooted at `project_root`.
 pub fn index(
     transaction: &Transaction,
     handles: &[Handle],
-    project_root: &Path,
-    version: &str,
+    options: IndexOptions<'_>,
 ) -> anyhow::Result<Index> {
     let mut documents = handles
         .iter()
-        .map(|handle| document(transaction, handle, project_root))
+        .map(|handle| document(transaction, handle, &options))
         .collect::<anyhow::Result<Vec<_>>>()?;
     documents.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    let mut known_symbols = documents
+        .iter()
+        .flat_map(|document| &document.symbols)
+        .map(|information| information.symbol.clone())
+        .collect::<HashSet<_>>();
+    let mut external_symbols = Vec::new();
+    for occurrence in documents.iter().flat_map(|document| &document.occurrences) {
+        if scip::symbol::is_global_symbol(&occurrence.symbol)
+            && known_symbols.insert(occurrence.symbol.clone())
+        {
+            external_symbols.push(SymbolInformation {
+                symbol: occurrence.symbol.clone(),
+                ..Default::default()
+            });
+        }
+    }
+    external_symbols.sort_by(|a, b| a.symbol.cmp(&b.symbol));
 
-    let project_root = lsp_types::Url::from_directory_path(project_root)
+    let project_root = lsp_types::Url::from_directory_path(options.project_root)
         .map_err(|()| anyhow::anyhow!("cannot convert project root to a file URL"))?;
     Ok(Index {
         metadata: Some(Metadata {
             tool_info: Some(ToolInfo {
                 name: "pyrefly".to_owned(),
-                version: version.to_owned(),
+                version: options.tool_version.to_owned(),
                 ..Default::default()
             })
             .into(),
@@ -67,6 +99,7 @@ pub fn index(
         })
         .into(),
         documents,
+        external_symbols,
         ..Default::default()
     })
 }
@@ -74,20 +107,22 @@ pub fn index(
 fn document(
     transaction: &Transaction,
     handle: &Handle,
-    project_root: &Path,
+    options: &IndexOptions<'_>,
 ) -> anyhow::Result<Document> {
     let module = transaction
         .get_module_info(handle)
         .ok_or_else(|| anyhow::anyhow!("no module information for `{}`", handle.path()))?;
     let source_path = handle.path().as_path();
     let relative_path = if source_path.is_absolute() {
-        source_path.strip_prefix(project_root).map_err(|_| {
-            anyhow::anyhow!(
-                "source file `{}` is outside project root `{}`",
-                source_path.display(),
-                project_root.display()
-            )
-        })?
+        source_path
+            .strip_prefix(options.project_root)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "source file `{}` is outside project root `{}`",
+                    source_path.display(),
+                    options.project_root.display()
+                )
+            })?
     } else {
         source_path
     };
@@ -120,11 +155,7 @@ fn document(
             .into_iter()
             .next()
             .expect("definitions is nonempty");
-        let symbol = symbol(
-            &definition.module,
-            definition.definition_range,
-            &definition.metadata,
-        );
+        let symbol = symbol(transaction, handle, &definition, options);
         let is_definition =
             definition.module.path() == module.path() && definition.definition_range == token.range;
         if is_definition && seen_definitions.insert(symbol.clone()) {
@@ -161,44 +192,139 @@ fn document(
     })
 }
 
-fn symbol(module: &Module, range: TextRange, metadata: &DefinitionMetadata) -> String {
-    let name = module.code_at(range).to_owned();
-    let symbol_kind = metadata.symbol_kind();
+fn symbol(
+    transaction: &Transaction,
+    source_handle: &Handle,
+    definition: &FindDefinitionItemWithDocstring,
+    options: &IndexOptions<'_>,
+) -> String {
+    let module = &definition.module;
+    let range = definition.definition_range;
+    let symbol_kind = definition.metadata.symbol_kind();
+    let is_project = match module.path().details() {
+        ModulePathDetails::FileSystem(path) | ModulePathDetails::Namespace(path) => {
+            !path.is_absolute() || path.starts_with(options.project_root)
+        }
+        ModulePathDetails::Memory(_) => true,
+        ModulePathDetails::BundledTypeshed(_)
+        | ModulePathDetails::BundledTypeshedThirdParty(_)
+        | ModulePathDetails::BundledThirdParty(_) => false,
+    };
+    let (package_name, package_version) = if is_project {
+        (
+            options.project_name.to_owned(),
+            options.project_version.to_owned(),
+        )
+    } else if matches!(
+        module.path().details(),
+        ModulePathDetails::BundledTypeshed(_)
+    ) {
+        (
+            "python-stdlib".to_owned(),
+            source_handle.sys_info().version().to_string(),
+        )
+    } else {
+        (
+            module
+                .name()
+                .components()
+                .into_iter()
+                .next()
+                .map_or_else(String::new, |name| name.as_str().to_owned()),
+            String::new(),
+        )
+    };
+
+    let mut module_name = module.name().as_str().to_owned();
+    if is_project && let Some(namespace) = options.project_namespace {
+        module_name = format!("{namespace}.{module_name}");
+    }
+    let mut descriptors = vec![Descriptor {
+        name: module_name,
+        suffix: descriptor::Suffix::Namespace.into(),
+        ..Default::default()
+    }];
+    if symbol_kind == Some(SymbolKind::Module) {
+        descriptors.push(Descriptor {
+            name: "__init__".to_owned(),
+            suffix: descriptor::Suffix::Meta.into(),
+            ..Default::default()
+        });
+        return format_symbol(Symbol {
+            scheme: "scip-python".to_owned(),
+            package: Some(Package {
+                manager: "python".to_owned(),
+                name: package_name.replace(' ', "  "),
+                version: package_version.replace(' ', "  "),
+                ..Default::default()
+            })
+            .into(),
+            descriptors,
+            ..Default::default()
+        });
+    }
+
+    let definition_handle = Handle::new(
+        module.name(),
+        module.path().dupe(),
+        source_handle.sys_info().dupe(),
+    );
+    let ast = transaction
+        .get_ast(&definition_handle)
+        .unwrap_or_else(|| Ast::parse(module.contents(), module.source_type()).0.into());
+    let mut scopes = Vec::new();
+    for node in Ast::locate_node(&ast, range.start()) {
+        match node {
+            AnyNodeRef::StmtFunctionDef(function)
+                if !function.name.range().contains(range.start()) =>
+            {
+                scopes.push((function.name.as_str(), descriptor::Suffix::Method));
+            }
+            AnyNodeRef::StmtClassDef(class) if !class.name.range().contains(range.start()) => {
+                scopes.push((class.name.as_str(), descriptor::Suffix::Type));
+            }
+            _ => {}
+        }
+    }
+    scopes.reverse();
+    if symbol_kind == Some(SymbolKind::Variable)
+        && scopes
+            .iter()
+            .any(|(_, suffix)| *suffix == descriptor::Suffix::Method)
+    {
+        return format_symbol(Symbol::new_local(range.start().to_u32() as usize));
+    }
+    descriptors.extend(scopes.into_iter().map(|(name, suffix)| Descriptor {
+        name: name.to_owned(),
+        suffix: suffix.into(),
+        ..Default::default()
+    }));
+
+    let name = definition
+        .display_name
+        .clone()
+        .unwrap_or_else(|| module.code_at(range).to_owned());
     let suffix = match symbol_kind {
-        Some(SymbolKind::Module) => descriptor::Suffix::Namespace,
         Some(SymbolKind::Class | SymbolKind::TypeAlias) => descriptor::Suffix::Type,
         Some(SymbolKind::Function | SymbolKind::Method) => descriptor::Suffix::Method,
         Some(SymbolKind::TypeParameter) => descriptor::Suffix::TypeParameter,
         Some(SymbolKind::Parameter) => descriptor::Suffix::Parameter,
         _ => descriptor::Suffix::Term,
     };
-    let mut descriptors = vec![Descriptor {
-        name: module.name().as_str().to_owned(),
-        suffix: descriptor::Suffix::Namespace.into(),
+    descriptors.push(Descriptor {
+        name,
+        suffix: suffix.into(),
         ..Default::default()
-    }];
-    if symbol_kind != Some(SymbolKind::Module) || !name.is_empty() {
-        descriptors.extend([
-            Descriptor {
-                name: if name.is_empty() {
-                    module.name().as_str().to_owned()
-                } else {
-                    name
-                },
-                suffix: suffix.into(),
-                ..Default::default()
-            },
-            // Python permits repeated definitions with the same qualified name. The
-            // source offset keeps their identities distinct within one index.
-            Descriptor {
-                name: range.start().to_u32().to_string(),
-                suffix: descriptor::Suffix::Meta.into(),
-                ..Default::default()
-            },
-        ]);
-    }
+    });
     format_symbol(Symbol {
-        scheme: "pyrefly".to_owned(),
+        scheme: "scip-python".to_owned(),
+        package: Some(Package {
+            manager: "python".to_owned(),
+            name: package_name.replace(' ', "  "),
+            version: package_version.replace(' ', "  "),
+            ..Default::default()
+        })
+        .into(),
         descriptors,
         ..Default::default()
     })
@@ -291,8 +417,13 @@ mod tests {
         let index = index(
             &transaction,
             &handles,
-            &std::env::current_dir().unwrap(),
-            "test",
+            IndexOptions {
+                project_root: &std::env::current_dir().unwrap(),
+                tool_version: "test",
+                project_name: "example",
+                project_version: "1.0",
+                project_namespace: None,
+            },
         )
         .unwrap();
         let foo = index
@@ -310,6 +441,10 @@ mod tests {
             .iter()
             .find(|symbol| symbol.display_name == "answer")
             .unwrap();
+        assert_eq!(
+            answer.symbol,
+            "scip-python python example 1.0 foo/answer()."
+        );
 
         assert!(foo.occurrences.iter().any(|occurrence| {
             occurrence.symbol == answer.symbol
@@ -346,8 +481,13 @@ mod tests {
         let index = index(
             &transaction,
             &handles,
-            &std::env::current_dir().unwrap(),
-            "test",
+            IndexOptions {
+                project_root: &std::env::current_dir().unwrap(),
+                tool_version: "test",
+                project_name: "example",
+                project_version: "1.0",
+                project_namespace: Some("namespace"),
+            },
         )
         .unwrap();
         let answer = index.documents[0].occurrences.iter().find(|occurrence| {
