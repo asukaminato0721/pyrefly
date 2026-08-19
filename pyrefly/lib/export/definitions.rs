@@ -724,7 +724,9 @@ impl DefinitionsBuilder {
                     match DunderAllEntry::as_list(&x.value) {
                         Some(mut entries) => {
                             self.resolve_module_entries(&mut entries);
-                            self.inner.dunder_all.kind = DunderAllKind::Specified;
+                            if self.inner.dunder_all.kind == DunderAllKind::Inferred {
+                                self.inner.dunder_all.kind = DunderAllKind::Specified;
+                            }
                             self.inner.dunder_all.entries.extend(entries);
                         }
                         None => {
@@ -798,7 +800,9 @@ impl DefinitionsBuilder {
                     && arguments.keywords.is_empty()
                     && !self.in_main_guard
                 {
-                    self.inner.dunder_all.kind = DunderAllKind::Specified;
+                    if self.inner.dunder_all.kind == DunderAllKind::Inferred {
+                        self.inner.dunder_all.kind = DunderAllKind::Specified;
+                    }
                     match attr.as_str() {
                         "extend" => match DunderAllEntry::as_list(&arguments.args[0]) {
                             Some(mut entries) => {
@@ -1484,5 +1488,23 @@ __all__: list[str] = some_var
             matches!(defs.dunder_all.kind, DunderAllKind::Unresolvable(_)),
             "An annotated assignment with unresolvable RHS should produce Unresolvable"
         );
+    }
+
+    #[test]
+    fn test_all_unresolvable_is_sticky_across_mutations() {
+        for mutation in [
+            "__all__ += ['x']",
+            "__all__.append('x')",
+            "__all__.extend(['x'])",
+            "__all__.remove('x')",
+        ] {
+            let defs = calculate_unranged_definitions_with_defaults(&format!(
+                "__all__ = []\n__all__.append(name)\n{mutation}\n"
+            ));
+            assert!(
+                matches!(defs.dunder_all.kind, DunderAllKind::Unresolvable(_)),
+                "A resolvable mutation must not overwrite an earlier Unresolvable state: {mutation}"
+            );
+        }
     }
 }
