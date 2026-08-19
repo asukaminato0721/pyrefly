@@ -653,7 +653,6 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         "`ParamSpec` cannot be used for type parameter".to_owned(),
                     )
                 } else {
-                    let restriction = param.restriction();
                     // Match the cheap `arg` literal shape before materializing the
                     // parameter's upper bound, so only an integer literal argument
                     // pays for computing the bound.
@@ -668,7 +667,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         } else {
                             arg.clone()
                         };
-                    if validate_restriction && restriction.is_restricted() {
+                    if validate_restriction && param.restriction().is_restricted() {
                         let tcc = &|| {
                             TypeCheckContext::of_kind(TypeCheckKind::TypeVarSpecialization(
                                 param.name().clone(),
@@ -684,13 +683,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                                 }
                             })
                         };
-                        self.check_type(
-                            &arg_for_check,
-                            &param.upper_bound(self.stdlib, self.heap),
-                            range,
-                            errors,
-                            tcc,
-                        );
+                        let upper_bound = param.upper_bound(self.stdlib, self.heap);
+                        if !self.check_type(&arg_for_check, &upper_bound, range, errors, tcc) {
+                            // The primary specialization error is sufficient. Recover to the bound
+                            // so the invalid argument cannot cause unrelated errors in later uses.
+                            return upper_bound;
+                        }
                     }
                     arg
                 }

@@ -563,6 +563,37 @@ def f(x: int, y: int | A) -> None:
     "#,
 );
 
+// Invalid generic arguments recover to their bounds, so NumPy-style explicit `self` overloads do
+// not produce a second unsupported-operation error after the primary specialization error.
+testcase!(
+    test_inplace_operator_invalid_generic_receiver,
+    r#"
+from typing import Any, Generic, TypeVar, cast, overload
+
+Shape = TypeVar("Shape", bound=tuple[int, ...], covariant=True)
+T = TypeVar("T", covariant=True)
+
+class DType(Generic[T]): ...
+class Floating: ...
+class Float32(Floating): ...
+
+class Array(Generic[Shape, T]):
+    @overload
+    def __itruediv__(
+        self: Array[tuple[int, ...], DType[Floating]], other: float
+    ) -> Array[Shape, T]: ...
+    @overload
+    def __itruediv__(
+        self: Array[tuple[int, ...], DType[complex]], other: complex
+    ) -> Array[Shape, T]: ...
+    def __itruediv__(self, other) -> Any:
+        return self
+
+x: Array[tuple[float, ...], DType[Float32]] = cast(Any, None)  # E: `tuple[float, ...]` is not assignable to upper bound `tuple[int, ...]`
+x /= 2.0
+    "#,
+);
+
 testcase!(
     test_unop_on_any,
     r#"
