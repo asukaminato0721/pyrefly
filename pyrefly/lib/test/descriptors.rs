@@ -1122,6 +1122,40 @@ def f(foo: Foo) -> None:
     "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/4592
+testcase!(
+    test_callable_descriptor_protocol_self_params,
+    r#"
+from typing import Callable, Concatenate, Protocol, Self, assert_type, overload
+
+
+class Method[**P, R](Protocol):
+    def __call__(self, /, *args: P.args, **kwargs: P.kwargs) -> R: ...
+
+    @overload
+    def __get__(self, instance: None, owner: type, /) -> Self: ...
+
+    @overload
+    def __get__[ObjT, **P1, R1](
+        self: Method[Concatenate[ObjT, P1], R1],
+        instance: ObjT,
+        owner: type | None = None,
+        /,
+    ) -> Callable[P1, R1]: ...
+
+
+def wrap[**P, R](method: Callable[P, R]) -> Method[P, R]: ...
+
+
+class Foo:
+    @wrap
+    def bar(self, x: int) -> int: ...
+
+
+assert_type(Foo().bar(1), int)
+"#,
+);
+
 // Assignment resolves a descriptor through its getter too, so the same guard keeps
 // the write path from overflowing the stack.
 testcase!(

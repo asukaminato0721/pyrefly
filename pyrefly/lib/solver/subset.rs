@@ -2835,6 +2835,17 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         self.is_consistent(&got_arg, &want_arg)?
                     }
                 }
+            } else if param.kind() == QuantifiedKind::ParamSpec
+                && matches!(want_arg, Type::Concatenate(..))
+                && want_arg
+                    .collect_maybe_placeholder_vars()
+                    .into_iter()
+                    .any(|var| self.solver.var_is_quantified(var))
+            {
+                // A ParamSpec is a parameter-list pattern while its inference variables are
+                // unsolved. Match the concrete argument against that pattern before applying
+                // the class parameter's variance, which would reverse Concatenate decomposition.
+                self.is_subset_eq(got_arg, want_arg)?;
             } else {
                 match variances.get(param.name()) {
                     Variance::Covariant => self.is_subset_eq(got_arg, want_arg)?,
