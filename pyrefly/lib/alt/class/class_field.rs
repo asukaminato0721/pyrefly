@@ -54,6 +54,7 @@ use crate::alt::attr::AttrSubsetError;
 use crate::alt::attr::ClassBase;
 use crate::alt::attr::NoAccessReason;
 use crate::alt::callable::CallArg;
+use crate::alt::class::django::ID as DJANGO_ID;
 use crate::alt::expr::TypeOrExpr;
 use crate::alt::types::class_bases::ClassBases;
 use crate::alt::types::class_metadata::ClassMetadata;
@@ -4060,6 +4061,22 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             else {
                 continue;
             };
+            // A custom Django primary key named `id` replaces the default field; it does not
+            // override the `id` that Pyrefly synthesized while analyzing the parent in isolation.
+            if field_name == &DJANGO_ID
+                && metadata
+                    .django_model_metadata()
+                    .and_then(|django| django.custom_primary_key_field.as_ref())
+                    .is_some_and(|primary_key| primary_key == field_name)
+                && self
+                    .get_synthesized_field_from_current_class_only(
+                        &want_field.defining_class,
+                        field_name,
+                    )
+                    .is_some_and(|field| Arc::ptr_eq(&field, &want_field.value))
+            {
+                continue;
+            }
             // `__call__` is checked against a Protocol parent only, unless the user
             // opts in with `@override`. Implementing a callable interface is
             // ubiquitous - argparse actions, auth handlers, metaclasses - and

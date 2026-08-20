@@ -8,6 +8,32 @@
 use crate::django_testcase;
 
 django_testcase!(
+    test_custom_id_primary_key_overrides_synthesized_parent_id,
+    r#"
+import uuid
+
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin
+from django.db import models
+
+class User(AbstractBaseUser, PermissionsMixin):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+"#,
+);
+
+django_testcase!(
+    test_custom_id_primary_key_checks_declared_parent_id,
+    r#"
+from django.db import models
+
+class Parent(models.Model):
+    id = models.IntegerField(primary_key=True)
+
+class Child(Parent):
+    id = models.UUIDField(primary_key=True)  # E: `Child.id` has type `UUID`, which is not consistent with `int` in `Parent.id`
+"#,
+);
+
+django_testcase!(
     test_auto_generated_id_field,
     r#"
 from typing import assert_type
