@@ -63,7 +63,7 @@ def bar(member: int) -> None:
 
 def foo(member: MyEnum) -> None:
     assert_type(member.name, str)
-    assert_type(member.value, int)
+    assert_type(member.value, Literal[1, 2])
     assert_type(member._value_, int)
 "#,
 );
@@ -100,6 +100,24 @@ def f(x: E) -> int | str | None: ...
 def f(x) -> int | str | None: ...
 
 assert_type(f(E.X), int)
+"#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/4618
+testcase!(
+    test_enum_instance_value_preserves_literals,
+    r#"
+from enum import Enum
+from typing import Literal, assert_type
+
+class Priority(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+def get_priority_level(p: Priority) -> Literal[1, 2, 3]:
+    assert_type(p.value, Literal[1, 2, 3])
+    return p.value
 "#,
 );
 
@@ -245,14 +263,13 @@ testcase!(
     test_infer_value,
     r#"
 from enum import Enum
-from typing import assert_type
+from typing import Literal, assert_type
 
 class MyEnum(Enum):
     X = 1
     Y = "foo"
 def test(e: MyEnum):
-    # the inferred type use promoted types, for performance reasons
-    assert_type(e.value, int | str)
+    assert_type(e.value, Literal[1, "foo"])
 "#,
 );
 
@@ -407,7 +424,7 @@ class C(C, enum.Enum):  # E: Class `C` inheriting from `C` creates a cycle  # E:
 testcase!(
     test_enum_instance_only_attr,
     r#"
-from typing import assert_type, Any
+from typing import Any, Literal, assert_type
 from enum import Enum
 
 class MyEnum(Enum):
@@ -418,7 +435,7 @@ class MyEnum(Enum):
 assert_type(MyEnum.Y, int)
 
 for x in MyEnum:
-    assert_type(x.value, str)  # Y is not an enum member
+    assert_type(x.value, Literal["foo", "bar"])  # Y is not an enum member
 "#,
 );
 

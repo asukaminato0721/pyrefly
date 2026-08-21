@@ -151,7 +151,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         metadata: &ClassMetadata,
         attr_name: &Name,
     ) -> Option<ClassAttribute> {
-        self.special_case_enum_attr_lookup(class, None, metadata, attr_name)
+        self.special_case_enum_attr_lookup(class, None, metadata, attr_name, false)
             .or_else(|| self.get_instance_attribute(class, attr_name))
     }
 
@@ -163,7 +163,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         attr_name: &Name,
     ) -> Option<ClassAttribute> {
         let class = &lit.class;
-        self.special_case_enum_attr_lookup(class, Some(lit), metadata, attr_name)
+        self.special_case_enum_attr_lookup(class, Some(lit), metadata, attr_name, false)
             .or_else(|| self.get_instance_attribute(class, attr_name))
     }
 
@@ -171,6 +171,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     /// based on the attribute name and whether we have a known enum literal.
     ///
     /// `enum_literal` is set if we're looking this up on a known member, like `Literal[MyEnum.X]`
+    /// `preserve_implicit_literals` keeps the inferred class-wide type precise for the read-only
+    /// `value` property while allowing the writable `_value_` attribute to use promoted types.
     ///
     /// Return None if either this is not an enum or this is not a special-case
     /// attribute.
@@ -180,6 +182,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         enum_literal: Option<&LitEnum>,
         metadata: &ClassMetadata,
         name: &Name,
+        preserve_implicit_literals: bool,
     ) -> Option<ClassAttribute> {
         let enum_metadata = metadata.enum_metadata()?;
         if name == &VALUE {
@@ -194,7 +197,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             let ty = if let Some(lit_enum) = enum_literal {
                 self.enum_value_lookup_on_member(class, lit_enum, enum_metadata)
             } else {
-                self.enum_value_lookup_on_class(class, enum_metadata)
+                self.enum_value_lookup_on_class(class, enum_metadata, preserve_implicit_literals)
             };
             Some(ClassAttribute::read_write(ty))
         } else if name == &VALUE_PROP {
@@ -206,13 +209,9 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }) {
                 return None;
             }
-            if let Some(lit_enum) = enum_literal {
-                self.get_enum_literal_or_instance_attribute(lit_enum, metadata, &VALUE)
-                    .map(|attr| attr.read_only_equivalent(ReadOnlyReason::EnumMemberValue))
-            } else {
-                self.get_enum_or_instance_attribute(class, metadata, &VALUE)
-                    .map(|attr| attr.read_only_equivalent(ReadOnlyReason::EnumMemberValue))
-            }
+            self.special_case_enum_attr_lookup(class, enum_literal, metadata, &VALUE, true)
+                .or_else(|| self.get_instance_attribute(class, &VALUE))
+                .map(|attr| attr.read_only_equivalent(ReadOnlyReason::EnumMemberValue))
         } else {
             None
         }
@@ -283,7 +282,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
     /// Look up the `_value_` attribute for an enum type (not a specific member).
     /// Whether `_value_` should be read-write is unspecified, but we need to allow assigning
     /// it in `__init__` so we make it read-write.
-    fn enum_value_lookup_on_class(&self, class: &ClassType, enum_metadata: &EnumMetadata) -> Type {
+    fn enum_value_lookup_on_class(
+        &self,
+        class: &ClassType,
+        enum_metadata: &EnumMetadata,
+        preserve_implicit_literals: bool,
+    ) -> Type {
         let mixed_in = self.mixed_in_enum_data_type(class.class_object());
         let has_new = self
             .get_class_fields(class.class_object())
@@ -313,7 +317,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     } else {
                         mixed_in.clone()
                     }
-                } else if value_ty.is_implicit_literal() {
+                } else if !preserve_implicit_literals && value_ty.is_implicit_literal() {
                     value_ty.promote_implicit_literals(self.stdlib)
                 } else {
                     value_ty
