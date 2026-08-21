@@ -2815,13 +2815,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         for (got_arg, want_arg, param) in izip!(got, want, params.iter()) {
             if param.kind() == QuantifiedKind::TypeVarTuple {
                 let as_tuple_carrier = |arg: &Type| {
+                    let arg = self.solver.expand(arg.clone());
                     // A symbolic variadic argument represents the whole tuple, like `tuple[*Ts]`.
-                    if matches!(arg, Type::Var(_)) || arg.is_kind_type_var_tuple() {
+                    if matches!(&arg, Type::Var(_)) || arg.is_kind_type_var_tuple() {
                         self.solver
                             .heap
-                            .mk_unpacked_tuple(Vec::new(), arg.clone(), Vec::new())
+                            .mk_unpacked_tuple(Vec::new(), arg, Vec::new())
                     } else {
-                        arg.clone()
+                        arg
                     }
                 };
                 self.is_consistent(&as_tuple_carrier(got_arg), &as_tuple_carrier(want_arg))?;

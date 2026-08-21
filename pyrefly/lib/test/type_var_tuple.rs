@@ -173,6 +173,18 @@ def test[*Ts](x: A[int, str], y: A[str, str, str], z: A[*Ts]):
 );
 
 testcase!(
+    test_type_var_tuple_class_assignable_to_itself,
+    r#"
+class A[*Ts]:
+    def __init__(self, *state: *Ts):
+        self.state: tuple[*Ts] = state
+
+    def add[*TR](self: A[*TR, int, int]) -> A[*TR, int]:
+        return A(*self.state[:-2], self.state[-2] + self.state[-1])
+"#,
+);
+
+testcase!(
     test_type_var_tuple_iterate,
     r#"
 from typing import TypeVarTuple
