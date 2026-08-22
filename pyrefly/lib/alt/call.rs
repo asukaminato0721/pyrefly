@@ -1710,7 +1710,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 };
                 self.check_unnecessary_type_conversion(&cls, args, arguments_range, errors);
                 let constructed_type = self.construct_class(
-                    cls,
+                    cls.clone(),
                     constructor_kind,
                     args,
                     keywords,
@@ -1720,11 +1720,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                     context,
                     hint,
                 );
-                // Override the constructed type with the quantified bound if
-                // this class is being called via a quantified type with a class
-                // bound, to allow calls on TypeVars with class bounds to work
-                // as expected.
-                if let Some(quantified) = as_quantified_bound {
+                // Preserve the quantified type when the constructor returns an
+                // instance of its class bound. A metaclass may return an unrelated
+                // type, in which case its declared return type takes precedence.
+                if let Some(quantified) = as_quantified_bound
+                    && self.is_compatible_constructor_return(&constructed_type, cls.class_object())
+                {
                     Type::Quantified(Box::new(quantified))
                 } else {
                     constructed_type
