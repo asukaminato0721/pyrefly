@@ -2414,6 +2414,7 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         }
 
         let polars_call = self.infer_polars_call_specialization(&callee_ty, &x.arguments, errors);
+        let mut django_aggregate_value = None;
 
         let result = if matches!(&callee_ty, Type::ClassDef(cls) if cls.is_builtin("super")) {
             // Because we have to construct a binding for super in order to fill in implicit arguments,
@@ -2426,6 +2427,8 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 )
         } else {
             self.expand_mut(&mut callee_ty);
+            django_aggregate_value =
+                self.django_aggregate_value_type(&callee_ty, &x.arguments, errors);
             self.check_unittest_mock_patch_target(&callee_ty, &x.arguments, errors);
 
             let args;
@@ -2688,6 +2691,12 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             }
         };
 
+        let result = django_aggregate_value.map_or(result, |value| {
+            self.heap.mk_class_type(
+                self.stdlib
+                    .dict(self.heap.mk_class_type(self.stdlib.str().clone()), value),
+            )
+        });
         self.apply_polars_call_specialization(result, polars_call)
     }
 

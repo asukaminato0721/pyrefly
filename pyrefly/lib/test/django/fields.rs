@@ -70,21 +70,27 @@ assert_type(card.suit, Literal["CLUBS", "SPADES", "HEARTS", "DIAMONDS"])
 "#,
 );
 
-// We can consider narrowing the type further
-// but it's unclear if it's worth doing so since
-// django stubs give type Any for the aggregate values
 django_testcase!(
-    test_int_field,
+    test_aggregate_output_field,
     r#"
 from django.db import models
-from typing import assert_type, Any
+from typing import Any, assert_type
 
 class Default(models.Model):
     int_field = models.IntegerField(default=0)
 
 total_sum_typed = Default.objects.aggregate(
-        total=models.Sum("int_field", output_field=models.IntegerField())
+    total=models.Sum("int_field", output_field=models.IntegerField())
 )
-assert_type(total_sum_typed, dict[str, Any]) 
+assert_type(total_sum_typed, dict[str, int])
+
+mixed = Default.objects.all().aggregate(
+    models.Sum("int_field", output_field=models.IntegerField()),
+    average=models.Avg("int_field", output_field=models.FloatField()),
+)
+assert_type(mixed, dict[str, int | float])
+
+untyped = Default.objects.aggregate(total=models.Sum("int_field"))
+assert_type(untyped, dict[str, Any])
 "#,
 );

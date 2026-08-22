@@ -14,12 +14,15 @@ use pyrefly_types::callable::ParamList;
 use pyrefly_types::class::Class;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
+use pyrefly_types::function::FunctionKind;
 use pyrefly_types::function::PropertyMetadata;
 use pyrefly_types::function::PropertyRole;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
+use pyrefly_types::types::BoundMethodType;
 use pyrefly_types::types::Type;
+use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprCall;
 use ruff_python_ast::ExprStringLiteral;
@@ -111,6 +114,70 @@ enum DjangoRelationKind {
 }
 
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    /// Infer the common value type of Django aggregations with explicit output fields.
+    pub fn django_aggregate_value_type(
+        &self,
+        callee: &Type,
+        arguments: &Arguments,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        let kind = match callee {
+            Type::BoundMethod(method) => match &method.func {
+                BoundMethodType::Function(function) => &function.metadata.kind,
+                BoundMethodType::Forall(function) => &function.body.metadata.kind,
+                BoundMethodType::Overload(overload) => &overload.metadata.kind,
+            },
+            Type::Function(function) => &function.metadata.kind,
+            _ => return None,
+        };
+        let FunctionKind::Def(function) = kind else {
+            return None;
+        };
+        if function.qname.id().as_str() != "aggregate"
+            || !matches!(
+                function.qname.module_name().as_str(),
+                "django.db.models.manager" | "django.db.models.query"
+            )
+            || (arguments.args.is_empty() && arguments.keywords.is_empty())
+        {
+            return None;
+        }
+
+        if arguments
+            .args
+            .iter()
+            .any(|argument| matches!(argument, Expr::Starred(_)))
+            || arguments
+                .keywords
+                .iter()
+                .any(|keyword| keyword.arg.is_none())
+        {
+            return None;
+        }
+        let mut value_types = Vec::new();
+        for argument in arguments
+            .args
+            .iter()
+            .chain(arguments.keywords.iter().map(|keyword| &keyword.value))
+        {
+            let aggregation = argument.as_call_expr()?;
+            let output_field = aggregation.arguments.find_keyword("output_field")?;
+            let field_type = self.expr_infer(&output_field.value, errors);
+            value_types.push(self.get_django_output_field_type(&field_type)?);
+        }
+        Some(self.unions(value_types))
+    }
+
+    /// Read the Python value type recorded by django-stubs on a model field.
+    fn get_django_output_field_type(&self, ty: &Type) -> Option<Type> {
+        match ty {
+            Type::ClassType(field) if self.inherits_from_django_field(field.class_object()) => self
+                .get_class_member(field.class_object(), &DJANGO_PRIVATE_GET_TYPE)
+                .map(|field| field.ty()),
+            _ => None,
+        }
+    }
+
     fn is_one_to_one_field(&self, field: &Class) -> bool {
         field.has_toplevel_qname(
             ModuleName::django_models_fields_related().as_str(),
