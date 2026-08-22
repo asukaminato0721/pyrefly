@@ -193,6 +193,25 @@ assert_type(x, int)
 );
 
 testcase!(
+    test_metaclass_call_through_bounded_typevar,
+    r#"
+from typing import assert_type
+
+class Meta(type):
+    def __call__(self, value: int) -> str: ...
+
+class C(metaclass=Meta): ...
+
+class Container[T: C]:
+    cls: type[T]
+
+    def make(self) -> str:
+        assert_type(self.cls(0), str)
+        return self.cls("")  # E: `Literal['']` is not assignable to parameter `value` with type `int`
+    "#,
+);
+
+testcase!(
     test_metaclass_invalid_generic,
     r#"
 from typing import Any, assert_type
