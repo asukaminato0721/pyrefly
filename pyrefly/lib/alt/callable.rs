@@ -1931,6 +1931,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         } else {
             (QuantifiedHandle::empty(), callable, None)
         };
+        // Checking a bound method's explicit `self:` annotation can recursively call the
+        // same method while testing structural protocol conformance. Treat that recursive
+        // self check coinductively; the outer protocol check still validates every member.
+        let mut protocol_self_check = None;
+        let mut recursive_protocol_self_check = false;
+        if let Some(self_type) = &self_obj
+            && let Some(self_param) = callable.get_first_param()
+            && matches!(
+                self_param,
+                Type::ClassType(cls) if self.type_order().is_protocol(cls.class_object())
+            )
+        {
+            let key = (self_type.clone(), self_param.clone());
+            if self.enter_protocol_self_check(key.clone()) {
+                recursive_protocol_self_check = true;
+            } else {
+                protocol_self_check = Some(key);
+            }
+        }
         let call_context = call_context.with_shape_flag_vars(shape_flag_vars);
         let (mut self_qs, remaining_callable_qs) = if self_obj.is_some()
             && let Some(first_param) = callable.get_first_param()
@@ -1970,7 +1989,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             keywords,
             arguments_range,
         });
-        let self_arg = self_obj.as_ref().map(|ty| CallArg::ty(ty, arguments_range));
+        let recursive_self_arg = self.heap.mk_any_implicit();
+        let self_arg = self_obj.as_ref().map(|ty| {
+            CallArg::ty(
+                if recursive_protocol_self_check {
+                    &recursive_self_arg
+                } else {
+                    ty
+                },
+                arguments_range,
+            )
+        });
         let argmap = match callable.params {
             Params::List(params) | Params::Partial(params) => self.callable_infer_params(
                 callable_name,
@@ -2134,12 +2163,16 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .map(ReturnTypeResolutionError::TypeLevelDsl)
             .collect();
 
-        (
+        let result = (
             self.reproject_tuple_carrier_shape(ret),
             errors,
             return_type_errors,
             argmap,
-        )
+        );
+        if let Some(key) = protocol_self_check {
+            self.exit_protocol_self_check(&key);
+        }
+        result
     }
 
     /// After a call's return type is resolved, re-project the shape of registered

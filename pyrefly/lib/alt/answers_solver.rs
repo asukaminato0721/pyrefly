@@ -1765,10 +1765,9 @@ pub struct ThreadState {
     /// is pushed here. When the nested call takes its sink, the previous
     /// one is restored.
     trace_sink_stack: RefCell<Vec<Option<TraceSideEffects>>>,
-    /// `(self_type, self_param)` pairs whose overload-self-type compatibility
-    /// check is currently in progress, used as a coinductive guard against
-    /// self-referential protocols. See `filter_overloads_by_self_type`.
-    overload_self_filter_stack: RefCell<FxHashSet<(Type, Type)>>,
+    /// `(self_type, self_param)` pairs whose compatibility check is currently in
+    /// progress, used as a coinductive guard against self-referential protocols.
+    protocol_self_check_stack: RefCell<FxHashSet<(Type, Type)>>,
 }
 
 impl ThreadState {
@@ -1781,7 +1780,7 @@ impl ThreadState {
             lambda_param_types: RefCell::new(FxHashMap::default()),
             trace_sink: RefCell::new(None),
             trace_sink_stack: RefCell::new(Vec::new()),
-            overload_self_filter_stack: RefCell::new(FxHashSet::default()),
+            protocol_self_check_stack: RefCell::new(FxHashSet::default()),
         }
     }
 
@@ -2212,20 +2211,19 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
             .cloned()
     }
 
-    /// Mark an overload-self-type compatibility check `(self_type, self_param)` as in
-    /// progress. Returns `true` if it was already active, signaling a coinductive cycle
-    /// (a self-referential protocol). See `filter_overloads_by_self_type`.
-    pub(crate) fn enter_overload_self_filter(&self, key: (Type, Type)) -> bool {
+    /// Mark a protocol-typed `self` compatibility check as in progress. Returns `true`
+    /// if it was already active, signaling a coinductive cycle.
+    pub(crate) fn enter_protocol_self_check(&self, key: (Type, Type)) -> bool {
         !self
             .thread_state
-            .overload_self_filter_stack
+            .protocol_self_check_stack
             .borrow_mut()
             .insert(key)
     }
 
-    pub(crate) fn exit_overload_self_filter(&self, key: &(Type, Type)) {
+    pub(crate) fn exit_protocol_self_check(&self, key: &(Type, Type)) {
         self.thread_state
-            .overload_self_filter_stack
+            .protocol_self_check_stack
             .borrow_mut()
             .remove(key);
     }

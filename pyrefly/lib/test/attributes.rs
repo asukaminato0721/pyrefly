@@ -916,6 +916,19 @@ def test(foo: Foo) -> None:
 );
 
 testcase!(
+    test_object_getattr_incompatible_self_annotation,
+    r#"
+from collections.abc import Awaitable
+
+class C:
+    def __getattr__(self: Awaitable):
+        pass
+
+C().a  # E: Argument `C` is not assignable to parameter `self` with type `Awaitable[Unknown]`  # E: Expected 0 positional arguments, got 1
+    "#,
+);
+
+testcase!(
     test_object_setattr,
     r#"
 from typing import assert_type

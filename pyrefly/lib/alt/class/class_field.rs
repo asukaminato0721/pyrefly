@@ -3408,11 +3408,11 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         return self.is_subset_eq(self_type, &p);
                     }
                     let key = (self_type.clone(), p.clone());
-                    if self.enter_overload_self_filter(key.clone()) {
+                    if self.enter_protocol_self_check(key.clone()) {
                         return true;
                     }
                     let applies = self.is_subset_eq(self_type, &p);
-                    self.exit_overload_self_filter(&key);
+                    self.exit_protocol_self_check(&key);
                     applies
                 })
             })
