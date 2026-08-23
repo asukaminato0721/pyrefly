@@ -117,6 +117,7 @@ use crate::types::quantified::QuantifiedKind;
 use crate::types::sentinel::Sentinel;
 use crate::types::special_form::SpecialForm;
 use crate::types::tuple::Tuple;
+use crate::types::type_alias::TypeAliasData;
 use crate::types::type_info::TypeInfo;
 use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
@@ -3134,6 +3135,27 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
         key_present: bool, // true if the key is definitely known to be present
         type_form_context: TypeFormContext<'_>,
     ) -> Type {
+        self.subscript_infer_for_type_with_key_present_inner(
+            base,
+            slice,
+            range,
+            errors,
+            key_present,
+            type_form_context,
+            &mut SmallSet::new(),
+        )
+    }
+
+    fn subscript_infer_for_type_with_key_present_inner(
+        &self,
+        base: &Type,
+        slice: &Expr,
+        range: TextRange,
+        errors: &ErrorCollector,
+        key_present: bool,
+        type_form_context: TypeFormContext<'_>,
+        aliases: &mut SmallSet<TypeAliasData>,
+    ) -> Type {
         let xs = Ast::unpack_slice(slice);
         let slice_ty = LazyCell::new(|| self.expr_infer(slice, errors));
         // The slice error depends only on `slice`, not on the union member, so compute it
@@ -3510,13 +3532,14 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                             }
                         }
                     }
-                    let result = self.subscript_infer_for_type_with_key_present(
+                    let result = self.subscript_infer_for_type_with_key_present_inner(
                         &schema.underlying_type(),
                         slice,
                         range,
                         errors,
                         key_present,
                         type_form_context,
+                        aliases,
                     );
                     // Preserve the stub's Series class when attaching an element dtype.
                     match (column_dtype, result) {
@@ -3532,45 +3555,49 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         (_, result) => result,
                     }
                 }
-                Type::Series(schema) => self.subscript_infer_for_type_with_key_present(
+                Type::Series(schema) => self.subscript_infer_for_type_with_key_present_inner(
                     &schema.underlying_type(),
                     slice,
                     range,
                     errors,
                     key_present,
                     type_form_context,
+                    aliases,
                 ),
                 Type::Quantified(ref q) if q.is_type_var() && q.restriction().is_restricted() => {
                     match q.restriction() {
                         Restriction::Bound(bound) => self
-                            .subscript_infer_for_type_with_key_present(
+                            .subscript_infer_for_type_with_key_present_inner(
                                 bound,
                                 slice,
                                 range,
                                 errors,
                                 key_present,
                                 type_form_context,
+                                aliases,
                             ),
                         Restriction::Constraints(constraints) => {
                             self.unions(constraints.map(|constraint| {
-                                self.subscript_infer_for_type_with_key_present(
+                                self.subscript_infer_for_type_with_key_present_inner(
                                     constraint,
                                     slice,
                                     range,
                                     errors,
                                     key_present,
                                     type_form_context,
+                                    aliases,
                                 )
                             }))
                         }
                         Restriction::Flag(domain) => self
-                            .subscript_infer_for_type_with_key_present(
+                            .subscript_infer_for_type_with_key_present_inner(
                                 &domain.as_type(self.stdlib, self.heap),
                                 slice,
                                 range,
                                 errors,
                                 key_present,
                                 type_form_context,
+                                aliases,
                             ),
                         Restriction::Unrestricted => {
                             unreachable!("restricted TypeVar cannot be unrestricted")
@@ -3657,14 +3684,25 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         }
                     })
                 }
-                Type::UntypedAlias(ta) => self.subscript_infer_for_type_with_key_present(
-                    &self.untype_alias(&ta),
-                    slice,
-                    range,
-                    errors,
-                    key_present,
-                    type_form_context,
-                ),
+                Type::UntypedAlias(ta) => {
+                    if !aliases.insert((*ta).clone()) {
+                        // This alias is already being subscripted. Its other members contribute
+                        // the result, so the recursive reference contributes nothing new.
+                        self.heap.mk_never()
+                    } else {
+                        let result = self.subscript_infer_for_type_with_key_present_inner(
+                            &self.untype_alias(&ta),
+                            slice,
+                            range,
+                            errors,
+                            key_present,
+                            type_form_context,
+                            aliases,
+                        );
+                        aliases.shift_remove(&*ta);
+                        result
+                    }
+                }
                 t => self.error(
                     errors,
                     range,

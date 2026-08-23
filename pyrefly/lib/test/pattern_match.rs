@@ -7,6 +7,22 @@
 
 use crate::testcase;
 
+// Regression test for https://github.com/facebook/pyrefly/issues/4631.
+testcase!(
+    test_mapping_pattern_recursive_alias,
+    r#"
+from typing import Mapping
+
+def fn(obj: U):
+    match obj:
+        case {'a': {'b': []}}:
+            pass
+
+T = 'T' | str | Mapping[str, 'T']  # E: `|` union syntax does not work with string literals # E: cyclic self-reference in `T`
+U = Mapping[str, T]
+"#,
+);
+
 testcase!(
     test_double_name_match,
     r#"
