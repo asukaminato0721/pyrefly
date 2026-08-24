@@ -13,6 +13,7 @@
 
 use pyrefly_python::dunder;
 use pyrefly_types::function::FuncMetadata;
+use pyrefly_types::literal::Lit;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
@@ -27,6 +28,7 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
 use crate::alt::expr::ExprOptions;
+use crate::alt::expr::MAX_TUPLE_LENGTH;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::decorated_function::Decorator;
 use crate::alt::unwrap::HintRef;
@@ -40,7 +42,216 @@ use crate::types::function::FunctionKind;
 use crate::types::tuple::Tuple;
 use crate::types::types::Type;
 
+#[derive(Clone, Copy)]
+enum StructFormatType {
+    Bool,
+    Bytes,
+    ByteChar,
+    Complex,
+    Float,
+    Int,
+}
+
+/// Parse the value types described by a `struct` format string. Returning `None`
+/// leaves calls with unsupported or excessively large formats on typeshed's
+/// gradual fallback.
+fn parse_struct_format(format: &[u8]) -> Option<Vec<StructFormatType>> {
+    let mut result = Vec::new();
+    let mut i = usize::from(format.first().is_some_and(|c| b"@=<>!".contains(c)));
+    while i < format.len() {
+        if format[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+
+        let mut count = 0usize;
+        let mut has_count = false;
+        while i < format.len() && format[i].is_ascii_digit() {
+            has_count = true;
+            count = count
+                .checked_mul(10)?
+                .checked_add((format[i] - b'0') as usize)?;
+            i += 1;
+        }
+        if i == format.len() || (has_count && format[i].is_ascii_whitespace()) {
+            return None;
+        }
+        let count = if has_count { count } else { 1 };
+        let ty = match format[i] {
+            b'x' => None,
+            b'c' => Some(StructFormatType::ByteChar),
+            b'b' | b'B' | b'h' | b'H' | b'i' | b'I' | b'l' | b'L' | b'q' | b'Q' | b'n' | b'N'
+            | b'P' => Some(StructFormatType::Int),
+            b'?' => Some(StructFormatType::Bool),
+            b'e' | b'f' | b'd' => Some(StructFormatType::Float),
+            b'F' | b'D' => Some(StructFormatType::Complex),
+            b's' | b'p' => {
+                if result.len() == MAX_TUPLE_LENGTH {
+                    return None;
+                }
+                result.push(StructFormatType::Bytes);
+                i += 1;
+                continue;
+            }
+            _ => return None,
+        };
+        if let Some(ty) = ty {
+            if result.len().checked_add(count)? > MAX_TUPLE_LENGTH {
+                return None;
+            }
+            result.extend(std::iter::repeat_n(ty, count));
+        }
+        i += 1;
+    }
+    Some(result)
+}
+
 impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
+    /// Specialize module-level `struct` functions when the format is a literal.
+    /// The ordinary call still runs first so typeshed remains responsible for
+    /// the fixed arguments and for calls whose format cannot be specialized.
+    pub fn try_call_struct_function(
+        &self,
+        callee_ty: &Type,
+        args: &[CallArg],
+        keywords: &[CallKeyword],
+        func_range: TextRange,
+        arguments_range: TextRange,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Option<Type> {
+        let func_kind = callee_ty.to_func_kind()?;
+        let FunctionKind::Def(func) = func_kind else {
+            return None;
+        };
+        let (value_start, returns_values, returns_iterator) =
+            if func.has_toplevel_qname("_struct", "pack") {
+                (1, false, false)
+            } else if func.has_toplevel_qname("_struct", "pack_into") {
+                (3, false, false)
+            } else if func.has_toplevel_qname("_struct", "unpack")
+                || func.has_toplevel_qname("_struct", "unpack_from")
+            {
+                (0, true, false)
+            } else if func.has_toplevel_qname("_struct", "iter_unpack") {
+                (0, true, true)
+            } else {
+                return None;
+            };
+
+        let default = self.freeform_call_infer(
+            callee_ty.clone(),
+            args,
+            keywords,
+            func_range,
+            arguments_range,
+            hint,
+            errors,
+        );
+        let Some(CallArg::Arg(format)) = args.first() else {
+            return Some(default);
+        };
+        let format = format.infer(self, errors);
+        let format = match &format {
+            Type::Literal(lit) => match &lit.value {
+                Lit::Str(format) => format.as_bytes(),
+                Lit::Bytes(format) => format,
+                _ => return Some(default),
+            },
+            _ => return Some(default),
+        };
+        let Some(format_types) = parse_struct_format(format) else {
+            return Some(default);
+        };
+
+        let struct_type = |format_type| match format_type {
+            StructFormatType::Bool => self.stdlib.bool().clone().to_type(),
+            StructFormatType::Bytes | StructFormatType::ByteChar => {
+                self.stdlib.bytes().clone().to_type()
+            }
+            StructFormatType::Complex => self.stdlib.complex().clone().to_type(),
+            StructFormatType::Float => self.stdlib.float().clone().to_type(),
+            StructFormatType::Int => self.stdlib.int().clone().to_type(),
+        };
+        if returns_values {
+            let tuple = self
+                .heap
+                .mk_concrete_tuple(format_types.into_iter().map(struct_type).collect());
+            return Some(if returns_iterator {
+                self.stdlib.iterator(tuple).to_type()
+            } else {
+                tuple
+            });
+        }
+
+        if args.len() < value_start {
+            return Some(default);
+        }
+        let values = &args[value_start..];
+        if values.iter().any(|arg| matches!(arg, CallArg::Star(..))) {
+            return Some(default);
+        }
+        if values.len() != format_types.len() {
+            self.error(
+                errors,
+                arguments_range,
+                ErrorKind::BadArgumentCount,
+                format!(
+                    "`struct.{}` expects {} value{}, got {}",
+                    func_kind.function_name(),
+                    format_types.len(),
+                    if format_types.len() == 1 { "" } else { "s" },
+                    values.len(),
+                ),
+            );
+            return Some(default);
+        }
+        for (arg, format_type) in values.iter().zip(format_types) {
+            // `?` accepts any object and uses its truth value when packing.
+            if matches!(format_type, StructFormatType::Bool) {
+                continue;
+            }
+            let CallArg::Arg(value) = arg else {
+                unreachable!("starred arguments were excluded above")
+            };
+            let want = match format_type {
+                StructFormatType::Bytes => self.union(
+                    self.stdlib.bytes().clone().to_type(),
+                    self.stdlib.bytearray().clone().to_type(),
+                ),
+                _ => struct_type(format_type),
+            };
+            let got = value.infer(self, errors);
+            let conversion = match format_type {
+                StructFormatType::Int => Some("__index__"),
+                StructFormatType::Float => Some("__float__"),
+                StructFormatType::Complex => Some("__complex__"),
+                _ => None,
+            };
+            let can_convert = conversion.is_some_and(|method| {
+                self.call_magic_dunder_method(
+                    &got,
+                    &Name::new_static(method),
+                    arg.range(),
+                    &[],
+                    &[],
+                    &self.error_swallower(),
+                    None,
+                )
+                .is_some_and(|converted| self.is_subset_eq(&converted, &want))
+            });
+            if !can_convert {
+                self.check_type_as_call_argument(&got, &want, arg.range(), errors, &|| {
+                    TypeCheckContext::of_kind(TypeCheckKind::CallArgument(
+                        None,
+                        Some(func_kind.clone()),
+                    ))
+                });
+            }
+        }
+        Some(default)
+    }
+
     pub fn call_assert_type(
         &self,
         args: &[Expr],

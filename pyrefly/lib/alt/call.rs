@@ -2457,6 +2457,17 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                         "`NotImplemented` is not callable. Did you mean `NotImplementedError`?".to_owned(),
                     );
                 }
+                if let Some(result) = self.try_call_struct_function(
+                    ty,
+                    &args,
+                    &kws,
+                    x.func.range(),
+                    x.arguments.range(),
+                    hint,
+                    errors,
+                ) {
+                    return result;
+                }
                 match ty.callee_kind() {
                 Some(CalleeKind::Function(FunctionKind::AssertType)) => self
                     .call_assert_type(

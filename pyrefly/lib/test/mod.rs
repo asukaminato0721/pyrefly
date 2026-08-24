@@ -76,6 +76,7 @@ mod simple;
 mod sklearn;
 mod slots;
 mod state;
+mod struct_format;
 mod subscript_narrow;
 mod suppression;
 mod sys_info;
