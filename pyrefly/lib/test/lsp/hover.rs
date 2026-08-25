@@ -112,8 +112,8 @@ value = C
 }
 
 #[test]
-fn hover_verbosity_hides_plus_without_named_union() {
-    // No named union to reveal, so compact and expanded renders are identical and
+fn hover_verbosity_hides_plus_without_expandable_details() {
+    // There are no details to reveal, so compact and expanded renders are identical and
     // the "+" affordance must not be offered.
     let code = r#"
 x: int = 0
@@ -428,14 +428,14 @@ lib.foo()
 }
 
 #[test]
-fn hover_shows_unpacked_kwargs_fields() {
+fn hover_verbosity_expands_unpacked_kwargs_fields() {
     let code = r#"
-from typing import TypedDict, Unpack
+from typing import NotRequired, Required, TypedDict, Unpack
 
-class Payload(TypedDict):
+class Payload(TypedDict, total=False):
     foo: int
-    bar: str
-    baz: bool | None
+    bar: Required[str]
+    baz: NotRequired[bool | None]
 
 def takes(**kwargs: Unpack[Payload]) -> None:
     ...
@@ -443,25 +443,83 @@ def takes(**kwargs: Unpack[Payload]) -> None:
 takes(foo=1, bar="x", baz=None)
 #^
 "#;
-    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
-    assert_eq!(
-        r#"
-# main.py
-12 | takes(foo=1, bar="x", baz=None)
-      ^
-```python
-(function) takes: def takes(
-    *,
-    foo: int,
-    bar: str,
-    baz: bool | None,
-    **kwargs: Unpack[Payload]
-) -> None: ...
-```
-"#
-        .trim(),
-        report.trim(),
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+
+    let (compact, compact_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 0);
+    let (expanded, expanded_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 1);
+
+    assert!(
+        compact.contains("def takes(**kwargs: Unpack[Payload]) -> None"),
+        "got: {compact}"
     );
+    assert!(!compact.contains("foo: int"), "got: {compact}");
+    assert!(compact_can_increase);
+    let expanded_without_spaces = expanded.replace(' ', "");
+    assert!(
+        expanded_without_spaces.contains("foo:int=..."),
+        "got: {expanded}"
+    );
+    assert!(
+        expanded_without_spaces.contains("bar:str"),
+        "got: {expanded}"
+    );
+    assert!(
+        !expanded_without_spaces.contains("bar:str=..."),
+        "got: {expanded}"
+    );
+    assert!(
+        expanded_without_spaces.contains("baz:bool|None=..."),
+        "got: {expanded}"
+    );
+    assert!(
+        expanded_without_spaces.contains("**kwargs:Unpack[Payload]"),
+        "got: {expanded}"
+    );
+    assert!(!expanded_can_increase);
+}
+
+#[test]
+fn hover_verbosity_expands_unpacked_kwargs_fields_in_constructor() {
+    let code = r#"
+from typing import TypedDict, Unpack
+
+class Payload(TypedDict, total=False):
+    foo: int
+
+class C:
+    def __init__(self, **kwargs: Unpack[Payload]) -> None: ...
+
+C(foo=1)
+#^
+"#;
+    let mut env = TestEnv::new();
+    env.add("main", code);
+    let (state, handle_for_name) = env.to_state();
+    let handle = handle_for_name("main");
+    let position = extract_cursors_for_test(code)[0];
+
+    let (compact, compact_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 0);
+    let (expanded, expanded_can_increase) =
+        get_test_report_at_verbosity(&state, &handle, position, 1);
+
+    assert!(
+        compact.contains("**kwargs: Unpack[Payload]"),
+        "got: {compact}"
+    );
+    assert!(!compact.contains("foo: int"), "got: {compact}");
+    assert!(compact_can_increase);
+    assert!(
+        expanded.replace(' ', "").contains("foo:int=..."),
+        "got: {expanded}"
+    );
+    assert!(!expanded_can_increase);
 }
 
 #[test]

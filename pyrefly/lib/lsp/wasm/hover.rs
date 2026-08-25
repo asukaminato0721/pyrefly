@@ -89,13 +89,13 @@ pub struct HoverValue {
 
 /// Hover contents and whether another verbosity request can reveal more detail.
 ///
-/// Hover verbosity currently has two states: named nested unions or fully expanded unions.
+/// Hover verbosity currently has two states: compact types or expanded type details.
 pub struct HoverResult {
     pub hover: Hover,
     pub can_increase_verbosity: bool,
 }
 
-/// Display knobs for a hover request. `verbosity_level > 0` expands named nested unions.
+/// Display knobs for a hover request. `verbosity_level > 0` expands type details.
 #[derive(Debug, Clone, Copy)]
 pub struct HoverOptions {
     pub show_go_to_links: bool,
@@ -627,7 +627,7 @@ fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Typ
         });
     }
 
-    let mut constructor = match type_ {
+    let constructor = match type_ {
         Type::ClassDef(cls) if !solver.get_metadata_for_class(cls).is_typed_dict() => Some(
             solver
                 .type_order()
@@ -639,7 +639,6 @@ fn class_display_type(solver: &AnswersSolver<TransactionHandle<'_>>, type_: &Typ
         },
         _ => None,
     }?;
-    constructor.transform_toplevel_callable(|c| expand_callable_kwargs_for_hover(solver, c));
     Some(solver.for_display(constructor))
 }
 
@@ -1019,42 +1018,45 @@ pub fn get_hover_with_verbosity(
             .is_some_and(|id| !matches!(id.context, IdentifierContext::ClassDef { .. }));
     let (type_display, can_increase_verbosity) =
         match transaction.ad_hoc_solve(handle, "hover_display", {
-            let mut cloned = type_.clone();
+            let cloned = type_.clone();
             move |solver| {
-                let unions_expanded = options.verbosity_level > 0;
+                let details_expanded = options.verbosity_level > 0;
                 if let Some(owner) = &type_parameter_owner_class
                     && let Some(display) = type_parameter_hover_display(&solver, &cloned, owner)
                 {
-                    // Type parameter displays (e.g. `T@Foo (covariant)`) never contain unions.
+                    // Type parameter displays (e.g. `T@Foo (covariant)`) have no details to expand.
                     return (display, false);
                 }
-                // Named unions can be surfaced by the class/kwargs transforms, so pick the
-                // type we're about to render first.
+                // Constructor signatures are synthesized, so pick the type to render before
+                // applying verbosity-sensitive transformations.
                 let display_type = if show_constructor
                     && let Some(class_type) = class_display_type(&solver, &cloned)
                 {
                     class_type
                 } else {
-                    cloned.transform_toplevel_callable(|c| {
-                        expand_callable_kwargs_for_hover(&solver, c)
-                    });
                     cloned
                 };
                 let qualify_outside =
                     qualify_hover_names(kind, &display_type).then(|| handle.module());
-                let render = |expand| {
-                    display_type.as_lsp_string_with_options(
+                let render = |expand_details| {
+                    let mut rendered_type = display_type.clone();
+                    if expand_details {
+                        rendered_type.transform_toplevel_callable(|callable| {
+                            expand_callable_kwargs_for_hover(&solver, callable)
+                        });
+                    }
+                    rendered_type.as_lsp_string_with_options(
                         name_for_display.as_deref(),
                         LspDisplayMode::Hover,
-                        expand,
+                        expand_details,
                         qualify_outside,
                     )
                 };
-                let rendered = render(unions_expanded);
+                let rendered = render(details_expanded);
                 // Offer "+" only when expanding actually changes the rendered type. Deriving
                 // this from the renderer itself (rather than a structural type walk) means the
                 // affordance can never advertise an expansion that produces identical output.
-                let can_increase_verbosity = !unions_expanded && rendered != render(true);
+                let can_increase_verbosity = !details_expanded && rendered != render(true);
                 (rendered, can_increase_verbosity)
             }
         }) {
