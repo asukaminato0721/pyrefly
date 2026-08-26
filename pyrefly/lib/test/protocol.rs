@@ -1125,6 +1125,26 @@ p6 = C5()  # E: `C5` is not assignable to variable `p6` with type `P6`
 );
 
 testcase!(
+    test_generic_protocol_getattr_annotated_self,
+    r#"
+from typing import Protocol, TypeVar
+
+T_co = TypeVar("T_co", covariant=True)
+
+class P(Protocol[T_co]):
+    @property
+    def x(self) -> T_co: ...
+
+class C:
+    def __getattr__(self: P[T_co], name: str) -> T_co: ...
+
+def f(x: P[int]) -> None: ...
+
+f(C())
+    "#,
+);
+
+testcase!(
     bug = "Metaclass `__getattr__` should satisfy read-only protocol members",
     test_protocol_metaclass_getattr,
     r#"

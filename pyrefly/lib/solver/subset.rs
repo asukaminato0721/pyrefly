@@ -680,12 +680,11 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         let prev_coinductive = self.coinductive_assumptions_used;
         self.coinductive_assumptions_used = false;
 
-        // For class-level coinductive reasoning: if the `got` type's type arguments
-        // contain Vars, we're likely in a recursive pattern (e.g., checking method return
-        // types that reference the same classes). Use (Class, Class) matching to detect
-        // cycles that would otherwise be missed due to fresh Var creation.
+        // For class-level coinductive reasoning: if either type contains Vars, we're likely in a
+        // recursive pattern. Use (Class, Class) matching to detect cycles that would otherwise be
+        // missed due to fresh Var creation.
         let class_check = if let Type::ClassType(got_class) = &got
-            && got.may_contain_placeholder_var()
+            && (got.may_contain_placeholder_var() || want.may_contain_placeholder_var())
         {
             let key = (
                 got_class.class_object().clone(),

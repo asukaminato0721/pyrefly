@@ -3403,10 +3403,10 @@ pub struct Subset<'solver, 'subset, Ans: LookupAnswer> {
     /// This works because `SmallMap` preserves insertion order.
     pub subset_cache: SmallMap<(Type, Type, SubsetCacheContext), SubsetCacheEntry>,
     /// Class-level recursive assumptions for protocol checks.
-    /// When checking `got <: protocol` where got's type arguments contain Vars
-    /// (indicating we're in a recursive pattern), we track (got_class, protocol_class)
-    /// pairs to detect cycles. This enables coinductive reasoning for recursive protocols
-    /// like Functor/Maybe without falsely assuming success for unrelated protocol checks.
+    /// When checking `got <: protocol` where either type contains Vars (indicating we're in a
+    /// recursive pattern), we track (got_class, protocol_class) pairs to detect cycles. This
+    /// enables coinductive reasoning for recursive protocols like Functor/Maybe without falsely
+    /// assuming success for unrelated protocol checks.
     pub class_protocol_assumptions: SmallSet<(Class, Class)>,
     /// Tracks whether a coinductive assumption (InProgress → Ok) was used during
     /// the current computation. Used to avoid caching protocol results in the

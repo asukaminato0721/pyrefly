@@ -1485,18 +1485,24 @@ impl<'a, Ans: LookupAnswer> AnswersSolver<'a, Ans> {
                 };
                 let errors = self.error_swallower();
                 let fake_range = TextRange::default();
-                let got_ty = self
+                let getattr_ty = self
                     .resolve_get_access(name, (**got_attr).clone(), fake_range, &errors, None)
-                    .map(|getattr_ty| {
-                        self.call_getattr_or_delattr(
-                            getattr_ty,
-                            name.clone(),
-                            fake_range,
-                            &errors,
-                            None,
-                        )
-                    })
                     .map_err(|_| Box::new(AttrSubsetError::Getattr))?;
+                // Bind an explicit `self` annotation through the current subset check so a
+                // recursive protocol hypothesis remains available during fallback resolution.
+                let getattr_ty = if let Type::BoundMethod(method) = getattr_ty {
+                    self.bind_boundmethod(&method, &mut |got, want| is_subset(got, want).is_ok())
+                        .unwrap_or(Type::BoundMethod(method))
+                } else {
+                    getattr_ty
+                };
+                let got_ty = self.call_getattr_or_delattr(
+                    getattr_ty,
+                    name.clone(),
+                    fake_range,
+                    &errors,
+                    None,
+                );
                 let synthetic_got = if self.has_custom_setattr(cls) {
                     ClassAttribute::read_write(got_ty)
                 } else {
