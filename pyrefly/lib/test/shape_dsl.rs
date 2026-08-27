@@ -4482,6 +4482,26 @@ def f(
 );
 
 testcase!(
+    test_shaped_array_bitwise_or_uses_dunder,
+    shaped_array_env(),
+    r#"
+from typing import assert_type
+from shape_extensions import IntTuple, IntVar, shaped_array
+
+@shaped_array(shape="Shape")
+class Array[Shape: IntTuple]:
+    def __or__(self, other: Array[Shape]) -> Array[Shape]: ...
+
+def f[N: IntVar](left: Array[[N]], right: Array[[N]]) -> Array[[N]]:
+    assert_type(left | right, Array[[N]])
+    return left | right
+
+def optional[N: IntVar](value: Array[[N]] | None) -> Array[[N]] | None:
+    return value
+"#,
+);
+
+testcase!(
     test_shaped_array_broadcast_gradual_size_keeps_precise_dimension,
     shaped_array_env(),
     r#"

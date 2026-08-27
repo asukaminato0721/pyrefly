@@ -433,6 +433,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if x.op == Operator::BitOr
             && !lhs.is_any()
             && !rhs.is_any()
+            // Shaped-array type forms are wrapped in `Type::Type`; an unwrapped one is an instance.
+            && !matches!(lhs, Type::ShapedArray(_))
+            && !matches!(rhs, Type::ShapedArray(_))
             && let Some(l) = self.untype_opt(lhs.clone(), x.left.range(), errors)
             && let Some(r) = self.untype_opt(rhs.clone(), x.right.range(), errors)
         {
@@ -605,6 +608,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     }
                 }
                 if x.op == Operator::BitOr
+                    && !matches!(lhs, Type::ShapedArray(_))
+                    && !matches!(rhs, Type::ShapedArray(_))
                     && let Some(l) = self.untype_opt(lhs.clone(), x.left.range(), errors)
                     && let Some(r) = self.untype_opt(rhs.clone(), x.right.range(), errors)
                 {
