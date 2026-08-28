@@ -110,21 +110,8 @@ fn test_workspace_symbol_prefers_non_init_result() {
     interaction.shutdown().unwrap();
 }
 
-// Methods live inside a `ClassDef`, so they are not module exports and never
-// appear via the export-table path that backs `workspace/symbol`. D90689263
-// only relabeled methods in `textDocument/documentSymbol` (the per-file
-// outline); it did not touch `workspace/symbol` (Cmd+T), which is a separate
-// implementation, so methods are still missing there.
-//
-// TODO(pyrefly): unify workspace symbols with document symbols by caching
-// per-module document symbols (a memoized artifact on the `Solutions` step,
-// gated by `Require::keep_index`, mirroring the find-refs `Index`) and scanning
-// them in `search_exports`, filtered to first-party modules via
-// `should_skip_module_for_indexing`. This mirrors ty's `symbols_for_file`
-// (a salsa-tracked query shared by both providers). Ignored until then.
-#[ignore = "workspace/symbol does not yet include class methods; see TODO above"]
 #[test]
-fn test_workspace_symbol_includes_methods_of_open_files() {
+fn test_workspace_symbol_includes_class_members() {
     let root = get_test_files_root();
     let root_path = root.path().join("tests_requiring_config");
     let scope_uri = Url::from_file_path(root_path.clone()).unwrap();
@@ -156,6 +143,38 @@ fn test_workspace_symbol_includes_methods_of_open_files() {
             assert_eq!(method.location.uri, uri);
             assert_eq!(
                 method.container_name.as_deref(),
+                Some("WorkspaceSymbolMethodHost")
+            );
+            true
+        })
+        .unwrap();
+
+    interaction
+        .client
+        .send_workspace_symbol("_workspace_symbol_private")
+        .expect_response_with(|result| {
+            let Some(WorkspaceSymbolResponse::Flat(symbols)) = result else {
+                panic!("Unexpected workspace symbol response: {result:?}");
+            };
+            let private_method = symbols
+                .iter()
+                .find(|s| s.name == "_workspace_symbol_private_method")
+                .expect("expected the private method to appear in workspace symbols");
+            assert_eq!(private_method.kind, lsp_types::SymbolKind::METHOD);
+            assert_eq!(private_method.location.uri, uri);
+            assert_eq!(
+                private_method.container_name.as_deref(),
+                Some("WorkspaceSymbolMethodHost")
+            );
+
+            let private_member = symbols
+                .iter()
+                .find(|s| s.name == "_workspace_symbol_private_member")
+                .expect("expected the private member to appear in workspace symbols");
+            assert_eq!(private_member.kind, lsp_types::SymbolKind::FIELD);
+            assert_eq!(private_member.location.uri, uri);
+            assert_eq!(
+                private_member.container_name.as_deref(),
                 Some("WorkspaceSymbolMethodHost")
             );
             true

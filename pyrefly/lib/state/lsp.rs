@@ -75,6 +75,7 @@ use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
+use crate::binding::metadata::IndexedClassSymbol;
 use crate::config::error_kind::ErrorKind;
 use crate::error::suppress::detect_line_ending;
 use crate::export::exports::Export;
@@ -4872,6 +4873,39 @@ impl<'a> Transaction<'a> {
         Ok(res.into_map(|(_, definition, import_from, name, export)| {
             (definition, import_from, name, export)
         }))
+    }
+
+    pub fn search_indexed_class_symbols_fuzzy(
+        &self,
+        pattern: &str,
+        custom_thread_pool: Option<&ThreadPool>,
+    ) -> Result<Vec<(Handle, IndexedClassSymbol)>, Cancelled> {
+        let mut res = self.search_exports(
+            |handle, _, _| {
+                if !handle.path().is_first_party_for_indexing() {
+                    return Vec::new();
+                }
+                let Some(solutions) = self.get_solutions(handle) else {
+                    return Vec::new();
+                };
+                let matcher = SkimMatcherV2::default().smart_case();
+                solutions
+                    .metadata()
+                    .indexed_class_symbols()
+                    .iter()
+                    .filter_map(|symbol| {
+                        Some((
+                            matcher.fuzzy_match(symbol.name.as_str(), pattern)?,
+                            handle.dupe(),
+                            symbol.clone(),
+                        ))
+                    })
+                    .collect()
+            },
+            custom_thread_pool,
+        )?;
+        res.sort_by_key(|(score, _, _)| Reverse(*score));
+        Ok(res.into_map(|(_, handle, symbol)| (handle, symbol)))
     }
 }
 

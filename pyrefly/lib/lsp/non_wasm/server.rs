@@ -5454,7 +5454,7 @@ impl Server {
                             location,
                             tags: None,
                             deprecated: None,
-                            container_name: None,
+                            container_name: symbol.container_name,
                         })
                 })
                 .collect();

@@ -5,5 +5,11 @@
 
 
 class WorkspaceSymbolMethodHost:
+    def __init__(self) -> None:
+        self._workspace_symbol_private_member = 1
+
+    def _workspace_symbol_private_method(self) -> None:
+        return
+
     def workspace_symbol_method_deterministic_name(self) -> None:
         return

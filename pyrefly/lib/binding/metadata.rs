@@ -13,10 +13,21 @@
 
 use std::sync::Arc;
 
+use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_types::class::ClassDefIndex;
 use pyrefly_types::class::ClassFields;
 use pyrefly_types::meta_shape_dsl::ShapeDslFunction;
 use ruff_python_ast::name::Name;
+use ruff_text_size::TextRange;
+
+/// A class member retained for workspace-wide symbol search.
+#[derive(Debug, Clone)]
+pub struct IndexedClassSymbol {
+    pub name: Name,
+    pub kind: SymbolKind,
+    pub range: TextRange,
+    pub container_name: Name,
+}
 
 /// Metadata for a single class definition, populated during binding.
 #[derive(Debug, Clone, Default)]
@@ -43,6 +54,7 @@ pub struct ClassMetadata {
 pub struct BindingsMetadata {
     classes: Vec<ClassMetadata>,
     shape_dsl_functions: Vec<(Name, Arc<ShapeDslFunction>)>,
+    indexed_class_symbols: Vec<IndexedClassSymbol>,
 }
 
 impl BindingsMetadata {
@@ -50,6 +62,7 @@ impl BindingsMetadata {
         Self {
             classes: Vec::new(),
             shape_dsl_functions: Vec::new(),
+            indexed_class_symbols: Vec::new(),
         }
     }
 
@@ -83,5 +96,13 @@ impl BindingsMetadata {
     /// All `@shape_dsl_function` definitions recorded in this module.
     pub fn shape_dsl_functions(&self) -> &[(Name, Arc<ShapeDslFunction>)] {
         &self.shape_dsl_functions
+    }
+
+    pub fn push_indexed_class_symbol(&mut self, symbol: IndexedClassSymbol) {
+        self.indexed_class_symbols.push(symbol);
+    }
+
+    pub fn indexed_class_symbols(&self) -> &[IndexedClassSymbol] {
+        &self.indexed_class_symbols
     }
 }

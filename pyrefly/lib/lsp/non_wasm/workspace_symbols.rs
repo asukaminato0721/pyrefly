@@ -17,6 +17,7 @@ pub struct WorkspaceSymbol {
     pub name: String,
     pub kind: SymbolKind,
     pub location: TextRangeWithModule,
+    pub container_name: Option<String>,
 }
 
 impl Transaction<'_> {
@@ -43,6 +44,23 @@ impl Transaction<'_> {
                         module,
                         range: export.location,
                     },
+                    container_name: None,
+                });
+            }
+        }
+        for (handle, symbol) in self
+            .search_indexed_class_symbols_fuzzy(query, custom_thread_pool)
+            .unwrap_or_default()
+        {
+            if let Some(module) = self.get_module_info(&handle) {
+                result.push(WorkspaceSymbol {
+                    name: symbol.name.to_string(),
+                    kind: symbol.kind.to_lsp_symbol_kind(),
+                    location: TextRangeWithModule {
+                        module,
+                        range: symbol.range,
+                    },
+                    container_name: Some(symbol.container_name.to_string()),
                 });
             }
         }

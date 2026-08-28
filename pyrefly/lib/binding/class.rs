@@ -15,6 +15,7 @@ use pyrefly_python::docstring::Docstring;
 use pyrefly_python::keywords::is_valid_identifier;
 use pyrefly_python::nesting_context::NestingContext;
 use pyrefly_python::short_identifier::ShortIdentifier;
+use pyrefly_python::symbol_kind::SymbolKind;
 use pyrefly_util::prelude::SliceExt;
 use pyrefly_util::visit::Visit;
 use ruff_python_ast::Expr;
@@ -76,6 +77,7 @@ use crate::binding::bindings::BindingsBuilder;
 use crate::binding::bindings::CurrentIdx;
 use crate::binding::bindings::LegacyTParamCollector;
 use crate::binding::expr::Usage;
+use crate::binding::metadata::IndexedClassSymbol;
 use crate::binding::pydantic::PydanticConfigDict;
 use crate::binding::scope::ClassIndices;
 use crate::binding::scope::FlowStyle;
@@ -451,6 +453,19 @@ impl<'a> BindingsBuilder<'a> {
         let mut fields = SmallMap::with_capacity(field_definitions.len());
         let mut django_relation_fields = Vec::new();
         for (name, (definition, range)) in field_definitions.into_iter_hashed() {
+            if self.analyze_unannotated_for_ide {
+                let kind = match &definition {
+                    ClassFieldDefinition::MethodLike { .. } => SymbolKind::Method,
+                    ClassFieldDefinition::NestedClass { .. } => SymbolKind::Class,
+                    _ => SymbolKind::Attribute,
+                };
+                self.metadata.push_indexed_class_symbol(IndexedClassSymbol {
+                    name: name.key().clone(),
+                    kind,
+                    range,
+                    container_name: x.name.id.clone(),
+                });
+            }
             if let ClassFieldDefinition::AssignedInBody { value, .. } = &definition
                 && let ExprOrBinding::Expr(e) = value.as_ref()
             {
