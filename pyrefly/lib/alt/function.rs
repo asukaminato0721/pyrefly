@@ -191,6 +191,63 @@ impl ParentParamHints {
         hints
     }
 
+    /// Create hints only when the child has the same parameter names and kinds as the parent.
+    fn new_if_matching(params: ParamList, def: &FunctionDefData, drop_first: bool) -> Option<Self> {
+        let mut parent_params = params.items().iter();
+        if !def.parameters.posonlyargs.iter().all(|x| {
+            matches!(
+                parent_params.next(),
+                Some(Param::PosOnly(Some(name), ..)) if name == &x.parameter.name.id
+            )
+        }) {
+            return None;
+        }
+
+        let is_historical_args_usage =
+            def.parameters.posonlyargs.is_empty() && def.parameters.kwonlyargs.is_empty();
+        if !def.parameters.args.iter().all(|x| {
+            if is_historical_args_usage && Ast::is_mangled_attr(&x.parameter.name.id) {
+                matches!(
+                    parent_params.next(),
+                    Some(Param::PosOnly(Some(name), ..)) if name == &x.parameter.name.id
+                )
+            } else {
+                matches!(
+                    parent_params.next(),
+                    Some(Param::Pos(name, ..)) if name == &x.parameter.name.id
+                )
+            }
+        }) {
+            return None;
+        }
+        if !def.parameters.vararg.iter().all(|x| {
+            matches!(
+                parent_params.next(),
+                Some(Param::Varargs(Some(name), ..)) if name == &x.name.id
+            )
+        }) {
+            return None;
+        }
+        if !def.parameters.kwonlyargs.iter().all(|x| {
+            matches!(
+                parent_params.next(),
+                Some(Param::KwOnly(name, ..)) if name == &x.parameter.name.id
+            )
+        }) {
+            return None;
+        }
+        if !def.parameters.kwarg.iter().all(|x| {
+            matches!(
+                parent_params.next(),
+                Some(Param::Kwargs(Some(name), ..)) if name == &x.name.id
+            )
+        }) || parent_params.next().is_some()
+        {
+            return None;
+        }
+        Some(Self::new(params, drop_first))
+    }
+
     fn take_posonly(&mut self) -> Option<Type> {
         self.posonly.pop_front()
     }
@@ -567,26 +624,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }));
 
         let mut decorator_param_hints = self.decorator_param_hints(&decorators);
-        let mut parent_param_hints = if flags.is_override {
-            defining_cls.as_ref().and_then(|cls| {
-                self.inherited_method_signature(cls, &def.name.id).and_then(
-                    |(params, inherited_flags)| {
-                        if inherited_flags.is_staticmethod == flags.is_staticmethod
-                            && inherited_flags.is_classmethod == flags.is_classmethod
-                        {
+        let mut parent_param_hints = defining_cls.as_ref().and_then(|cls| {
+            self.inherited_method_signature(cls, &def.name.id).and_then(
+                |(params, inherited_flags)| {
+                    if inherited_flags.is_staticmethod == flags.is_staticmethod
+                        && inherited_flags.is_classmethod == flags.is_classmethod
+                    {
+                        if flags.is_override {
                             Some(ParentParamHints::new(
                                 params,
                                 !inherited_flags.is_staticmethod,
                             ))
                         } else {
-                            None
+                            ParentParamHints::new_if_matching(
+                                params,
+                                def,
+                                !inherited_flags.is_staticmethod,
+                            )
                         }
-                    },
-                )
-            })
-        } else {
-            None
-        };
+                    } else {
+                        None
+                    }
+                },
+            )
+        });
 
         flags.is_in_protocol_class = defining_cls
             .as_ref()

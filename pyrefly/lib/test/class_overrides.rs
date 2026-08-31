@@ -257,16 +257,59 @@ class C(G[int]):
 );
 
 testcase!(
-    test_override_requires_decorator,
+    test_override_inference_without_decorator,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 class Base:
     def foo(self, x: int) -> None: ...
 
 class Derived(Base):
     def foo(self, x):
-        assert_type(x, Any)
+        assert_type(x, int)
+    "#,
+);
+
+testcase!(
+    test_infer_unannotated_override_parameters,
+    r#"
+from typing import assert_type
+
+class Base[T]:
+    def process(self, value: T, count: int) -> T:
+        return value
+
+class Child(Base[str]):
+    def process(self, value, count: object):
+        assert_type(value, str)
+        assert_type(count, object)
+        return value
+
+assert_type(Child().process("", 0), str)
+    "#,
+);
+
+testcase!(
+    test_unannotated_override_parameter_inference_requires_matching_signature,
+    r#"
+from typing import Any, assert_type, overload
+
+class Base:
+    def renamed(self, value: int) -> None: ...
+    def reshaped(self, value: str, /) -> None: ...
+    @overload
+    def overloaded(self, value: int) -> None: ...
+    @overload
+    def overloaded(self, value: str) -> None: ...
+    def overloaded(self, value: object) -> None: ...
+
+class Child(Base):
+    def renamed(self, other):  # E: Got parameter name `other`, expected `value`
+        assert_type(other, Any)
+    def reshaped(self, value):
+        assert_type(value, Any)
+    def overloaded(self, value):
+        assert_type(value, Any)
     "#,
 );
 
