@@ -352,6 +352,26 @@ xs: list[A] = [B()] if cond() else [B()]
 "#,
 );
 
+testcase!(
+    test_context_if_expr_soft,
+    r#"
+from typing import assert_type, reveal_type
+
+def cond() -> bool: ...
+
+xs = list[int]() if cond() else []
+reveal_type(xs)  # E: revealed type: list[int]
+assert_type(xs, list[int])
+
+ys = [] if cond() else list[int]()
+reveal_type(ys)  # E: revealed type: list[int]
+assert_type(ys, list[int])
+
+zs = list[int]() if cond() else [""]
+assert_type(zs, list[int] | list[str])
+"#,
+);
+
 // Still infer types for unreachable branches (and find errors in them),
 // but don't propagate them to the result.
 testcase!(

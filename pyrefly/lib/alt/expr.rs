@@ -604,8 +604,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         let body_type = self
                             .expr_infer_impl(&x.body, hint, errors, type_form_context)
                             .into_ty();
+                        // When there is no outer hint, use the first branch as a soft hint for the
+                        // second. This contextually types expressions such as `xs if cond else []`.
+                        let orelse_hint = hint.or_else(|| Some(HintRef::soft(&body_type)));
                         let orelse_type = self
-                            .expr_infer_impl(&x.orelse, hint, errors, type_form_context)
+                            .expr_infer_impl(&x.orelse, orelse_hint, errors, type_form_context)
                             .into_ty();
                         match self.as_bool(&condition_type, x.test.range(), errors) {
                             Some(true) => body_type,
