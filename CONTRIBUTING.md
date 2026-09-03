@@ -86,6 +86,25 @@ development. `pip install .` in the inner `pyrefly` directory works as well. You
 can also run `maturin` from the repo root by adding `-m pyrefly/Cargo.toml` to
 the command line.
 
+## Building with Docker
+
+The repository includes a multi-stage Dockerfile that builds the Pyrefly binary
+and copies it into a Python runtime image:
+
+```shell
+docker build --tag pyrefly .
+```
+
+Mount a Python project at `/workspace` to check it. The image runs `pyrefly
+check` by default:
+
+```shell
+docker run --rm --volume "$PWD:/workspace" pyrefly
+```
+
+Additional arguments replace the default `check` command. For example, run
+`docker run --rm pyrefly --version` to print the built version.
+
 ## Coding conventions
 
 We follow the

@@ -1,0 +1,8 @@
+.git
+.ruff_cache
+.venv
+output
+target
+**/node_modules
+**/target
+website/.docusaurus
