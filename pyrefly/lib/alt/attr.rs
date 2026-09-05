@@ -2113,7 +2113,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         acc: &mut LookupResult,
     ) {
         match &base {
-            AttributeBase1::ClassObject(class) => {
+            AttributeBase1::ClassObject(class) | AttributeBase1::GenericAlias(class) => {
                 let metadata = self.get_metadata_for_class(class.class_object());
                 let metaclass = metadata.metaclass(self.stdlib);
                 if *dunder_name == dunder::GETATTRIBUTE
@@ -2131,6 +2131,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
                 match self.get_metaclass_attribute(class, metaclass, dunder_name) {
                     Some(attr) => acc.found_class_attribute(attr, base),
+                    None if matches!(base, AttributeBase1::GenericAlias(_)) => self
+                        .lookup_attr_static1(
+                            AttributeBase1::ClassInstance(self.stdlib.generic_alias().clone()),
+                            dunder_name,
+                            acc,
+                        ),
                     None => acc.not_found(NotFoundOn::ClassInstance(
                         metaclass.class_object().clone(),
                         base,

@@ -2332,7 +2332,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 return None;
             };
-            self.call_method_or_error(ty, &dunder::BOOL, range, &[], &[], errors, None)
+            self.call_magic_dunder_method(ty, &dunder::BOOL, range, &[], &[], errors, None)?
                 .as_bool()
         })
     }

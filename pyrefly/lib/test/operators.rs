@@ -760,6 +760,52 @@ assert_type(int() or NotBoolable(), int | NotBoolable)
 );
 
 testcase!(
+    test_generic_class_dunder_bool,
+    r#"
+from typing import Any, Generic, TypeVar, assert_type
+
+T = TypeVar("T")
+
+class Foo(Generic[T]):
+    def __bool__(self) -> bool:
+        return True
+
+def default_class(cls: type[Foo] | None = None):
+    assert_type(cls or Foo, type[Foo[Any]])
+
+def specialized_class(cls: type[Foo[int]] | None = None):
+    assert_type(cls or Foo[int], type[Foo[int]])
+    if cls:
+        assert_type(cls, type[Foo[int]])
+    if not cls:
+        pass
+
+class NotBoolable(Generic[T]):
+    __bool__: int = 0
+
+def non_callable_instance_bool(cls: type[NotBoolable[int]] | None):
+    if cls:
+        pass
+    assert_type(cls or NotBoolable[int], type[NotBoolable[int]])
+
+class Meta(type):
+    def __bool__(cls) -> bool:
+        return True
+
+class WithMeta(Generic[T], metaclass=Meta):
+    __bool__: int = 0
+
+def metaclass_bool(cls: type[WithMeta[int]] | None):
+    if cls:
+        pass
+    assert_type(cls or WithMeta[int], type[WithMeta[int]])
+
+assert_type(Foo[int].__bool__(Foo[int]()), bool)
+assert_type(WithMeta[int].__bool__, int)
+"#,
+);
+
+testcase!(
     test_tensor_type_lambda,
     r#"
 from typing import Callable, cast, assert_type
