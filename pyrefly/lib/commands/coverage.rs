@@ -7,6 +7,7 @@
 
 mod check;
 mod collect;
+mod expressions;
 pub(crate) mod report;
 mod types;
 
@@ -15,6 +16,7 @@ use pyrefly_util::thread_pool::ThreadCount;
 
 use crate::commands::config_finder::ConfigConfigurerWrapper;
 use crate::commands::coverage::check::CheckArgs;
+use crate::commands::coverage::expressions::ExpressionsArgs;
 use crate::commands::coverage::report::ReportArgs;
 use crate::commands::util::CommandExitStatus;
 
@@ -26,6 +28,8 @@ pub enum CoverageCommand {
     Report(ReportArgs),
     /// Check that type coverage from pyrefly type checking results meets a minimum threshold.
     Check(CheckArgs),
+    /// Report coverage of inferred expression types, including function bodies.
+    Expressions(ExpressionsArgs),
 }
 
 impl CoverageCommand {
@@ -40,6 +44,7 @@ impl CoverageCommand {
             CoverageCommand::Check(args) => {
                 args.run(version, config_configurer_wrapper, thread_count)
             }
+            CoverageCommand::Expressions(args) => args.run(config_configurer_wrapper, thread_count),
         }
     }
 }

@@ -13,12 +13,14 @@ description: Measure and enforce type coverage in your Python codebase with Pyre
 
 # Pyrefly Coverage
 
-`pyrefly coverage` measures how much of your code is annotated with types. It has two subcommands:
+`pyrefly coverage` measures annotation coverage and inferred expression types:
 
 - [`pyrefly coverage check`](#checking-coverage-against-a-threshold) fails when coverage is below
   a threshold, useful as a CI gate.
 - [`pyrefly coverage report`](#generating-a-json-report) emits a JSON report with per-module
   statistics.
+- [`pyrefly coverage expressions`](#expression-coverage) measures how many inferred expression
+  types contain `Any`, including inside function bodies.
 
 ## How coverage is measured
 
@@ -93,3 +95,41 @@ See `pyrefly coverage report --help` for all flags. The output is easy to consum
 ```sh
 pyrefly coverage report path/to/directory/ | jq .summary.strict_coverage
 ```
+
+## Expression coverage
+
+```sh
+pyrefly coverage expressions path/to/directory/ > expressions.json
+```
+
+This command measures inferred types throughout each selected file, including local variables,
+private functions, and nested expressions. An annotation is not required for an expression to
+be covered: `x + 1` is covered when Pyrefly infers concrete types for `x`, `1`, and their sum.
+An expression is uncovered when its inferred type contains `Any`, including inside a container,
+union, or callable signature. Both explicit and implicit `Any` count, including `Any` produced
+by type errors or unresolved imports.
+
+The JSON report has a `schema_version`, `module_reports`, and an aggregate `summary`. Each module
+and the summary contain:
+
+- `n_expressions`: the number of expressions with a recorded inferred type.
+- `n_any`: the number of those expressions whose type contains `Any`.
+- `n_unanalyzed`: expressions without a recorded type, for example in unreachable code or
+  function bodies excluded by `check-unannotated-defs`. These do not enter the percentage.
+- `coverage`: `100 * (n_expressions - n_any) / n_expressions`, or 100 when there are no
+  analyzed expressions. The summary uses the totals across files, not an average of percentages.
+
+Annotations, type parameter declarations, `type` alias statements, and assignment or deletion
+targets are not counted. Expressions evaluated within a target, such as the receiver and index
+in `items[index] = value`, are counted. Imports do not count as expressions, but uses of imported
+values do. File selection respects the [`coverage` configuration](./configuration.mdx#coverage).
+Each selected file is measured independently, including `.py` files that have `.pyi` stubs;
+public API filtering and stub merging apply only to annotation coverage.
+
+```sh
+pyrefly coverage expressions path/to/directory/ | jq .summary.coverage
+```
+
+Expression coverage collects additional type information and can use more memory than annotation
+coverage. Type-checking errors do not make this reporting command fail; use `pyrefly check` to
+enforce those separately.
