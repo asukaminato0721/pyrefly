@@ -459,6 +459,8 @@ pub enum ErrorKind {
     UnusedCoroutine,
     /// A suppression comment is unused (no error to suppress, or specific codes are unused)
     UnusedIgnore,
+    /// A private symbol has no use in the checked project.
+    UnusedPrivateSymbol,
     /// A `# type: ignore` comment is unused (no error to suppress on that line)
     UnusedTypeIgnore,
     /// `@overload` bodies are never executed, so executable body logic is usually dead code.
@@ -612,6 +614,7 @@ impl ErrorKind {
             ErrorKind::UntypedImport => Severity::Warn,
             ErrorKind::UnusedCallResult => Severity::Ignore,
             ErrorKind::UnusedIgnore => Severity::Ignore,
+            ErrorKind::UnusedPrivateSymbol => Severity::Ignore,
             ErrorKind::UnusedTypeIgnore => Severity::Ignore,
             ErrorKind::VarianceMismatch => Severity::Warn,
             // Overload bodies are runtime-dead, so this should warn rather than fail CI by default.

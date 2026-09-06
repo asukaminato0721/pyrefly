@@ -42,6 +42,7 @@ use crate::error::baseline::BaselineProcessor;
 use crate::error::baseline::TrackedBaselineProcessor;
 use crate::error::baseline::normalize_baseline_path;
 use crate::error::collector::CollectedErrors;
+use crate::error::collector::ErrorCollector;
 use crate::error::error::BaselineStatus;
 use crate::error::error::Error;
 use crate::error::expectation::Expectation;
@@ -274,6 +275,8 @@ impl ModuleRanges {
 pub struct Errors {
     // Sorted by module name and path (so deterministic display order)
     loads: Vec<(Arc<Load>, Option<Arc<ModuleRanges>>, ArcId<ConfigFile>)>,
+    /// Project diagnostics belong to this snapshot, since another file can change their result.
+    pub(crate) project_errors: SmallMap<ModulePath, ErrorCollector>,
 }
 
 /// Outcome of applying a baseline file.
@@ -333,7 +336,10 @@ impl BaselineApplyResult {
 impl Errors {
     pub fn new(mut loads: Vec<(Arc<Load>, Option<Arc<ModuleRanges>>, ArcId<ConfigFile>)>) -> Self {
         loads.sort_by_key(|x| (x.0.module_info.name(), x.0.module_info.path().dupe()));
-        Self { loads }
+        Self {
+            loads,
+            project_errors: SmallMap::new(),
+        }
     }
 
     fn merge_display_errors(mut ordinary: Vec<Error>, directives: Vec<Error>) -> Vec<Error> {
@@ -366,6 +372,15 @@ impl Errors {
                 &ranges.misplaced_ignore_all,
                 &mut errors,
             );
+            if let Some(project_errors) = self.project_errors.get(load.module_info.path()) {
+                project_errors.collect_into(
+                    &error_config,
+                    &ranges.multi_line,
+                    &ranges.ignore_all,
+                    &[],
+                    &mut errors,
+                );
+            }
         }
         errors
     }
@@ -787,6 +802,15 @@ impl Errors {
                 &ranges.misplaced_ignore_all,
                 &mut result,
             );
+            if let Some(project_errors) = self.project_errors.get(load.module_info.path()) {
+                project_errors.collect_into(
+                    &error_config,
+                    &ranges.multi_line,
+                    &ranges.ignore_all,
+                    &[],
+                    &mut result,
+                );
+            }
             let output_errors = Self::merge_display_errors(result.ordinary, result.directives);
             Expectation::parse(load.module_info.dupe(), load.module_info.contents())
                 .check(&output_errors)?;

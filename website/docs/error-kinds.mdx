@@ -2291,6 +2291,40 @@ Default severity: `ignore`
 
 This error is raised when a `# pyrefly: ignore` comment is not used to suppress an error, and can be safely removed.
 
+## unused-private-symbol
+
+Default severity: `ignore`
+
+Reports unused private functions, classes, type aliases, methods, and module or class variables across the
+files checked by `pyrefly check`. Enable it in `pyrefly.toml`:
+
+```toml
+[errors]
+unused-private-symbol = "warn"
+```
+
+Run the check on the whole project so references in other files are included. A name is private
+when it starts with `_`, except for `_` itself and names starting and ending in `__`. Public names, explicit
+`__all__` exports, stub definitions, decorated definitions, overriding methods, and function-local
+bindings are exempt. If `__all__` cannot be resolved, module-level definitions are exempt as well.
+
+```python
+def _unused():  # warning: no use in the checked project
+    pass
+
+def _helper():
+    pass
+
+def public():
+    _helper()  # keeps _helper live
+```
+
+References from unused private function bodies do not keep other private definitions live,
+including when functions only call each other recursively. Imports and references from public
+code do count as uses. Dynamic access such as `getattr(obj, name)` may require a suppression
+comment. This project analysis runs in the CLI and retains additional reference data when enabled;
+it does not run as part of per-file editor diagnostics.
+
 ## unused-type-ignore
 
 Default severity: `ignore`

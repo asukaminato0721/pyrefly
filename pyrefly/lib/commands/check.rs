@@ -1857,9 +1857,9 @@ impl CheckArgs {
         transaction.set_subscriber(None);
 
         let loads = if self.behavior.check_all {
-            transaction.get_all_errors()
+            transaction.get_project_errors(&transaction.handles())
         } else {
-            transaction.get_errors(handles)
+            transaction.get_project_errors(handles)
         };
         timings.type_check = type_check_start.elapsed();
 

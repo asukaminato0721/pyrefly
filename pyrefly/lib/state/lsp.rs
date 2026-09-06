@@ -74,7 +74,9 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
+use crate::binding::binding::BindingAnnotation;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyAnnotation;
 use crate::config::error_kind::ErrorKind;
 use crate::error::suppress::detect_line_ending;
 use crate::export::exports::Export;
@@ -4324,6 +4326,14 @@ impl<'a> Transaction<'a> {
             }
             let mut res = Vec::new();
             mod_module.visit(&mut |x| f(x, expected_name, &mut res));
+            if let Some(bindings) = self.get_bindings(handle) {
+                // Quoted annotations have parsed expressions in bindings, but not in the AST.
+                for idx in bindings.keys::<KeyAnnotation>() {
+                    if let BindingAnnotation::AnnotateExpr(_, expr, _) = bindings.get(idx) {
+                        f(expr, expected_name, &mut res);
+                    }
+                }
+            }
             res
         } else {
             Vec::new()
@@ -4351,7 +4361,7 @@ impl<'a> Transaction<'a> {
                                 definition,
                                 FindPreference::default(),
                             )
-                            && module.path() == module.path()
+                            && module.path() == handle.path()
                             && range == definition_range
                         {
                             references.push(attribute.attr.range());
@@ -4468,40 +4478,30 @@ impl<'a> Transaction<'a> {
         definition_range: TextRange,
         expected_name: &Name,
     ) -> Option<Vec<TextRange>> {
+        let bindings = self.get_bindings(handle)?;
         let mut references = Vec::new();
-        if let Some(mod_module) = self.get_ast(handle) {
-            let is_valid_use = |x: &ExprName| {
-                if x.id() == expected_name
-                    && let Some((def_handle, Export { location, .. })) = self
-                        .find_export_for_key(
-                            handle,
-                            &Key::BoundName(ShortIdentifier::expr_name(x)),
-                            FindPreference {
-                                import_behavior: ImportBehavior::StopAtRenamedImports,
-                                prefer_pyi: false,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap_or(None)
-                    && def_handle.path() == handle.path()
-                    && location == definition_range
-                {
-                    true
-                } else {
-                    false
-                }
-            };
-            fn f(x: &Expr, is_valid_use: &impl Fn(&ExprName) -> bool, res: &mut Vec<TextRange>) {
-                if let Expr::Name(x) = x
-                    && is_valid_use(x)
-                {
-                    res.push(x.range());
-                }
-                x.recurse(&mut |x| f(x, is_valid_use, res));
+        // Bindings include names inside quoted annotations, which are string literals in the AST.
+        for idx in bindings.keys::<Key>() {
+            let key = bindings.idx_to_key(idx);
+            if let Key::BoundName(name) = key
+                && bindings.module().code_at(name.range()) == expected_name.as_str()
+                && let Some((def_handle, Export { location, .. })) = self
+                    .find_export_for_key(
+                        handle,
+                        key,
+                        FindPreference {
+                            import_behavior: ImportBehavior::StopAtRenamedImports,
+                            prefer_pyi: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap_or(None)
+                && def_handle.path() == handle.path()
+                && location == definition_range
+            {
+                references.push(name.range());
             }
-            mod_module.visit(&mut |x| f(x, &is_valid_use, &mut references));
         }
-
         Some(references)
     }
 

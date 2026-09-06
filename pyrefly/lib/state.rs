@@ -23,3 +23,4 @@ pub mod semantic_tokens;
 pub mod state;
 pub mod steps;
 pub mod subscriber;
+mod unused_private;

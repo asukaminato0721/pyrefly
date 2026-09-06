@@ -8,12 +8,32 @@
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::state::lsp::ReferenceOptions;
 use crate::state::state::State;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
+use crate::test::util::mk_state;
+
+#[test]
+fn quoted_annotation_reference() {
+    let code = "class _Private: pass\ndef f(x: \"_Private\"): pass\n";
+    let (handle, state) = mk_state(code);
+    let references = state.transaction().find_local_references(
+        &handle,
+        TextSize::new(code.find("_Private").unwrap() as u32),
+        ReferenceOptions::all(false),
+    );
+    assert_eq!(
+        references,
+        vec![TextRange::at(
+            TextSize::new(code.rfind("_Private").unwrap() as u32),
+            TextSize::new(8),
+        )],
+    );
+}
 
 fn get_test_report(
     state: &State,

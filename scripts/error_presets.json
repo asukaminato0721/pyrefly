@@ -146,6 +146,7 @@
     "unused-call-result": ["all"],
     "unused-coroutine": ["basic", "legacy", "default", "strict", "all"],
     "unused-ignore": ["strict", "all"],
+    "unused-private-symbol": ["all"],
     "unused-type-ignore": ["all"],
     "useless-overload-body": ["legacy", "default", "strict", "all"],
     "variance-mismatch": ["legacy", "default", "strict", "all"]
