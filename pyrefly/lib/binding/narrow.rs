@@ -121,6 +121,9 @@ pub enum AtomicNarrowOp {
     /// narrowing for name `x` from `x is None or y is None`). We need to
     /// preserve its existence in order to handle control flow and negation
     Placeholder,
+    /// A condition on another subject. If its truthiness contradicts the expected
+    /// value, the current subject is unreachable; otherwise its type is unchanged.
+    Condition(Expr, bool),
     /// `ClassCoverageGate` is a no-op. Its negation `ClassCoverageGateNeg` narrows the class away only
     /// when *every* referenced slot-coverage `Key::Exhaustive` solves to `Never` -- i.e. each
     /// positional sub-pattern exhausts its matched slot. This lets a refutable but exhaustive
@@ -231,6 +234,9 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
                 write!(f, "PolarsColumnMutation({kind:?})")
             }
             AtomicNarrowOp::Placeholder => write!(f, "Placeholder"),
+            AtomicNarrowOp::Condition(expr, value) => {
+                write!(f, "Condition({}, {value})", expr.display_with(ctx))
+            }
             AtomicNarrowOp::ClassCoverageGate(ks) => write!(f, "ClassCoverageGate({ks:?})"),
             AtomicNarrowOp::ClassCoverageGateNeg(ks) => write!(f, "ClassCoverageGateNeg({ks:?})"),
         }
@@ -355,6 +361,14 @@ impl AtomicNarrowOp {
                 snippet(arguments.range()).unwrap_or_default()
             )),
             Self::Placeholder => None,
+            Self::Condition(expr, value) => {
+                let expr = snippet(expr.range())?;
+                Some(if *value {
+                    expr
+                } else {
+                    format!("not ({expr})")
+                })
+            }
             Self::ClassCoverageGate(_) | Self::ClassCoverageGateNeg(_) => None,
         }
     }
@@ -399,6 +413,7 @@ impl AtomicNarrowOp {
             Self::IsFalsy => Self::IsTruthy,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
             Self::Placeholder => Self::Placeholder,
+            Self::Condition(expr, value) => Self::Condition(expr.clone(), !value),
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),
             Self::ClassCoverageGateNeg(ks) => Self::ClassCoverageGate(ks.clone()),
         }
@@ -1059,7 +1074,7 @@ impl NarrowOps {
                     BoolOp::And => NarrowOps::and_all,
                     BoolOp::Or => NarrowOps::or_all,
                 };
-                let mut exprs = values.iter().filter(|expr| {
+                let exprs = values.iter().filter(|expr| {
                     !matches!(
                         (op, expr),
                         (
@@ -1071,12 +1086,39 @@ impl NarrowOps {
                         )
                     )
                 });
-                let mut narrow_ops = Self::from_expr_helper(builder, exprs.next(), seen.clone());
-                for next_val in exprs {
-                    extend(
-                        &mut narrow_ops,
-                        Self::from_expr_helper(builder, Some(next_val), seen.clone()),
-                    )
+                let mut operands = exprs
+                    .map(|expr| {
+                        (
+                            expr,
+                            Self::from_expr_helper(builder, Some(expr), seen.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let names = operands
+                    .iter()
+                    .flat_map(|(_, ops)| ops.0.keys().cloned())
+                    .collect::<SmallSet<_>>();
+                // Preserve the truthiness of unrelated operands instead of inserting
+                // placeholders that cannot rule out an impossible branch.
+                for (expr, ops) in &mut operands {
+                    for name in &names {
+                        ops.0.entry(name.clone()).or_insert_with(|| {
+                            (
+                                NarrowOp::Atomic(
+                                    None,
+                                    AtomicNarrowOp::Condition((*expr).clone(), true),
+                                ),
+                                expr.range(),
+                            )
+                        });
+                    }
+                }
+                let mut operands = operands.into_iter();
+                let Some((_, mut narrow_ops)) = operands.next() else {
+                    return Self::new();
+                };
+                for (_, ops) in operands {
+                    extend(&mut narrow_ops, ops);
                 }
                 narrow_ops
             }
@@ -1282,6 +1324,7 @@ impl NarrowOps {
                 | AtomicNarrowOp::IsTruthy
                 | AtomicNarrowOp::IsFalsy
                 | AtomicNarrowOp::Placeholder
+                | AtomicNarrowOp::Condition(..)
                 | AtomicNarrowOp::ClassCoverageGate(..)
                 | AtomicNarrowOp::ClassCoverageGateNeg(..) => {
                     match builder.scopes.binding_idx_for_name(name) {

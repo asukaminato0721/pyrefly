@@ -1005,14 +1005,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut res = Vec::new();
         for (right, allows_negative_narrow) in self.expr_as_class_info(right_expr, errors) {
             if allows_negative_narrow
-                && let Some(left_untyped) =
-                    self.untype_opt(left.clone(), right_expr.range(), errors)
                 && let Some((tparams, right)) = self.unwrap_class_object_silently(&right)
             {
                 let (vs, right) = self
                     .solver()
                     .fresh_quantified(&tparams, right, self.uniques);
-                res.push(self.issubclass_result(self.subtract(&left_untyped, &right), left));
+                res.push(self.distribute_over_union(left, |left| {
+                    let Some(left_untyped) =
+                        self.untype_opt(left.clone(), right_expr.range(), errors)
+                    else {
+                        return left.clone();
+                    };
+                    let narrowed = self.subtract(&left_untyped, &right);
+                    // An exhausted class alternative must disappear from the union.
+                    if narrowed.is_never() {
+                        narrowed
+                    } else {
+                        self.issubclass_result(narrowed, left)
+                    }
+                }));
                 // These are safe to ignore, as the only possible specialization errors are handled elsewhere:
                 // * If `left` is an invalid specialization, the error has already been reported at its definition site.
                 // * Unsafe runtime protocol overlaps are separately checked for in special_calls.rs.
@@ -1337,6 +1348,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         match op {
             AtomicNarrowOp::Placeholder => ty.clone(),
+            AtomicNarrowOp::Condition(expr, value) => {
+                let condition_ty = self.expr_infer(expr, errors);
+                let condition_ty = self.force_for_narrowing(&condition_ty, expr.range(), errors);
+                if self.as_bool(&condition_ty, expr.range(), errors) == Some(!value) {
+                    self.heap.mk_never()
+                } else {
+                    ty.clone()
+                }
+            }
             AtomicNarrowOp::ClassCoverageGate(_) => ty.clone(),
             AtomicNarrowOp::ClassCoverageGateNeg(keys) => {
                 // Subtract the class only when every positional slot's sub-pattern exhausts its

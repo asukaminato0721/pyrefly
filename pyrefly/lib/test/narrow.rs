@@ -764,6 +764,37 @@ def f(value: type[int] | str):
 );
 
 testcase!(
+    test_ternary_redundant_typed_conditions,
+    r#"
+from typing import Literal, assert_type
+
+def always_true() -> Literal[True]:
+    return True
+
+def f(value: type[int] | str, true: Literal[True], false: Literal[False], unknown: bool):
+    assert_type(None if isinstance(value, type) and true else value, str | None)
+    assert_type(None if true and isinstance(value, type) else value, str | None)
+    assert_type(None if isinstance(value, type) or false else value, str | None)
+    assert_type(None if false or isinstance(value, type) else value, str | None)
+    assert_type(None if isinstance(value, type) and issubclass(value, int) else value, str | None)
+    assert_type(None if isinstance(value, type) and unknown else value, type[int] | str | None)
+    assert_type(value if not isinstance(value, type) or false else None, str | None)
+    assert_type(value if not isinstance(value, type) or unknown else None, type[int] | str | None)
+    assert_type(None if isinstance(value, type) and always_true() else value, str | None)
+    assert_type(None if isinstance(value, type) and (true or unknown) else value, str | None)
+
+    if isinstance(value, type) and true:
+        assert_type(value, type[int])
+    else:
+        assert_type(value, str)
+
+def g(value: type[int] | type[float] | str, cls: type[int]):
+    assert_type(None if isinstance(value, type) and issubclass(value, int) else value, type[float] | str | None)
+    assert_type(None if isinstance(value, type) and issubclass(value, cls) else value, type[int] | type[float] | str | None)
+    "#,
+);
+
+testcase!(
     test_is_supertype,
     r#"
 from typing import Literal, assert_type
