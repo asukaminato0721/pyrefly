@@ -1840,19 +1840,98 @@ def keyed_pattern_does_not_narrow_else(x: dict | int) -> None:
 
 // https://github.com/facebook/pyrefly/issues/3213
 testcase!(
-    bug = "match on a tuple of optionals does not narrow the elements based on earlier None cases",
     test_match_tuple_none_cases_narrow,
     r#"
+from typing import assert_type
 def example(a: list[int] | None, b: list[int] | None) -> list[int]:
     match (a, b):
         case (None, None):
+            assert_type(a, None)
+            assert_type(b, None)
             return []
         case (_, None):
-            return a  # E: Returned type `list[int] | None` is not assignable to declared return type `list[int]`
+            assert_type(a, list[int])
+            assert_type(b, None)
+            return a
         case (None, _):
-            return b  # E: Returned type `list[int] | None` is not assignable to declared return type `list[int]`
+            assert_type(a, None)
+            assert_type(b, list[int])
+            return b
         case _:
-            return a + b  # E: `+` is not supported between `list[int]` and `None` # E: `+` is not supported between `None` and `list[int]` # E: `+` is not supported between `None` and `None`
+            assert_type(a, list[int])
+            assert_type(b, list[int])
+            return a + b
+"#,
+);
+
+testcase!(
+    test_match_tuple_none_cases_captures,
+    r#"
+from typing import assert_type
+def f(a: int | None, b: str | None) -> None:
+    match a, b:
+        case None, None:
+            pass
+        case x, None:
+            assert_type(x, int)
+            assert_type(a, int)
+        case None, y:
+            assert_type(y, str)
+            assert_type(b, str)
+        case x, y:
+            assert_type(x, int)
+            assert_type(y, str)
+            assert_type(a, int)
+            assert_type(b, str)
+    assert_type(a, int | None)
+    assert_type(b, str | None)
+
+def shadowed(a: int | None, b: str | None) -> None:
+    match a, b:
+        case _, None:
+            pass
+        case b, a:
+            assert_type(a, str)
+            assert_type(b, int | None)
+"#,
+);
+
+testcase!(
+    test_match_tuple_none_cases_guarded,
+    r#"
+from typing import assert_type
+def f(a: int | None, b: str | None, flag: bool) -> None:
+    match a, b:
+        case None, None if flag:
+            pass
+        case _, None:
+            assert_type(a, int | None)
+        case None, _:
+            assert_type(b, str)
+        case _:
+            assert_type(a, int)
+            assert_type(b, str)
+"#,
+);
+
+testcase!(
+    test_match_tuple_none_cases_attributes,
+    r#"
+from typing import assert_type
+class C:
+    a: int | None
+    b: str | None
+def f(c: C) -> None:
+    match c.a, c.b:
+        case None, None:
+            pass
+        case _, None:
+            assert_type(c.a, int)
+        case None, _:
+            assert_type(c.b, str)
+        case _:
+            assert_type(c.a, int)
+            assert_type(c.b, str)
 "#,
 );
 

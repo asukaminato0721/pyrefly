@@ -121,6 +121,8 @@ pub enum AtomicNarrowOp {
     /// narrowing for name `x` from `x is None or y is None`). We need to
     /// preserve its existence in order to handle control flow and negation
     Placeholder,
+    /// Project an element of the narrowed, evaluated tuple back onto its source subject.
+    MatchTupleElement(Idx<Key>, usize),
     /// `ClassCoverageGate` is a no-op. Its negation `ClassCoverageGateNeg` narrows the class away only
     /// when *every* referenced slot-coverage `Key::Exhaustive` solves to `Never` -- i.e. each
     /// positional sub-pattern exhausts its matched slot. This lets a refutable but exhaustive
@@ -231,6 +233,9 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
                 write!(f, "PolarsColumnMutation({kind:?})")
             }
             AtomicNarrowOp::Placeholder => write!(f, "Placeholder"),
+            AtomicNarrowOp::MatchTupleElement(key, index) => {
+                write!(f, "MatchTupleElement({key:?}, {index})")
+            }
             AtomicNarrowOp::ClassCoverageGate(ks) => write!(f, "ClassCoverageGate({ks:?})"),
             AtomicNarrowOp::ClassCoverageGateNeg(ks) => write!(f, "ClassCoverageGateNeg({ks:?})"),
         }
@@ -355,6 +360,7 @@ impl AtomicNarrowOp {
                 snippet(arguments.range()).unwrap_or_default()
             )),
             Self::Placeholder => None,
+            Self::MatchTupleElement(_, _) => None,
             Self::ClassCoverageGate(_) | Self::ClassCoverageGateNeg(_) => None,
         }
     }
@@ -399,6 +405,7 @@ impl AtomicNarrowOp {
             Self::IsFalsy => Self::IsTruthy,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
             Self::Placeholder => Self::Placeholder,
+            Self::MatchTupleElement(_, _) => Self::Placeholder,
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),
             Self::ClassCoverageGateNeg(ks) => Self::ClassCoverageGate(ks.clone()),
         }

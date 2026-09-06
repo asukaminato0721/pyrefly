@@ -20,6 +20,7 @@ use ruff_python_ast::PatternKeyword;
 use ruff_python_ast::StmtMatch;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
+use starlark_map::Hashed;
 use vec1::Vec1;
 
 use crate::binding::binding::Binding;
@@ -33,6 +34,7 @@ use crate::binding::binding::SizeExpectation;
 use crate::binding::binding::UnpackedPosition;
 use crate::binding::binding::UnpackedValue;
 use crate::binding::bindings::BindingsBuilder;
+use crate::binding::bindings::NameLookupResult;
 use crate::binding::expr::Usage;
 use crate::binding::narrow::AtomicNarrowOp;
 use crate::binding::narrow::FacetOrigin;
@@ -962,8 +964,59 @@ impl<'a> BindingsBuilder<'a> {
             } else {
                 subject_idx
             };
+            // Captures can rebind a source name, so only project onto subjects whose
+            // root binding is unchanged by the pattern.
+            let tuple_subjects = if let MatchSubject::Tuple(subjects) = &match_subject {
+                subjects
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, subject)| {
+                        let subject = subject.as_ref()?;
+                        match self.lookup_name(
+                            Hashed::new(subject.name()),
+                            &mut Usage::NonPinningValue(None),
+                        ) {
+                            NameLookupResult::Found { idx, .. } => Some((index, subject, idx)),
+                            NameLookupResult::NotFound => None,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
+            if !tuple_subjects.is_empty() {
+                let narrowed_subject = if let Some((op, _)) = &new_narrow_ops.subject {
+                    self.insert_binding(
+                        Key::MatchSubject(case_range),
+                        Binding::Narrow(
+                            case_subject_idx,
+                            Box::new(op.clone()),
+                            NarrowUseLocation::Span(case_range),
+                        ),
+                    )
+                } else {
+                    case_subject_idx
+                };
+                for (index, subject, binding) in tuple_subjects {
+                    if let NameLookupResult::Found { idx, .. } = self.lookup_name(
+                        Hashed::new(subject.name()),
+                        &mut Usage::NonPinningValue(None),
+                    ) && idx == binding
+                    {
+                        new_narrow_ops.scope.and_for_subject(
+                            subject,
+                            NarrowOp::Atomic(
+                                None,
+                                AtomicNarrowOp::MatchTupleElement(narrowed_subject, index),
+                            )
+                            .for_subject(subject),
+                            case_range,
+                        );
+                    }
+                }
+            }
             self.bind_narrow_ops(
                 &new_narrow_ops.scope,
                 NarrowUseLocation::Span(case_range),

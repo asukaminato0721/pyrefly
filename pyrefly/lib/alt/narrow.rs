@@ -1337,6 +1337,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         match op {
             AtomicNarrowOp::Placeholder => ty.clone(),
+            AtomicNarrowOp::MatchTupleElement(key, index) => {
+                let subject = self.get_idx(*key);
+                let element = self.get_facet_chain_type(
+                    subject,
+                    &FacetChain::new(Vec1::new(FacetKind::Index(*index as i64))),
+                    range,
+                );
+                self.intersect(ty, &element)
+            }
             AtomicNarrowOp::ClassCoverageGate(_) => ty.clone(),
             AtomicNarrowOp::ClassCoverageGateNeg(keys) => {
                 // Subtract the class only when every positional slot's sub-pattern exhausts its
@@ -2127,6 +2136,38 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     range,
                     errors,
                 );
+                // Keep correlations between elements of the evaluated match tuple in its
+                // type. Joining facet narrows alone would forget that at least one element
+                // must differ after rejecting a pattern such as `(None, None)`.
+                if facet_subject.origin == FacetOrigin::MatchSubject
+                    && let [FacetKind::Index(index)] = resolved_chain.facets().as_slice()
+                {
+                    let suppress_errors = self.error_swallower();
+                    let narrowed = self.distribute_over_union(type_info.ty(), |member| {
+                        if let Type::Tuple(Tuple::Concrete(elements)) = member
+                            && let Some(element) = usize::try_from(*index)
+                                .ok()
+                                .and_then(|index| elements.get(index))
+                        {
+                            let element = self.atomic_narrow(
+                                element,
+                                &op_for_narrow,
+                                range,
+                                &suppress_errors,
+                            );
+                            if element.is_never() {
+                                self.heap.mk_never()
+                            } else {
+                                let mut elements = elements.clone();
+                                elements[*index as usize] = element;
+                                self.heap.mk_concrete_tuple(elements)
+                            }
+                        } else {
+                            member.clone()
+                        }
+                    });
+                    return type_info.clone().with_ty(narrowed);
+                }
                 // A match-arm negation may build on a facet narrow from an earlier arm.
                 // If the accumulated facet is impossible, the whole subject is impossible.
                 if facet_subject.origin == FacetOrigin::MatchSubject
