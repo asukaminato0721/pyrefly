@@ -75,6 +75,7 @@ use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
+use crate::binding::binding::KeyDecoratedFunction;
 use crate::config::error_kind::ErrorKind;
 use crate::error::suppress::detect_line_ending;
 use crate::export::exports::Export;
@@ -4240,17 +4241,31 @@ impl<'a> Transaction<'a> {
         let definition_name = Name::new(module.code_at(definition_range));
         let is_parameter_definition =
             definition_metadata.symbol_kind() == Some(SymbolKind::Parameter);
-        let mut references = if handle.path() != module.path() {
-            self.local_references_from_external_definition(handle, definition_range, module)?
-        } else {
-            self.local_references_from_local_definition(
+        let definition_ranges = if is_parameter_definition {
+            self.overloaded_parameter_definitions(
                 handle,
-                &definition_metadata,
-                &definition_name,
+                module,
                 definition_range,
-                options.include_declaration,
-            )?
+                &definition_name,
+            )
+            .unwrap_or_else(|| vec![definition_range])
+        } else {
+            vec![definition_range]
         };
+        let mut references = Vec::new();
+        for range in &definition_ranges {
+            references.extend(if handle.path() != module.path() {
+                self.local_references_from_external_definition(handle, *range, module)?
+            } else {
+                self.local_references_from_local_definition(
+                    handle,
+                    &definition_metadata,
+                    &definition_name,
+                    *range,
+                    options.include_declaration,
+                )?
+            });
+        }
         // Constructor call sites are indexed separately because the AST scan for
         // `<expr>.<name>` cannot see them: `Foo()` never spells `__init__`.
         if options.include_constructor_call_sites {
@@ -4267,13 +4282,74 @@ impl<'a> Transaction<'a> {
             references.extend(self.keyword_argument_references_from_parameter_definition(
                 handle,
                 module,
-                definition_range,
+                &definition_ranges,
                 &definition_name,
             ));
         }
         references.sort_by_key(|range| range.start());
         references.dedup();
         Some(references)
+    }
+
+    /// Find same-named parameters linked by overload declarations and their implementation.
+    fn overloaded_parameter_definitions(
+        &self,
+        handle: &Handle,
+        module: &Module,
+        definition_range: TextRange,
+        expected_name: &Name,
+    ) -> Option<Vec<TextRange>> {
+        let definition_handle = Handle::new(
+            module.name(),
+            module.path().dupe(),
+            handle.sys_info().dupe(),
+        );
+        let bindings = self.get_bindings(&definition_handle)?;
+        let answers = self.get_answers(&definition_handle)?;
+        let mut target = None;
+        let mut predecessors = SmallMap::new();
+        for idx in bindings.keys::<KeyDecoratedFunction>() {
+            let binding = bindings.get(idx);
+            let function = bindings.get(binding.undecorated_idx);
+            if function
+                .def
+                .parameters
+                .iter()
+                .any(|param| param.name().range() == definition_range)
+            {
+                target = Some(idx);
+            }
+            // A regular redefinition starts a new group, even when the name is unchanged.
+            if let Some(successor) = binding.successor
+                && let Some(function) = answers.get_idx(binding.undecorated_idx)
+                && function.metadata.flags.is_overload
+            {
+                predecessors.insert(successor, idx);
+            }
+        }
+        let mut target = target?;
+        while let Some(successor) = bindings.get(target).successor
+            && predecessors.get(&successor) == Some(&target)
+        {
+            target = successor;
+        }
+        let mut ranges = Vec::new();
+        loop {
+            let function = bindings.get(bindings.get(target).undecorated_idx);
+            ranges.extend(
+                function
+                    .def
+                    .parameters
+                    .iter()
+                    .filter(|param| param.name().id() == expected_name)
+                    .map(|param| param.name().range()),
+            );
+            let Some(predecessor) = predecessors.get(&target) else {
+                break;
+            };
+            target = *predecessor;
+        }
+        Some(ranges)
     }
 
     /// Returns implicit constructor-protocol references to a definition in `handle`.
@@ -4425,7 +4501,7 @@ impl<'a> Transaction<'a> {
         &self,
         handle: &Handle,
         definition_module: &ModuleInfo,
-        definition_range: TextRange,
+        definition_ranges: &[TextRange],
         expected_name: &Name,
     ) -> Vec<TextRange> {
         let keyword_args = self.collect_local_keyword_arguments_by_name(handle, expected_name);
@@ -4451,7 +4527,7 @@ impl<'a> Transaction<'a> {
                         definition_ast.as_ref(),
                         callee_def_range,
                         &kw_identifier,
-                    ) && param_range == definition_range
+                    ) && definition_ranges.contains(&param_range)
                     {
                         references.push(kw_identifier.range);
                     }

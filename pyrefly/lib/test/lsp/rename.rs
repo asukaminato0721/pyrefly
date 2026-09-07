@@ -8,12 +8,134 @@
 use itertools::Itertools;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
+use crate::state::lsp::FindPreference;
 use crate::state::lsp::ReferenceOptions;
+use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
+use crate::test::util::mk_multi_file_state_assert_no_errors;
+
+#[test]
+fn test_rename_overloaded_method_parameter() {
+    for code in [
+        r#"
+from typing import overload, Any
+
+class Parser:
+    @overload
+    def parse(self, value: int) -> int: ...
+    @overload
+    def parse(self, value: str) -> str: ...
+    def parse(self, value: Any) -> Any:
+        return value
+
+Parser().parse(value=1)
+Parser().parse(value="text")
+"#,
+        r#"
+from typing import overload, Protocol
+
+class Parser(Protocol):
+    @overload
+    def parse(self, value: int) -> int: ...
+    @overload
+    def parse(self, value: str) -> str: ...
+
+def use(parser: Parser):
+    parser.parse(value=1)
+    parser.parse(value="text")
+"#,
+    ] {
+        let unrelated = r#"
+class Other:
+    def parse(self, value: int) -> int:
+        return value
+
+Other().parse(value=1)
+"#;
+        let source = format!("{code}{unrelated}");
+        let (handles, state) =
+            mk_multi_file_state_assert_no_errors(&[("main", &source)], Require::Everything);
+        let transaction = state.transaction();
+        let expected: Vec<_> = code
+            .match_indices("value")
+            .map(|(start, name)| TextRange::at(TextSize::new(start as u32), TextSize::of(name)))
+            .collect();
+        // Starting from any declaration, body use, or keyword must rename the whole group.
+        for range in &expected {
+            assert_eq!(
+                transaction.find_local_references(
+                    &handles["main"],
+                    range.start(),
+                    ReferenceOptions::textual_only(true),
+                ),
+                expected,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_rename_overloaded_function_parameter_across_modules() {
+    let library = r#"
+from typing import overload as variant
+
+@variant
+def parse(*, value: str) -> str: ...
+@variant
+def parse(value: int, /) -> int: ...
+def parse(value: int | str) -> int | str:
+    return value
+"#;
+    let caller = r#"
+from library import parse
+
+parse(1)
+parse(value="text")
+"#;
+    let files = [("library", library), ("main", caller)];
+    let (handles, state) = mk_multi_file_state_assert_no_errors(&files, Require::Everything);
+    let transaction = state.transaction();
+    let expected: Vec<_> = files
+        .iter()
+        .map(|(name, code)| {
+            (
+                *name,
+                code.match_indices("value")
+                    .map(|(start, name)| {
+                        TextRange::at(TextSize::new(start as u32), TextSize::of(name))
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    for (name, ranges) in &expected {
+        let handle = &handles[name];
+        for range in ranges {
+            let definitions = transaction
+                .find_definition(handle, range.start(), FindPreference::default())
+                .unwrap();
+            for definition in definitions {
+                for (name, expected_ranges) in &expected {
+                    let actual = transaction
+                        .local_references_from_definition(
+                            &handles[name],
+                            definition.metadata.clone(),
+                            definition.definition_range,
+                            &definition.module,
+                            ReferenceOptions::textual_only(true),
+                        )
+                        .unwrap();
+                    assert_eq!(&actual, expected_ranges);
+                }
+            }
+        }
+    }
+}
 
 fn get_test_report(state: &State, handle: &Handle, position: TextSize) -> String {
     let transaction = state.transaction();
