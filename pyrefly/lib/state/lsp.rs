@@ -4421,6 +4421,67 @@ impl<'a> Transaction<'a> {
         results
     }
 
+    /// Find same-named parameters in parent and child methods linked by the override index.
+    fn inherited_parameter_definitions(
+        &self,
+        handle: &Handle,
+        definition: &TextRangeWithModule,
+    ) -> Vec<TextRangeWithModule> {
+        let ast = self.get_ast_or_parse_module(handle, &definition.module);
+        let nodes = Ast::locate_node(&ast, definition.range.start());
+        let Some(AnyNodeRef::StmtFunctionDef(function)) = nodes
+            .iter()
+            .find(|node| matches!(node, AnyNodeRef::StmtFunctionDef(_)))
+        else {
+            return Vec::new();
+        };
+        // Only parameters that can be passed by name share a contract across overrides.
+        let Some(parameter) = function
+            .parameters
+            .args
+            .iter()
+            .chain(&function.parameters.kwonlyargs)
+            .find(|parameter| parameter.name().range() == definition.range)
+        else {
+            return Vec::new();
+        };
+        let Some(index) = self.get_solutions(handle).and_then(|s| s.get_index()) else {
+            return Vec::new();
+        };
+        let mut methods = Vec::new();
+        {
+            let index = index.lock();
+            for (child_range, parents) in &index.parent_methods_map {
+                if handle.path() == definition.module.path() && *child_range == function.name.range
+                {
+                    methods.extend(parents.iter().cloned());
+                }
+                if parents.iter().any(|(path, range)| {
+                    path == definition.module.path() && *range == function.name.range
+                }) {
+                    methods.push((handle.path().dupe(), *child_range));
+                }
+            }
+        }
+        if methods.is_empty() {
+            return Vec::new();
+        }
+        let handles = self.handles();
+        methods
+            .into_iter()
+            .filter_map(|(path, method_range)| {
+                let method_handle = handles
+                    .iter()
+                    .find(|h| h.path() == &path && h.sys_info() == handle.sys_info())?;
+                let module = self.get_module_info(method_handle)?;
+                let ast = self.get_ast_or_parse_module(method_handle, &module);
+                let range =
+                    self.refine_param_location_for_callee(&ast, method_range, parameter.name())?;
+                Some(TextRangeWithModule::new(module, range))
+            })
+            .collect()
+    }
+
     fn keyword_argument_references_from_parameter_definition(
         &self,
         handle: &Handle,
@@ -4814,6 +4875,11 @@ trait RdepTransaction {
     fn module_info(&self, handle: &Handle) -> Option<Module>;
     fn transitive_rdeps(&self, handle: Handle) -> HashSet<Handle>;
     fn run_for_handles(&mut self, handles: &[Handle], require: Require) -> Result<(), Cancelled>;
+    fn inherited_parameter_definitions(
+        &self,
+        handle: &Handle,
+        definition: &TextRangeWithModule,
+    ) -> Vec<TextRangeWithModule>;
     fn local_references_from_definition(
         &self,
         handle: &Handle,
@@ -4825,6 +4891,14 @@ trait RdepTransaction {
 }
 
 impl<'a> RdepTransaction for Transaction<'a> {
+    fn inherited_parameter_definitions(
+        &self,
+        handle: &Handle,
+        definition: &TextRangeWithModule,
+    ) -> Vec<TextRangeWithModule> {
+        self.inherited_parameter_definitions(handle, definition)
+    }
+
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.get_solutions(handle)
             .and_then(|solutions| solutions.get_index())
@@ -4856,6 +4930,15 @@ impl<'a> RdepTransaction for Transaction<'a> {
 }
 
 impl<'a> RdepTransaction for CancellableTransaction<'a> {
+    fn inherited_parameter_definitions(
+        &self,
+        handle: &Handle,
+        definition: &TextRangeWithModule,
+    ) -> Vec<TextRangeWithModule> {
+        self.as_ref()
+            .inherited_parameter_definitions(handle, definition)
+    }
+
     fn solutions_index(&self, handle: &Handle) -> Option<Arc<Mutex<Index>>> {
         self.as_ref()
             .get_solutions(handle)
@@ -5044,57 +5127,72 @@ fn find_global_references_from_definition_impl<T: RdepTransaction>(
     definition: TextRangeWithModule,
     options: ReferenceOptions,
 ) -> Result<Vec<(Module, Vec<TextRange>)>, Cancelled> {
-    let candidate_handles =
-        compute_transitive_rdeps_for_definition_impl(transaction, sys_info, &definition)?;
-    if definition_kind.symbol_kind() == Some(SymbolKind::Parameter) {
-        // Keyword argument references require each candidate's AST and bindings to resolve the
-        // callee and refine the argument back to this parameter.
-        transaction.run_for_handles(&candidate_handles, Require::Everything)?;
-    }
-    let results = process_candidate_handles_with_definition_impl(
-        transaction,
-        candidate_handles,
-        &definition,
-        |transaction, handle, patched_definition| {
-            let mut module_refs: Vec<(Module, Vec<TextRange>)> = Vec::new();
-
-            let references = transaction
-                .local_references_from_definition(
-                    handle,
-                    definition_kind.clone(),
-                    patched_definition.range,
-                    &patched_definition.module,
-                    options,
-                )
-                .unwrap_or_default();
-            if !references.is_empty()
-                && let Some(module_info) = transaction.module_info(handle)
-            {
-                module_refs.push((module_info, references));
-            }
-
-            let child_implementations =
-                find_child_implementations_impl(transaction, handle, patched_definition);
-            if !child_implementations.is_empty()
-                && let Some(module_info) = transaction.module_info(handle)
-            {
-                if let Some((_, ranges)) = module_refs
-                    .iter_mut()
-                    .find(|(m, _)| m.path() == module_info.path())
-                {
-                    ranges.extend(child_implementations);
-                } else {
-                    module_refs.push((module_info, child_implementations));
+    let mut pending = vec![definition];
+    let mut visited = HashSet::new();
+    let mut results = Vec::new();
+    // Follow parameter definitions in both directions so a rename from a child also reaches
+    // its ancestors and siblings. Each definition is processed once, including in diamonds.
+    while let Some(definition) = pending.pop() {
+        if !visited.insert((definition.module.path().dupe(), definition.range)) {
+            continue;
+        }
+        let candidate_handles =
+            compute_transitive_rdeps_for_definition_impl(transaction, sys_info, &definition)?;
+        if definition_kind.symbol_kind() == Some(SymbolKind::Parameter) {
+            // Keyword argument references require each candidate's AST and bindings to resolve the
+            // callee and refine the argument back to this parameter.
+            transaction.run_for_handles(&candidate_handles, Require::Everything)?;
+        }
+        results.extend(process_candidate_handles_with_definition_impl(
+            transaction,
+            candidate_handles,
+            &definition,
+            |transaction, handle, patched_definition| {
+                if definition_kind.symbol_kind() == Some(SymbolKind::Parameter) {
+                    pending.extend(
+                        transaction.inherited_parameter_definitions(handle, patched_definition),
+                    );
                 }
-            }
+                let mut module_refs: Vec<(Module, Vec<TextRange>)> = Vec::new();
 
-            if module_refs.is_empty() {
-                None
-            } else {
-                Some(module_refs)
-            }
-        },
-    );
+                let references = transaction
+                    .local_references_from_definition(
+                        handle,
+                        definition_kind.clone(),
+                        patched_definition.range,
+                        &patched_definition.module,
+                        options,
+                    )
+                    .unwrap_or_default();
+                if !references.is_empty()
+                    && let Some(module_info) = transaction.module_info(handle)
+                {
+                    module_refs.push((module_info, references));
+                }
+
+                let child_implementations =
+                    find_child_implementations_impl(transaction, handle, patched_definition);
+                if !child_implementations.is_empty()
+                    && let Some(module_info) = transaction.module_info(handle)
+                {
+                    if let Some((_, ranges)) = module_refs
+                        .iter_mut()
+                        .find(|(m, _)| m.path() == module_info.path())
+                    {
+                        ranges.extend(child_implementations);
+                    } else {
+                        module_refs.push((module_info, child_implementations));
+                    }
+                }
+
+                if module_refs.is_empty() {
+                    None
+                } else {
+                    Some(module_refs)
+                }
+            },
+        ));
+    }
 
     let mut global_references: Vec<(Module, Vec<TextRange>)> = Vec::new();
     for module_refs in results {
