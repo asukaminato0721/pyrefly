@@ -15,6 +15,7 @@ use pyrefly_python::dunder;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
 use pyrefly_types::shaped_array::is_tuple_carrier_shape_middle;
+use pyrefly_types::special_form::SpecialForm;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::Expr;
@@ -43,6 +44,19 @@ use crate::types::tuple::Tuple;
 use crate::types::types::Type;
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
+    /// Distinguish runtime Literal objects from unions with the same normalized type.
+    pub fn is_literal_type_form(&self, ty: &Type, expr: Option<&Expr>) -> bool {
+        if let Type::TypeAlias(alias) = ty {
+            return self.get_type_alias(alias).is_literal;
+        }
+        if let Some(Expr::Subscript(subscript)) = expr {
+            let base = self.expr_infer(&subscript.value, &self.error_swallower());
+            matches!(base, Type::Type(inner) if matches!(*inner, Type::SpecialForm(SpecialForm::Literal)))
+        } else {
+            false
+        }
+    }
+
     /// Interpret an arbitrary expression as a shape without trusting unvalidated type variables.
     /// A valid type variable contributes the shape constraints from its normalized upper bound.
     fn assert_shape_input_to_int_tuple(&self, ty: &Type) -> Option<IntTuple> {

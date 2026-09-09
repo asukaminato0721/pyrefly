@@ -1482,6 +1482,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             Type::Annotated(_, metadata) => Some(metadata.clone()),
             _ => None,
         };
+        let is_literal =
+            style != TypeAliasStyle::Scoped && self.is_literal_type_form(&ty, Some(expr));
         let untyped = self.untype_opt(ty.clone(), range, errors);
         let ty = if let Some(untyped) = untyped {
             let validated =
@@ -1506,7 +1508,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             self.heap.mk_type_of(ty)
         };
-        TypeAlias::new(name.clone(), stored_ty, style)
+        let mut alias = TypeAlias::new(name.clone(), stored_ty, style);
+        alias.is_literal = is_literal;
+        alias
     }
 
     /// Check whether a type alias body contains a cyclic self-reference.

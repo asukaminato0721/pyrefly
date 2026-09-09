@@ -2482,6 +2482,46 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                     )
                 }
+                Some(CalleeKind::Function(FunctionKind::GetArgs)) => {
+                    let expr = match (args.as_slice(), kws.as_slice()) {
+                        ([CallArg::Arg(TypeOrExpr::Expr(expr))], []) => Some(*expr),
+                        ([], [CallKeyword { value: TypeOrExpr::Expr(expr), .. }]) => Some(*expr),
+                        _ => None,
+                    };
+                    let args = call.vec_call_arg(&args, self, errors);
+                    let kws = call.vec_call_keyword(&kws, self, errors);
+                    let default = self.freeform_call_infer(
+                        ty.clone(), &args, &kws, x.func.range(), x.arguments.range(), hint, errors,
+                    );
+                    let arg = match (args.as_slice(), kws.as_slice()) {
+                        ([CallArg::Arg(arg)], []) => Some(arg),
+                        ([], [kw]) if kw.arg.is_some_and(|name| name.id == "tp") => Some(&kw.value),
+                        _ => None,
+                    };
+                    if let Some(arg) = arg {
+                        let mut arg_ty = self.solver().force(arg.infer(self, errors));
+                        if !self.is_literal_type_form(&arg_ty, expr) {
+                            return default;
+                        }
+                        if let Type::TypeAlias(alias) = &arg_ty {
+                            arg_ty = self.get_type_alias(alias).as_value(self.stdlib);
+                        }
+                        if let Type::Type(inner) = arg_ty {
+                            let members = inner.clone().into_unions();
+                            if members.iter().all(|member| match member {
+                                Type::Literal(_) | Type::None => true,
+                                // Unions containing every bool or enum literal normalize to the class.
+                                Type::ClassType(cls) => cls.is_builtin("bool")
+                                    || self.get_metadata_for_class(cls.class_object()).is_enum(),
+                                _ => false,
+                            }) {
+                                // Type normalization does not preserve runtime argument order.
+                                return self.heap.mk_unbounded_tuple(*inner);
+                            }
+                        }
+                    }
+                    default
+                }
                 // `attr.evolve` validates kwargs like `dataclasses.replace`; `attr.assoc` validates
                 // against attribute names, including `init=False` fields. Both require an attrs class.
                 Some(CalleeKind::Function(

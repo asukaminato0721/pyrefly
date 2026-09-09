@@ -45,6 +45,8 @@ pub struct TypeAlias {
     pub name: Box<Name>,
     ty: Box<Type>,
     pub style: TypeAliasStyle,
+    /// Whether the alias refers to a `Literal[...]` object at runtime.
+    pub is_literal: bool,
 }
 
 impl TypeAlias {
@@ -53,6 +55,7 @@ impl TypeAlias {
             name: Box::new(name),
             ty: Box::new(ty),
             style,
+            is_literal: false,
         }
     }
 

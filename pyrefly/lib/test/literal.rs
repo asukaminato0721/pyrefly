@@ -5,7 +5,87 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
+
+// https://github.com/facebook/pyrefly/issues/4717
+testcase!(
+    test_get_args_literal,
+    r#"
+from enum import Enum
+from typing import Any, Literal, TypeAlias, assert_type, get_args
+from typing_extensions import get_args as get_args_ext
+
+Value = Literal["a", "b"]
+Explicit: TypeAlias = Value
+assert_type(get_args(Value), tuple[Value, ...])
+assert_type(get_args(tp=Explicit), tuple[Value, ...])
+assert_type(get_args_ext(Literal[1, 2]), tuple[Literal[1, 2], ...])
+get = get_args
+assert_type(get(Literal[Value, "a", "c"]), tuple[Literal["a", "b", "c"], ...])
+assert_type(get_args(Literal[b"a", b"b"]), tuple[Literal[b"a", b"b"], ...])
+assert_type(get_args(Literal[True]), tuple[Literal[True], ...])
+assert_type(get_args(Literal["only"]), tuple[Literal["only"], ...])
+assert_type(get_args(Literal[True, False]), tuple[Literal[True, False], ...])
+assert_type(get_args(Literal[None]), tuple[None, ...])
+assert_type(get_args(Literal["a", 1, None]), tuple[Literal["a", 1] | None, ...])
+
+class Color(Enum):
+    RED = 1
+    BLUE = 2
+
+assert_type(get_args(Literal[Color.RED, Color.BLUE]), tuple[Literal[Color.RED, Color.BLUE], ...])
+
+VALUES = get_args(Value)
+def f(value: str) -> None:
+    if value in VALUES:
+        assert_type(value, Value)
+
+# Other type forms and runtime values retain the typeshed return type.
+assert_type(get_args(list[int]), tuple[Any, ...])
+assert_type(get_args(int | str), tuple[Any, ...])
+assert_type(get_args("a"), tuple[Any, ...])
+assert_type(get_args(Literal["a"] | Literal["b"]), tuple[Any, ...])
+UnionAlias = Literal["a"] | Literal["b"]
+assert_type(get_args(UnionAlias), tuple[Any, ...])
+assert_type(get_args(*(Value,)), tuple[Any, ...])
+def unknown(value: Any) -> None:
+    assert_type(get_args(value), tuple[Any, ...])
+
+# PEP 695 aliases are TypeAliasType objects at runtime, not Literal objects.
+type Scoped = Literal["a", "b"]
+assert_type(get_args(Scoped), tuple[Any, ...])
+"#,
+);
+
+testcase!(
+    test_get_args_imported_literal,
+    TestEnv::one(
+        "values",
+        "from typing import Literal\nValue = Literal['a', 'b']"
+    ),
+    r#"
+import typing
+from typing import assert_type
+from values import Value
+
+assert_type(typing.get_args(Value), tuple[Value, ...])
+assert_type(typing.get_args(typing.Literal["a", "b"]), tuple[Value, ...])
+"#,
+);
+
+testcase!(
+    test_get_args_errors,
+    r#"
+from typing import Literal, get_args
+
+get_args()  # E: Missing argument `tp`
+get_args(Literal["a"], Literal["b"])  # E: Expected 1 positional argument, got 2
+get_args(wrong=Literal["a"])  # E: Missing argument `tp` # E: Unexpected keyword argument `wrong`
+get_args(Literal["a"], tp=Literal["b"])  # E: Multiple values for argument `tp`
+get_args(missing)  # E: Could not find name `missing`
+"#,
+);
 
 testcase!(
     test_fstring_literal,
