@@ -1791,14 +1791,24 @@ impl Solver {
             bounds.lower.retain(|bound| !bound.is_placeholder());
             bounds.upper.retain(|bound| !bound.is_placeholder());
         }
-        // Prefer non-Any lower bound > upper bound > Any lower bound.
+        // An Any lower bound retains gradual behavior while the upper bound
+        // records the operations that the caller requires.
         // TODO(https://github.com/facebook/pyrefly/issues/105): consider using polarity to
         // determine whether we use the lower or upper bound.
         let lower_bound = self.solve_one_bounds(bounds.lower);
-        if lower_bound.as_ref().is_none_or(|b| b.is_any()) {
-            self.solve_one_bounds(bounds.upper).or(lower_bound)
-        } else {
-            lower_bound
+        if lower_bound.as_ref().is_some_and(|b| !b.is_any()) {
+            return lower_bound;
+        }
+        match (lower_bound, self.solve_one_bounds(bounds.upper)) {
+            (Some(lower), Some(upper)) if !lower.is_error() && !upper.is_any() => Some(unions(
+                upper
+                    .into_unions()
+                    .into_iter()
+                    .map(|upper| intersect(vec![lower.clone(), upper.clone()], upper, &self.heap))
+                    .collect(),
+                &self.heap,
+            )),
+            (lower, upper) => upper.or(lower),
         }
     }
 

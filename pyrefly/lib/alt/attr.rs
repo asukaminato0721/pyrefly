@@ -2189,6 +2189,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 candidates.push(acc_candidate.found);
             }
         }
+        // Any supplies attributes that no other intersection member defines.
+        // A known member supplies the type and signature of its declared attributes.
+        if matches!(combine, Combine::Intersect) {
+            let from_any = |candidate: &[(Attribute, AttributeBase1)]| {
+                candidate
+                    .iter()
+                    .all(|(_, base)| matches!(base, AttributeBase1::Any(_)))
+            };
+            if candidates.iter().any(|candidate| !from_any(candidate)) {
+                candidates.retain(|candidate| !from_any(candidate));
+            }
+        }
         if candidates.len() == 1 {
             acc.found.extend(candidates.into_iter().next().unwrap());
         } else if let Some(folded) = self.fold_attribute_candidates(candidates.as_slice(), combine)
