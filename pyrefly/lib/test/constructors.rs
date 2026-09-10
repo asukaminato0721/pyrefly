@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
@@ -480,6 +481,52 @@ class C:
         return 0
 x = C()
 assert_type(x, Any)
+    "#,
+);
+
+// Regression test for https://github.com/facebook/pyrefly/issues/4889.
+// Disable first-use inference so the return type must be inferred at the call.
+testcase!(
+    test_new_return_typevar_from_context,
+    TestEnv::new_with_infer_with_first_use(false),
+    r#"
+from typing import TYPE_CHECKING, assert_type
+
+class Factory:
+    def __new__[T](cls) -> T: ...
+
+class Field:
+    if TYPE_CHECKING:
+        def __new__[T](cls, *args, **kwargs) -> T: ...
+
+x: int = Factory()
+y: str = Field()
+
+class Model:
+    name: str = Field()
+    count: int | None = Field()
+
+def accepts_int(x: int) -> None: ...
+accepts_int(Factory())
+
+def returns_str() -> str:
+    return Factory()
+
+class ListFactory:
+    def __new__[T](cls) -> list[T]: ...
+
+items: list[int] = ListFactory()
+
+class ValueFactory:
+    def __new__[T](cls, value: T) -> T: ...
+
+assert_type(ValueFactory(1), int)
+wrong: str = ValueFactory(1)  # E: `int` is not assignable to `str`
+
+class BoundedFactory:
+    def __new__[T: int](cls) -> T: ...
+
+valid: int = BoundedFactory()
     "#,
 );
 

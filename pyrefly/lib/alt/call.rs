@@ -1093,7 +1093,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             errors,
             context,
             HintRef::filter_for_constructor(hint, cls.targs()),
-            |hint| {
+            |class_hint| {
                 self.construct_class_inner(
                     cls.clone(),
                     constructor_kind.clone(),
@@ -1102,6 +1102,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     arguments_range,
                     callee_range,
                     context,
+                    class_hint,
                     hint,
                 )
             },
@@ -1118,6 +1119,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         callee_range: Option<TextRange>,
         context: Option<&dyn Fn() -> ErrorContext>,
         hint: Option<&Type>,
+        new_hint: Option<HintRef>,
     ) -> ConstructedInstance {
         // Based on https://typing.readthedocs.io/en/latest/spec/constructors.html.
         let (vs, matched_hint) = if let Some(hint) = hint {
@@ -1132,7 +1134,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         } else {
             (QuantifiedHandle::empty(), false)
         };
-        let hint = None; // discard hint
         let class_metadata = self.get_metadata_for_class(cls.class_object());
         // Tracks whether we've already recorded a trace for IDE features.
         // Priority: metaclass __call__ > overridden __new__ > __init__.
@@ -1146,7 +1147,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             keywords,
             &errors,
             context,
-            hint,
+            None,
         ) {
             if let Some(metaclass_dunder_call) = self.get_metaclass_dunder_call(&cls) {
                 if let Some(callee_range) = callee_range
@@ -1221,7 +1222,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     arguments_range,
                     &dunder_new_errors,
                     context,
-                    hint,
+                    // `__new__` can have its own type parameters even when the class is not generic.
+                    new_hint,
                     Some(cls.targs_mut()),
                 );
                 let has_errors = !dunder_new_errors.is_empty();
@@ -1284,7 +1286,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 arguments_range,
                 &dunder_init_errors,
                 context,
-                hint,
+                None,
                 Some(cls.targs_mut()),
             );
             // Report `__init__` errors only when there are no `__new__` errors, to avoid redundant errors.

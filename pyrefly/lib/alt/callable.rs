@@ -2141,7 +2141,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             };
             // If we have a hint, we want to try to instantiate against it first, so we can contextually type
             // arguments. If we don't match the hint, we need to throw away any instantiations we might have made.
-            // By invariant, hint will be None if we are calling a constructor.
             if let Some(hint) = hint {
                 let (qs, callable_, extension_vars) = instantiate(callable.clone());
                 let contains_dsl_call = self.solver().tensor_shapes

@@ -86,8 +86,8 @@ impl<'a, 'b> HintRef<'a, 'b> {
 
     pub fn filter_for_call(hint: Option<Self>, tparams: Option<&TParams>) -> Option<Self> {
         // Function return hints only affect calls whose type parameters can be contextually instantiated.
-        // Note that by invariant, constructor calls get hint=None, so we only have to care about the
-        // function's own type parameters and not type parameters from any enclosing class.
+        // Constructor class type parameters are instantiated separately, so only the function's
+        // own type parameters matter here.
         hint.filter(|_| tparams.is_some())
     }
 
