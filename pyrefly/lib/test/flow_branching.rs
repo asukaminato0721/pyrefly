@@ -2528,6 +2528,115 @@ def main() -> None:
 );
 
 testcase!(
+    test_noreturn_try_except_previously_partial_assignment,
+    r#"
+from typing import NoReturn
+
+class TooLarge(Exception):
+    pass
+
+def bail_out() -> NoReturn:
+    raise RuntimeError("overrun")
+
+def compute(value: int) -> int:
+    if value < 0:
+        raise TooLarge
+    return value
+
+def main(forced: int | None) -> int:
+    if forced is not None:
+        choice = forced
+    try:
+        choice = compute(0)
+    except TooLarge:
+        bail_out()
+    return choice
+"#,
+);
+
+testcase!(
+    test_noreturn_try_except_partial_assignment_multiple_handlers,
+    r#"
+from typing import Never
+
+def bail_out() -> Never:
+    raise RuntimeError()
+
+def maybe_bail_out() -> None:
+    pass
+
+def all_handlers_terminate(forced: int | None) -> int:
+    if forced is not None:
+        choice = forced
+    try:
+        choice = int("0")
+    except ValueError:
+        bail_out()
+    except TypeError:
+        bail_out()
+    return choice
+
+def handler_returns(forced: int | None) -> int:
+    if forced is not None:
+        choice = forced
+    try:
+        choice = int("0")
+    except ValueError:
+        bail_out()
+    except TypeError:
+        maybe_bail_out()
+    return choice  # E: `choice` may be uninitialized
+
+def handler_has_no_termination_key(forced: int | None) -> int:
+    if forced is not None:
+        choice = forced
+    try:
+        choice = int("0")
+        maybe_bail_out()
+    except ValueError:
+        bail_out()
+    except TypeError:
+        pass
+    return choice  # E: `choice` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_noreturn_try_except_partial_assignment_nested,
+    r#"
+from typing import NoReturn
+
+def bail_out() -> NoReturn:
+    raise RuntimeError()
+
+def maybe_bail_out() -> None:
+    pass
+
+def previous_handler_returns() -> int:
+    try:
+        choice = int("0")
+    except ValueError:
+        pass
+    try:
+        choice = int("1")
+    except ValueError:
+        bail_out()
+    return choice
+
+def previous_handler_terminates() -> int:
+    try:
+        choice = int("0")
+    except ValueError:
+        bail_out()
+    try:
+        choice = int("1")
+    except ValueError:
+        maybe_bail_out()
+    return choice
+"#,
+);
+
+testcase!(
     test_noreturn_try_except_if_nested,
     r#"
 from typing import NoReturn

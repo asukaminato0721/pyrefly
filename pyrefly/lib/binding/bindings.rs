@@ -175,8 +175,8 @@ pub enum InitializedInFlow {
     Conditionally,
     No,
     /// Initialization depends on whether these termination keys have Never type.
-    /// If ALL termination keys are Never, the variable is initialized; otherwise it may be uninitialized.
-    DeferredCheck(Vec<Idx<Key>>),
+    /// Each group must contain a Never key for the variable to be initialized.
+    DeferredCheck(Vec<Vec<Idx<Key>>>),
 }
 
 impl InitializedInFlow {
@@ -189,7 +189,7 @@ impl InitializedInFlow {
         }
     }
 
-    pub fn deferred_termination_keys(&self) -> Option<&[Idx<Key>]> {
+    pub fn deferred_termination_keys(&self) -> Option<&[Vec<Idx<Key>>]> {
         match self {
             InitializedInFlow::DeferredCheck(keys) => Some(keys),
             _ => None,

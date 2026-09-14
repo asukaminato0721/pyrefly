@@ -1235,16 +1235,16 @@ pub enum BindingExpect {
     PrivateAttributeAccess(PrivateAttributeAccessCheck),
     /// Deferred check for uninitialized variables. This is a "dangling" binding
     /// that doesn't affect any other types - it only exists to emit an error at
-    /// solve time if any of the termination keys don't have Never type.
+    /// solve time if any termination-key group has no key with Never type.
     UninitializedCheck {
         /// The variable name (for error messages).
         name: Name,
         /// The range of the variable usage (for error location).
         range: TextRange,
         /// Termination keys from branches that don't define the variable.
-        /// At solve time, we check if ALL of these have Never type.
-        /// If any don't, the variable may be uninitialized.
-        termination_keys: Vec<Idx<Key>>,
+        /// Each group represents a possibly uninitialized path. At least one key
+        /// in every group must have Never type for the variable to be initialized.
+        termination_keys: Vec<Vec<Idx<Key>>>,
     },
     /// Check for forward reference string literal in union type.
     /// At runtime, `type.__or__` cannot handle string literals, so expressions

@@ -404,7 +404,7 @@ impl<'a> BindingsBuilder<'a> {
                         .map(|s| s.to_vec())
                     {
                         // Defer the uninitialized check to solve time.
-                        // At solve time, we'll check if all termination keys have Never type.
+                        // Each group must contain a termination key with Never type.
                         self.insert_binding(
                             KeyExpect::UninitializedCheck(name.range),
                             BindingExpect::UninitializedCheck {

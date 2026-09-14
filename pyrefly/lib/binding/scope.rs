@@ -865,9 +865,9 @@ pub enum FlowStyle {
     PossiblyUninitialized,
     /// The name may or may not be initialized depending on whether certain branches
     /// terminate (have `Never` type). The termination keys are checked at solve time;
-    /// if all of them have `Never` type, the name is considered initialized.
+    /// if each group contains a key with `Never` type, the name is considered initialized.
     /// This is used when some branches don't define a variable but end with a NoReturn call.
-    MaybeInitialized(Vec<Idx<Key>>),
+    MaybeInitialized(Vec<Vec<Idx<Key>>>),
     /// The name was in an annotated declaration like `x: int` but not initialized
     Uninitialized,
     /// I'm a speculative binding for a name that was narrowed but not assigned above
@@ -910,9 +910,8 @@ impl FlowStyle {
                         _ => return FlowStyle::PossiblyUninitialized,
                     }
                 }
-                // Two MaybeInitialized: combine termination keys from both branches.
-                // Each branch independently needs its keys to be Never for that path
-                // to be initialized, so we collect all keys.
+                // Each branch independently needs its termination groups satisfied,
+                // so preserve the groups from both branches.
                 (FlowStyle::MaybeInitialized(keys), FlowStyle::MaybeInitialized(other_keys)) => {
                     keys.extend(other_keys);
                 }
@@ -3887,10 +3886,10 @@ impl<'a> BindingsBuilder<'a> {
         // Note that because the flow above the loop flows into the Phi, this
         // can never result in empty `branch_idxs`.
         //
-        // We keep track separately of `value_idxs` and `branch_idxs` so that
+        // We keep track separately of `value_styles` and `branch_idxs` so that
         // we know whether to treat the Phi binding as a value or a narrow - it's
         // a narrow only when all the value idxs are the same.
-        let mut value_idxs = SmallSet::with_capacity(merge_branches.len());
+        let mut value_styles = SmallMap::with_capacity(merge_branches.len());
         let mut branch_idxs = SmallSet::with_capacity(merge_branches.len());
         let mut branch_infos = Vec::with_capacity(merge_branches.len());
         let mut styles = Vec::with_capacity(merge_branches.len());
@@ -3936,11 +3935,20 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     continue;
                 }
-                if value_idxs.insert(v.idx) {
-                    // An invariant in Pyrefly is that we only set style when we
-                    // set a value, so duplicate value_idxs always have the same style.
-                    styles.push(v.style);
-                }
+                value_styles.entry(v.idx).or_insert_with(|| v.style.clone());
+                let style = match (v.style, merge_branch.termination_key) {
+                    (FlowStyle::PossiblyUninitialized, Some(termination_key)) => {
+                        FlowStyle::MaybeInitialized(vec![vec![termination_key]])
+                    }
+                    (FlowStyle::MaybeInitialized(mut groups), Some(termination_key)) => {
+                        for group in &mut groups {
+                            group.push(termination_key);
+                        }
+                        FlowStyle::MaybeInitialized(groups)
+                    }
+                    (style, _) => style,
+                };
+                styles.push(style);
                 // Treat uninitialized branches like missing branches for termination keys.
                 if is_uninitialized && let Some(termination_key) = merge_branch.termination_key {
                     missing_branch_termination_keys.push(termination_key);
@@ -3976,7 +3984,9 @@ impl<'a> BindingsBuilder<'a> {
         // Helper to compute the final FlowStyle based on definition status.
         let compute_final_style = |styles: Vec<FlowStyle>| -> FlowStyle {
             match &definition_status {
-                DefinitionStatus::DeferredCheck(keys) => FlowStyle::MaybeInitialized(keys.clone()),
+                DefinitionStatus::DeferredCheck(keys) => {
+                    FlowStyle::MaybeInitialized(keys.iter().map(|key| vec![*key]).collect())
+                }
                 DefinitionStatus::Defined => {
                     FlowStyle::merged(true, styles.into_iter(), merge_style)
                 }
@@ -3986,7 +3996,7 @@ impl<'a> BindingsBuilder<'a> {
             }
         };
 
-        match value_idxs.len() {
+        match value_styles.len() {
             // If there are no values, then this name isn't assigned at all
             // and is only narrowed (it's most likely a capture, but could be
             // a local if the code we're analyzing is buggy)
@@ -4009,6 +4019,7 @@ impl<'a> BindingsBuilder<'a> {
             // for a loop), then the phi should be treated as a narrow, not a
             // value, and the value should continue to point at upstream.
             1 => {
+                let (value_idx, style) = value_styles.into_iter().next().unwrap();
                 let merged_idx = self.merge_idxs(
                     branch_idxs,
                     phi_key,
@@ -4018,8 +4029,8 @@ impl<'a> BindingsBuilder<'a> {
                 );
                 FlowInfo {
                     value: Some(FlowValue {
-                        idx: *value_idxs.first().unwrap(),
-                        style: compute_final_style(styles),
+                        idx: value_idx,
+                        style: compute_final_style(vec![style]),
                     }),
                     narrow: Some(FlowNarrow { idx: merged_idx }),
                     narrow_depth: 1,

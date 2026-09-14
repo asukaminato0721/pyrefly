@@ -2687,7 +2687,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // the variable may be uninitialized at this use.
                 let all_terminate = termination_keys
                     .iter()
-                    .all(|key| self.get_idx(*key).ty().is_never());
+                    .all(|group| group.iter().any(|key| self.get_idx(*key).ty().is_never()));
                 if !all_terminate {
                     errors
                         .error_builder(
