@@ -221,6 +221,41 @@ x9: list[str] = {"a": 1}  # E: `dict[str, int]` is not assignable to `list[str]`
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/4913
+testcase!(
+    test_dict_union_generic_hint,
+    r#"
+from typing import Generic, Hashable, TypeVar, assert_type
+
+S = TypeVar("S")
+K = TypeVar("K", bound=Hashable)
+
+class Box(Generic[S]):
+    def __init__(self, data: dict[str, list[int]] | dict[K, S]) -> None: ...
+
+assert_type(Box({"a": 1, "b": 2}), Box[int])
+assert_type(Box(dict(a=1, b=2)), Box[int])
+assert_type(Box({str(i): i for i in range(2)}), Box[int])
+assert_type(Box({**{"a": 1}, "b": 2}), Box[int])
+data: dict[str, int] = {"a": 1, "b": 2}
+assert_type(Box(data), Box[int])
+
+class ReversedBox(Generic[S]):
+    def __init__(self, data: dict[K, S] | dict[str, list[int]]) -> None: ...
+
+assert_type(ReversedBox({"a": 1, "b": 2}), ReversedBox[int])
+
+def keep[K: Hashable, V](data: dict[str, list[int]] | dict[K, V]) -> dict[K, V]: ...
+
+assert_type(keep({"a": 1, "b": 2}), dict[str, int])
+assert_type(keep({1: "a", 2: "b"}), dict[int, str])
+
+def concrete(data: dict[str, list[int]] | dict[int, int]) -> None: ...
+
+concrete({"a": 1})  # E: `Literal['a']` is not assignable to dict key type `int`
+    "#,
+);
+
 // The `Any` in a type variable's bound carries no information about the literal, so a non-empty
 // list infers its own element type. An empty list has nothing to infer from and keeps the bound.
 testcase!(

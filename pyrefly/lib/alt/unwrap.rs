@@ -305,7 +305,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    pub fn decompose_dict(&self, hint: &Type) -> (Option<Type>, Option<Type>) {
+    /// Return key and value hints for a compatible dictionary type, even if both are unresolved.
+    pub fn decompose_dict(&self, hint: &Type) -> Option<(Option<Type>, Option<Type>)> {
         let key = self.fresh_var();
         let value = self.fresh_var();
         let dict_type = self.heap.mk_class_type(
@@ -315,9 +316,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if self.is_subset_eq(&dict_type, hint) {
             let key = self.resolve_var_opt(hint, key);
             let value = self.resolve_var_opt(hint, value);
-            (key, value)
+            Some((key, value))
         } else {
-            (None, None)
+            None
         }
     }
 
