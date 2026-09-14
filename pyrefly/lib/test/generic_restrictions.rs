@@ -8,6 +8,38 @@
 use crate::test::util::TestEnv;
 use crate::testcase;
 
+// https://github.com/facebook/pyrefly/issues/4923
+testcase!(
+    test_constrained_typevar_union_nested_call,
+    r#"
+from typing import Generic, TypeVar, Union, assert_type
+
+DT = TypeVar("DT")
+class Scalar(Generic[DT]): ...
+class Int8Type: ...
+class UInt8Type: ...
+
+AnyScalar = TypeVar("AnyScalar")
+CastAs = TypeVar("CastAs")
+class Array(Generic[AnyScalar]):
+    def cast(self, target_type: CastAs) -> Array[Scalar[CastAs]]:
+        raise NotImplementedError
+
+ScalarT = TypeVar("ScalarT", Scalar[Int8Type], Scalar[UInt8Type])
+def total(x: Union[ScalarT, Array[ScalarT]]) -> ScalarT:
+    raise NotImplementedError
+
+def test(arr: Array[Scalar[Int8Type]]) -> None:
+    casted = arr.cast(UInt8Type())
+    assert_type(casted, Array[Scalar[UInt8Type]])
+    assert_type(total(casted), Scalar[UInt8Type])
+    assert_type(total(arr.cast(UInt8Type())), Scalar[UInt8Type])
+    assert_type(total(arr.cast(Int8Type())), Scalar[Int8Type])
+    assert_type(total(x=arr.cast(UInt8Type())), Scalar[UInt8Type])
+    total(arr.cast(str()))  # E: Argument `Array[Scalar[str]]` is not assignable to parameter `x`
+"#,
+);
+
 testcase!(
     test_quantified_subtyping_no_constraint,
     r#"

@@ -1193,7 +1193,7 @@ def mixed[K: Flag[int], T](k: K, callback: Callable[[T], None]) -> tuple[K, T]: 
 def takes_int(value: int) -> None: ...
 
 result: tuple[Literal[5], str] = mixed(5, lambda value: print(value.upper()))
-bad: tuple[Literal[5], str] = mixed(5, takes_int)  # E: `tuple[Literal[5], int | str]` is not assignable to `tuple[Literal[5], str]`
+bad: tuple[Literal[5], str] = mixed(5, takes_int)  # E: `tuple[Literal[5], int]` is not assignable to `tuple[Literal[5], str]`
 "#,
 );
 

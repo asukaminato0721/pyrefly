@@ -1955,7 +1955,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ctor_targs: Option<&mut TArgs>,
     ) -> Type {
         let hint = HintRef::filter_for_call(hint, tparams);
-        let retry_input = hint.map(|_| (callable.clone(), self_obj.clone()));
+        let retry_input = hint.map(|hint| (callable.clone(), self_obj.clone(), hint));
         // First try the call without the hint to see if it succeeds.
         let mut ctor_targs_no_hint = ctor_targs.as_ref().map(|x| (**x).clone());
         let arg_errors_no_hint = self.error_collector();
@@ -1978,11 +1978,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         // If the call succeeds, attempt contextual typing with the hint.
         let (chosen_ctor_targs, chosen_call_errors, chosen_arg_errors, chosen_res) =
             if !call_errors_no_hint.has_hard()
-                && let Some((callable, self_obj)) = retry_input
+                && let Some((callable, self_obj, hint)) = retry_input
             {
                 let mut ctor_targs_with_hint = ctor_targs.as_ref().map(|x| (**x).clone());
                 let arg_errors_with_hint = self.error_collector();
                 let call_errors_with_hint = self.error_collector();
+                let hint_ty = Type::union(hint.types().to_vec());
+                let snapshot = self.solver().snapshot_reachable_vars(&[&hint_ty]);
                 let res_with_hint = self.callable_infer(
                     callable,
                     callable_name,
@@ -1995,11 +1997,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     &arg_errors_with_hint,
                     &call_errors_with_hint,
                     context,
-                    hint,
+                    Some(hint),
                     ctor_targs_with_hint.as_mut(),
                 );
                 if !call_errors_with_hint.has_hard()
                     && arg_errors_with_hint.len_hard() <= arg_errors_no_hint.len_hard()
+                    && self.is_subset_eq(&res_with_hint.0, &hint_ty)
+                    && !self.solver().has_new_instantiation_errors(&snapshot)
                 {
                     (
                         ctor_targs_with_hint,
@@ -2008,6 +2012,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         res_with_hint,
                     )
                 } else {
+                    // A rejected hint must not constrain the caller's type variables.
+                    self.solver().restore_vars(snapshot);
                     (
                         ctor_targs_no_hint,
                         call_errors_no_hint,
