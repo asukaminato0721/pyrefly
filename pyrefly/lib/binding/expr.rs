@@ -12,6 +12,7 @@ use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_util::visit::VisitMut;
 use ruff_python_ast::AtomicNodeIndex;
 use ruff_python_ast::BoolOp;
+use ruff_python_ast::CmpOp;
 use ruff_python_ast::Comprehension;
 use ruff_python_ast::Decorator;
 use ruff_python_ast::Expr;
@@ -490,6 +491,18 @@ impl<'a> BindingsBuilder<'a> {
         }
     }
 
+    /// Track consuming uses of local names without changing their inferred types.
+    pub fn record_iteration(&mut self, expr: &Expr) {
+        if let Expr::Name(name) = expr
+            && let Some(idx) = self.scopes.record_iteration(&name.id)
+        {
+            self.insert_binding(
+                KeyExpect::ReusedGenerator(name.range),
+                BindingExpect::ReusedGenerator(idx, name.id.clone()),
+            );
+        }
+    }
+
     fn bind_comprehensions(
         &mut self,
         range: TextRange,
@@ -502,6 +515,9 @@ impl<'a> BindingsBuilder<'a> {
             // This is necessary so that, e.g. `[x for x in x]` correctly uses the outer scope for
             // the `in x` lookup.
             self.ensure_expr(&mut comp.iter, usage);
+            if !is_generator {
+                self.record_iteration(&comp.iter);
+            }
             if i == 0 {
                 // Async list/set/dict comprehensions must be inside an async def. Async generator
                 // expressions are allowed to stand alone because they can have deferred execution.
@@ -1124,8 +1140,26 @@ impl<'a> BindingsBuilder<'a> {
                     self.scopes.mark_flow_termination(kind);
                     return;
                 }
-                // Default: recurse into children as for any other expr.
-                x.recurse_mut(&mut |x| self.ensure_expr(x, usage));
+                self.ensure_expr(&mut call.func, usage);
+                for arg in call.arguments.args.iter_mut() {
+                    self.ensure_expr(arg, usage);
+                }
+                for kw in call.arguments.keywords.iter_mut() {
+                    self.ensure_expr(&mut kw.value, usage);
+                }
+                if matches!(
+                    special,
+                    Some(
+                        SpecialExport::BuiltinsList
+                            | SpecialExport::BuiltinsTuple
+                            | SpecialExport::BuiltinsSet
+                            | SpecialExport::BuiltinsFrozenset
+                            | SpecialExport::BuiltinsDict
+                    )
+                ) && let Some(arg) = call.arguments.args.first()
+                {
+                    self.record_iteration(arg);
+                }
             }
             Expr::Named(x) => {
                 // For scopes defined in terms of Definitions, we should normally already have the name in Static, but
@@ -1149,6 +1183,15 @@ impl<'a> BindingsBuilder<'a> {
             }
             Expr::Lambda(x) => {
                 self.bind_lambda(x, usage, LambdaKind::Ordinary);
+            }
+            Expr::Compare(x) => {
+                self.ensure_expr(&mut x.operands[0], usage);
+                for (op, comparator) in x.ops.iter().zip(x.operands.iter_mut().skip(1)) {
+                    self.ensure_expr(comparator, usage);
+                    if matches!(op, CmpOp::In | CmpOp::NotIn) {
+                        self.record_iteration(comparator);
+                    }
+                }
             }
             Expr::ListComp(x) => {
                 self.with_await_context(AwaitContext::General, |this| {

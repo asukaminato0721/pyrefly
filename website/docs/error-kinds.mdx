@@ -1884,6 +1884,30 @@ import re
 re.compile("(")  # missing ), unterminated subpattern [regex]
 ```
 
+## reused-generator
+
+Default severity: `warn`
+
+Reports repeated iteration over the same generator variable. Membership tests,
+`for` loops, eager comprehensions, and container construction consume generator
+values. A later iteration can therefore produce fewer values, or none at all.
+
+```python
+values = (i for i in range(3))
+assert 4 not in values
+assert 1 in values  # reused-generator: the previous search exhausted values
+```
+
+Materialize the values in a list if they need to be traversed repeatedly, or
+create a fresh generator before each traversal. Reassigning the variable resets
+the check. Lists and other reusable containers do not trigger this diagnostic.
+
+This check tracks variables within a scope, including branches. It does not
+track aliases or consumption inside called functions. Creating a generator
+expression does not itself consume its input. A previous iteration might stop
+early, so this diagnostic indicates possible exhaustion, not guaranteed
+exhaustion. Suppress `reused-generator` when resuming iteration is intentional.
+
 ## reveal-type
 
 Default severity: `info`

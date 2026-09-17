@@ -7,6 +7,149 @@
 
 use crate::testcase;
 
+// https://github.com/facebook/pyrefly/issues/4880
+testcase!(
+    test_generator_reuse_membership,
+    r#"
+from typing import Generator
+
+def get_values() -> Generator[int]:
+    return (i for i in range(3))
+
+values = get_values()
+assert 4 not in values
+assert 1 in values  # E: Generator `values` may already be exhausted by a previous iteration
+assert 2 in values  # pyrefly: ignore[reused-generator]
+
+inferred = (i for i in range(3))
+assert 4 not in inferred
+assert 1 in inferred  # E: Generator `inferred` may already be exhausted
+"#,
+);
+
+testcase!(
+    test_generator_reuse_loops_and_comprehensions,
+    r#"
+from typing import Generator, AsyncGenerator
+
+def loops(values: Generator[int]):
+    for value in values:
+        pass
+    for value in values:  # E: Generator `values` may already be exhausted
+        pass
+
+def comprehensions(values: Generator[int]):
+    [value for value in values]
+    {value for value in values}  # E: Generator `values` may already be exhausted
+    {value: value for value in values}  # E: Generator `values` may already be exhausted
+
+async def async_loops(values: AsyncGenerator[int]):
+    async for value in values:
+        pass
+    async for value in values:  # E: Generator `values` may already be exhausted
+        pass
+"#,
+);
+
+testcase!(
+    test_generator_reuse_containers,
+    r#"
+from typing import Generator
+
+def containers(values: Generator[int]):
+    list(values)
+    tuple(values)  # E: Generator `values` may already be exhausted
+    set(values)  # E: Generator `values` may already be exhausted
+    frozenset(values)  # E: Generator `values` may already be exhausted
+
+def dictionaries(values: Generator[tuple[str, int]]):
+    dict(values)
+    dict(values)  # E: Generator `values` may already be exhausted
+"#,
+);
+
+testcase!(
+    test_generator_reuse_control_flow,
+    r#"
+from typing import Generator
+
+def branches(values: Generator[int], flag: bool):
+    if flag:
+        list(values)
+    else:
+        list(values)
+    list(values)  # E: Generator `values` may already be exhausted
+
+def conditional_iteration(values: Generator[int], flag: bool):
+    if flag:
+        list(values)
+    list(values)  # E: Generator `values` may already be exhausted
+
+def terminated_branch(values: Generator[int], flag: bool):
+    if flag:
+        list(values)
+        return
+    list(values)
+
+def reassignment(values: Generator[int], flag: bool):
+    list(values)
+    if flag:
+        values = (i for i in range(3))
+    else:
+        values = (i for i in range(4))
+    list(values)
+    values = (i for i in range(5))
+    list(values)
+
+def narrowing(values: Generator[int] | None):
+    if values is not None:
+        list(values)
+        assert values is not None
+        list(values)  # E: Generator `values` may already be exhausted
+"#,
+);
+
+testcase!(
+    test_generator_reuse_exemptions,
+    r#"
+from typing import Any, Generator, Iterable
+
+def reusable(values: list[int], unknown: Any, iterable: Iterable[int]):
+    assert 4 not in values
+    assert 1 in values
+    list(values)
+    list(values)
+    list(unknown)
+    list(unknown)
+    list(iterable)
+    list(iterable)
+
+def deferred(values: Generator[int]):
+    first = (value for value in values)
+    second = (value for value in values)
+    list(values)
+
+def separate_scopes():
+    values = (i for i in range(3))
+    def first():
+        return list(values)
+    def second():
+        return list(values)
+    list(values)
+
+def shadowed_constructor(values: Generator[int]):
+    def list(value: object):
+        pass
+    list(values)
+    list(values)
+
+def fresh_values():
+    for _ in range(3):
+        values = (i for i in range(3))
+        list(values)
+"#,
+);
+
 testcase!(
     test_generator,
     r#"

@@ -387,6 +387,8 @@ pub enum ErrorKind {
     RedundantCondition,
     /// An invalid regex pattern or regex group access.
     Regex,
+    /// Repeated iteration over a generator that may already be exhausted.
+    ReusedGenerator,
     /// Raised by a call to reveal_type().
     RevealType,
     /// Passing a string to something that expects an iterable of strings.
@@ -598,6 +600,7 @@ impl ErrorKind {
             ErrorKind::PytorchEfficiencyLints => Severity::Ignore,
             ErrorKind::RedundantCast => Severity::Warn,
             ErrorKind::RedundantCondition => Severity::Warn,
+            ErrorKind::ReusedGenerator => Severity::Warn,
             ErrorKind::RevealType => Severity::Info,
             ErrorKind::StringAsIterable => Severity::Ignore,
             ErrorKind::UnannotatedAttribute => Severity::Ignore,

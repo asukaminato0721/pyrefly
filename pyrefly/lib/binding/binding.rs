@@ -1086,6 +1086,8 @@ impl DisplayWith<Bindings> for Key {
 /// location don't collide. Each variant represents a distinct category of expectation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KeyExpect {
+    /// Repeated iteration that may exhaust a generator.
+    ReusedGenerator(TextRange),
     /// Expression that needs type checking without using the result.
     TypeCheckExpr(TextRange),
     /// Expression in base class list that needs additional checks.
@@ -1117,7 +1119,8 @@ pub enum KeyExpect {
 impl Ranged for KeyExpect {
     fn range(&self) -> TextRange {
         match self {
-            KeyExpect::TypeCheckExpr(range)
+            KeyExpect::ReusedGenerator(range)
+            | KeyExpect::TypeCheckExpr(range)
             | KeyExpect::TypeCheckBaseClassExpr(range)
             | KeyExpect::UnpackedLength(range)
             | KeyExpect::CheckRaisedException(range)
@@ -1137,6 +1140,7 @@ impl Ranged for KeyExpect {
 impl DisplayWith<ModuleInfo> for KeyExpect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &ModuleInfo) -> fmt::Result {
         let (name, range) = match self {
+            KeyExpect::ReusedGenerator(r) => ("ReusedGenerator", r),
             KeyExpect::TypeCheckExpr(r) => ("TypeCheckExpr", r),
             KeyExpect::TypeCheckBaseClassExpr(r) => ("TypeCheckBaseClassExpr", r),
             KeyExpect::UnpackedLength(r) => ("UnpackedLength", r),
@@ -1188,6 +1192,8 @@ impl DisplayWith<Bindings> for ExprOrBinding {
 
 #[derive(Clone, Debug)]
 pub enum BindingExpect {
+    /// A local value that has already been iterated in the current control flow.
+    ReusedGenerator(Idx<Key>, Name),
     /// An expression where we need to check for type errors, but don't need the result type.
     TypeCheckExpr(Expr),
     /// Same as `TypeCheckExpr` but more checks are needed for expressions that appear in base class list.
@@ -1275,6 +1281,9 @@ impl DisplayWith<Bindings> for BindingExpect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         let m = ctx.module();
         match self {
+            Self::ReusedGenerator(idx, name) => {
+                write!(f, "ReusedGenerator({}, {name})", ctx.display(*idx))
+            }
             Self::TypeCheckExpr(x) => {
                 write!(f, "TypeCheckExpr({})", m.display(x))
             }

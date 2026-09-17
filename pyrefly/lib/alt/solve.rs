@@ -2497,6 +2497,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         errors: &ErrorCollector,
     ) -> EmptyAnswer {
         match binding {
+            BindingExpect::ReusedGenerator(idx, name) => {
+                let ty = self.get_idx(*idx);
+                if let Type::ClassType(cls) = ty.ty()
+                    && (cls.has_qname("typing", "Generator")
+                        || cls.has_qname("typing", "AsyncGenerator"))
+                {
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::ReusedGenerator,
+                        format!(
+                            "Generator `{name}` may already be exhausted by a previous iteration"
+                        ),
+                    );
+                }
+            }
             BindingExpect::TypeCheckExpr(x) => {
                 self.expr_infer(x, errors);
             }

@@ -1170,6 +1170,7 @@ impl<'a> BindingsBuilder<'a> {
                 // Check if the iterable is definitely non-empty before binding
                 // (must be done before x.iter is moved)
                 let loop_definitely_runs = self.is_definitely_nonempty_iterable(&x.iter);
+                self.record_iteration(&x.iter);
                 self.bind_target_with_expr(&mut x.target, &mut x.iter, &|expr, ann| {
                     Binding::IterableValueLoop(
                         ann,

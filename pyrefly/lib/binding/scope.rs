@@ -701,6 +701,8 @@ struct FlowInfo {
     narrow: Option<FlowNarrow>,
     /// How many consecutive narrows have been recorded since the last value assignment.
     narrow_depth: usize,
+    /// Whether this value has been iterated on any path through the current scope.
+    iterated: bool,
     /// An idx used to wrap loop Phi with our guess at the type above the loop.
     /// - Always set to our current inferred type when a flow info is created
     /// - Updated whenever we update the inferred type outside of all loops, but not inside
@@ -744,6 +746,7 @@ impl FlowInfo {
             value: Some(FlowValue { idx, style }),
             narrow: None,
             narrow_depth: 0,
+            iterated: false,
             loop_prior: idx,
         }
     }
@@ -753,6 +756,7 @@ impl FlowInfo {
             value: None,
             narrow: Some(FlowNarrow { idx }),
             narrow_depth: 1,
+            iterated: false,
             loop_prior: idx,
         }
     }
@@ -763,6 +767,7 @@ impl FlowInfo {
             // Note that any existing narrow is wiped when a new value is bound.
             narrow: None,
             narrow_depth: 0,
+            iterated: false,
             loop_prior: if in_loop { self.loop_prior } else { idx },
         }
     }
@@ -772,6 +777,7 @@ impl FlowInfo {
             value: self.value.clone(),
             narrow: Some(FlowNarrow { idx }),
             narrow_depth: self.narrow_depth.saturating_add(1),
+            iterated: self.iterated,
             loop_prior: if in_loop { self.loop_prior } else { idx },
         }
     }
@@ -2434,6 +2440,14 @@ impl Scopes {
         self.current().flow.get_value(name).map(|v| v.idx)
     }
 
+    /// Record iteration of a local value, returning its type binding on repeated use.
+    pub fn record_iteration(&mut self, name: &Name) -> Option<Idx<Key>> {
+        let info = self.current_mut().flow.info.get_mut(name)?;
+        let repeated = info.iterated;
+        info.iterated = true;
+        repeated.then(|| info.idx())
+    }
+
     /// PEP 572: walrus operators inside comprehensions bind to the enclosing
     /// non-comprehension scope. This method updates the flow of the nearest
     /// enclosing non-comprehension scope with the given name and binding idx.
@@ -3909,6 +3923,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut branch_infos = Vec::with_capacity(merge_branches.len());
         let mut styles = Vec::with_capacity(merge_branches.len());
         let mut n_values = 0;
+        let mut iterated = false;
         // Collect termination keys from branches that don't define the variable.
         // These will be used for deferred uninitialized checks at solve time.
         let mut missing_branch_termination_keys = Vec::new();
@@ -3922,6 +3937,7 @@ impl<'a> BindingsBuilder<'a> {
                 continue;
             };
             let branch_idx = flow_info.idx();
+            iterated |= flow_info.iterated;
 
             // The BranchInfo always sees the branch_idx, which will be
             // a narrow if one exists, otherwise the value. Each branch may have a
@@ -4017,6 +4033,7 @@ impl<'a> BindingsBuilder<'a> {
                     narrow: Some(FlowNarrow { idx: merged_idx }),
                     narrow_depth: 1,
                     loop_prior: merged_loop_prior(merged_idx),
+                    iterated,
                 }
             }
             // If there is exactly one value (after discarding the phi itself,
@@ -4038,6 +4055,7 @@ impl<'a> BindingsBuilder<'a> {
                     narrow: Some(FlowNarrow { idx: merged_idx }),
                     narrow_depth: 1,
                     loop_prior: merged_loop_prior(merged_idx),
+                    iterated,
                 }
             }
             // If there are multiple values, then the phi should be treated
@@ -4059,6 +4077,7 @@ impl<'a> BindingsBuilder<'a> {
                     narrow: None,
                     narrow_depth: 0,
                     loop_prior: merged_loop_prior(merged_idx),
+                    iterated,
                 }
             }
         }
