@@ -1167,6 +1167,34 @@ sa.update(AdminUser).where(AdminUser.id == 1).values(deleted=False)  # E: Unexpe
     "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/4989
+testcase!(
+    test_sqlalchemy_update_values_inherited_mapped_column,
+    sqlalchemy_mapped_env(),
+    r#"
+from datetime import UTC, datetime
+
+from sqlalchemy import update
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+class Base(DeclarativeBase):
+    pass
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column()
+
+class Item(TimestampMixin, Base):
+    __tablename__ = "items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str]
+
+update(Item).values(name="updated")
+update(Item).values(created_at=datetime.now(UTC))
+update(Item).values(created_at="yesterday")  # E: `Literal['yesterday']` is not assignable to field `created_at` with type `datetime`
+update(Item).values(created_att=datetime.now(UTC))  # E: Unexpected SQLAlchemy update field `created_att`
+    "#,
+);
+
 testcase!(
     test_sqlalchemy_update_values_checks_sqlmodel_fields,
     sqlmodel_env(),
