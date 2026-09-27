@@ -950,25 +950,42 @@ pub fn get_hover_with_verbosity(
         return Some(result);
     }
 
+    let in_string_annotation = transaction.get_answers(handle).is_some_and(|answers| {
+        answers
+            .bindings()
+            .string_annotations()
+            .iter()
+            .any(|(range, _)| range.contains(position))
+    });
+    let annotation_identifier = if in_string_annotation {
+        Some(transaction.identifier_at(handle, position)?)
+    } else {
+        None
+    };
     let type_ = resolve_hovered_type(transaction, handle, ast.as_deref(), position)?;
 
     // `a and b and c` is a single flat BoolOp, so hovering any operator in the
     // chain highlights the whole expression. `not` highlights its unary expression.
-    let range = ast
-        .as_deref()
+    let range = annotation_identifier
+        .as_ref()
         .zip(module_info.as_ref())
-        .and_then(|(ast, module_info)| {
-            Ast::locate_node(ast, position)
-                .into_iter()
-                .find(|node| node.as_expr_ref().is_some())
-                .and_then(|node| match node {
-                    AnyNodeRef::ExprBoolOp(bool_op) => {
-                        Some(module_info.to_lsp_range(bool_op.range()))
-                    }
-                    AnyNodeRef::ExprUnaryOp(unary_op) if unary_op.op == UnaryOp::Not => {
-                        Some(module_info.to_lsp_range(unary_op.range()))
-                    }
-                    _ => None,
+        .map(|(id, module)| module.to_lsp_range(id.identifier.range()))
+        .or_else(|| {
+            ast.as_deref()
+                .zip(module_info.as_ref())
+                .and_then(|(ast, module_info)| {
+                    Ast::locate_node(ast, position)
+                        .into_iter()
+                        .find(|node| node.as_expr_ref().is_some())
+                        .and_then(|node| match node {
+                            AnyNodeRef::ExprBoolOp(bool_op) => {
+                                Some(module_info.to_lsp_range(bool_op.range()))
+                            }
+                            AnyNodeRef::ExprUnaryOp(unary_op) if unary_op.op == UnaryOp::Not => {
+                                Some(module_info.to_lsp_range(unary_op.range()))
+                            }
+                            _ => None,
+                        })
                 })
         });
 

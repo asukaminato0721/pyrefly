@@ -1824,3 +1824,48 @@ token-type: variable
 "#,
     );
 }
+
+#[test]
+fn quoted_annotations_classify_identifiers() {
+    let code = r#"from typing import Literal
+class Model: ...
+x: "Model"
+y: list["Model"]
+z: "list[Model | None]"
+literal: Literal["Model"]
+text = "Model"
+"#;
+    let (handles, state) =
+        mk_multi_file_state_with_env(TestEnv::new(), &[("main", code)], Require::Exports, true);
+    let legends = SemanticTokensLegends::lsp_semantic_token_legends();
+    for include_syntax in [false, true] {
+        let tokens = state
+            .transaction()
+            .semantic_tokens(&handles["main"], None, None, include_syntax)
+            .unwrap();
+        let mut line = 0;
+        let mut column = 0;
+        let mut model_count = 0;
+        let mut previous_end = (0, 0);
+        for token in tokens {
+            column = if token.delta_line == 0 {
+                column + token.delta_start as usize
+            } else {
+                token.delta_start as usize
+            };
+            line += token.delta_line as usize;
+            assert!((line, column) >= previous_end);
+            previous_end = (line, column + token.length as usize);
+            let text = &code.lines().nth(line).unwrap()[column..previous_end.1];
+            let kind = &legends.token_types[token.token_type as usize];
+            if text == "Model" {
+                assert_eq!(kind.as_str(), "class");
+                model_count += 1;
+            }
+            if include_syntax && line >= 5 && text == "\"Model\"" {
+                assert_eq!(kind.as_str(), "string");
+            }
+        }
+        assert_eq!(model_count, 4);
+    }
+}

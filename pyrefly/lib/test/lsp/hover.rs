@@ -15,11 +15,13 @@ use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_path::ModulePath;
+use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
 use crate::lsp::wasm::hover::HoverOptions;
 use crate::lsp::wasm::hover::get_hover;
 use crate::lsp::wasm::hover::get_hover_with_verbosity;
+use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
 use crate::test::util::TestEnv;
@@ -3023,4 +3025,187 @@ Widget(1)
         "got: {report}"
     );
     assert!(!report.contains("from the stub"), "got: {report}");
+}
+
+#[test]
+fn quoted_annotations_support_symbol_operations() {
+    let code = r#"
+from typing import TYPE_CHECKING, Literal
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+class Model: ...
+def plain(value: Model) -> Model: ...
+def quoted(value: "Model") -> "Iterable[Model | None]": ...
+def nested(value: type["Model"]) -> list["Model"]: ...
+x: """Model"""
+ordinary = "Model"
+literal: Literal["Model"]
+quoted_literal: "Literal['Model']"
+"#;
+    let (state, handles) = TestEnv::one("main", code).to_state();
+    let handle = handles("main");
+    let transaction = state.transaction();
+    let module = transaction.get_module_info(&handle).unwrap();
+    let model_ranges: Vec<_> = code
+        .match_indices("Model")
+        .map(|(offset, _)| TextRange::at(TextSize::new(offset as u32), TextSize::new(5)))
+        .collect();
+    let plain_hover = get_test_report(&state, &handle, model_ranges[1].start());
+    let symbol_count = code[..code.find("ordinary").unwrap()]
+        .match_indices("Model")
+        .count();
+    let expected_references = &model_ranges[..symbol_count];
+    for range in &model_ranges[3..symbol_count] {
+        let position = range.start() + TextSize::new(2);
+        let hover = get_hover(&transaction, &handle, position, true).unwrap();
+        assert_eq!(hover.range, Some(module.to_lsp_range(*range)));
+        assert_eq!(transaction.prepare_rename(&handle, position), Some(*range));
+        assert_eq!(
+            transaction.find_local_occurrences(&handle, position),
+            expected_references
+        );
+        assert_eq!(get_test_report(&state, &handle, position), plain_hover);
+        let definitions = transaction.goto_definition(&handle, position).unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].range, model_ranges[0]);
+        assert_eq!(
+            transaction.find_local_references(
+                &handle,
+                position,
+                ReferenceOptions::textual_only(true)
+            ),
+            expected_references
+        );
+    }
+    let iterable = TextSize::new(code.find("Iterable[Model").unwrap() as u32);
+    assert!(get_test_report(&state, &handle, iterable).contains("Iterable"));
+    assert!(
+        !transaction
+            .goto_definition(&handle, iterable)
+            .unwrap()
+            .is_empty()
+    );
+    for range in &model_ranges[symbol_count..] {
+        assert!(transaction.identifier_at(&handle, range.start()).is_none());
+        assert!(
+            transaction
+                .goto_definition(&handle, range.start())
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn quoted_annotations_reject_unmapped_and_malformed_ranges() {
+    let code = r#"
+class Model: ...
+x: "Model["
+y: "\x4dodel"
+z: list["Model["]
+"#;
+    let (state, handles) = TestEnv::one("main", code).to_state();
+    let handle = handles("main");
+    let transaction = state.transaction();
+    for text in ["Model[", "x4dodel"] {
+        for (offset, _) in code.match_indices(text) {
+            let position = TextSize::new(offset as u32);
+            assert!(get_hover(&transaction, &handle, position, true).is_none());
+            assert!(
+                transaction
+                    .goto_definition(&handle, position)
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+        }
+    }
+    let definition = TextSize::new(code.find("Model").unwrap() as u32);
+    assert_eq!(
+        transaction
+            .find_local_references(&handle, definition, ReferenceOptions::textual_only(true))
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn quoted_annotations_resolve_qualified_names() {
+    let code = r#"
+import models
+x: "models.Model | None"
+y: "models.Model"
+"#;
+    let mut env = TestEnv::new();
+    env.add("models", "class Model: ...");
+    env.add("main", code);
+    let (state, handles) = env.to_state();
+    let handle = handles("main");
+    let transaction = state.transaction();
+    let ranges: Vec<_> = code
+        .match_indices("Model")
+        .map(|(offset, _)| TextRange::at(TextSize::new(offset as u32), TextSize::new(5)))
+        .collect();
+    for range in &ranges {
+        let position = range.start() + TextSize::new(1);
+        let hover = get_hover(&transaction, &handle, position, true).unwrap();
+        assert_eq!(
+            hover.range,
+            Some(
+                transaction
+                    .get_module_info(&handle)
+                    .unwrap()
+                    .to_lsp_range(*range)
+            )
+        );
+        assert!(get_test_report(&state, &handle, position).contains("Model"));
+        let definitions = transaction.goto_definition(&handle, position).unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].module.name(), handles("models").module());
+        assert_eq!(
+            transaction.find_local_references(
+                &handle,
+                position,
+                ReferenceOptions::textual_only(false)
+            ),
+            ranges
+        );
+    }
+}
+
+#[test]
+fn quoted_annotations_preserve_unicode_and_multiline_ranges() {
+    let code = r#"
+class 模型: ...
+x: """list[
+    模型
+]"""
+"#;
+    let (state, handles) = TestEnv::one("main", code).to_state();
+    let handle = handles("main");
+    let transaction = state.transaction();
+    let offset = code.rfind("模型").unwrap();
+    let position = TextSize::new(offset as u32);
+    let expected = TextRange::at(position, TextSize::new("模型".len() as u32));
+    assert_eq!(
+        transaction
+            .identifier_at(&handle, position)
+            .unwrap()
+            .identifier
+            .range,
+        expected
+    );
+    let hover = get_hover(&transaction, &handle, position, true).unwrap();
+    assert_eq!(
+        hover.range,
+        Some(Range::new(Position::new(3, 4), Position::new(3, 6)))
+    );
+    let definitions = transaction.goto_definition(&handle, position).unwrap();
+    assert_eq!(definitions.len(), 1);
+    assert_eq!(
+        transaction
+            .get_module_info(&handle)
+            .unwrap()
+            .code_at(definitions[0].range),
+        "模型"
+    );
 }

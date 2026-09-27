@@ -1430,7 +1430,17 @@ impl<'a> BindingsBuilder<'a> {
                         "Raw string literals are not allowed in type expressions".to_owned(),
                     );
                 }
-                match Ast::parse_type_literal(expr_literal, self.module_info.contents()) {
+                let literal_range = expr_literal.range();
+                let exact_ranges =
+                    self.module_info.code_at(literal.content_range()) == literal.value.as_ref();
+                let parsed = Ast::parse_type_literal(expr_literal, self.module_info.contents());
+                if let Some(annotations) = &mut self.string_annotations {
+                    annotations.push((
+                        literal_range,
+                        parsed.as_ref().ok().filter(|_| exact_ranges).cloned(),
+                    ));
+                }
+                match parsed {
                     Ok(expr) => {
                         *x = expr;
                         self.ensure_type_impl(

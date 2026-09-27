@@ -6,6 +6,7 @@
  */
 
 use std::collections::HashMap;
+use std::mem::take;
 
 use lsp_types::SemanticToken;
 use lsp_types::SemanticTokenModifier;
@@ -289,6 +290,7 @@ fn attribute_semantic_token_type(ty: Type) -> SemanticTokenType {
     }
 }
 
+#[derive(Clone)]
 pub struct SemanticTokenWithFullRange {
     pub range: TextRange,
     pub token_type: SemanticTokenType,
@@ -695,6 +697,54 @@ impl SemanticTokenBuilder {
             self.process_stmt(s, false, get_symbol_kind);
         }
         ast.visit(&mut |e| self.process_expr(e, get_type_of_attribute, get_symbol_kind));
+    }
+
+    /// Classify identifiers in quoted annotations and preserve strings around them.
+    pub fn process_string_annotations(
+        &mut self,
+        annotations: &[(TextRange, Option<Expr>)],
+        get_type_of_attribute: &dyn Fn(TextRange) -> Option<Type>,
+        get_symbol_kind: &dyn Fn(&Key) -> Option<(ModuleName, SymbolKind)>,
+    ) {
+        if annotations.is_empty() {
+            return;
+        }
+        let string_tokens = take(&mut self.tokens);
+        for (_, expr) in annotations {
+            if let Some(expr) = expr {
+                self.process_expr(expr, get_type_of_attribute, get_symbol_kind);
+            }
+        }
+        self.tokens.sort_by_key(|token| token.range.start());
+        let identifier_ranges: Vec<_> = self.tokens.iter().map(|token| token.range).collect();
+        for token in string_tokens {
+            if token.token_type != SemanticTokenType::STRING {
+                self.tokens.push(token);
+                continue;
+            }
+            let mut start = token.range.start();
+            for range in identifier_ranges
+                .iter()
+                .skip(identifier_ranges.partition_point(|range| range.end() <= token.range.start()))
+                .take_while(|range| range.start() < token.range.end())
+            {
+                if token.range.contains_range(*range) {
+                    if start < range.start() {
+                        self.tokens.push(SemanticTokenWithFullRange {
+                            range: TextRange::new(start, range.start()),
+                            ..token.clone()
+                        });
+                    }
+                    start = range.end();
+                }
+            }
+            if start < token.range.end() {
+                self.tokens.push(SemanticTokenWithFullRange {
+                    range: TextRange::new(start, token.range.end()),
+                    ..token
+                });
+            }
+        }
     }
 
     pub fn all_tokens_sorted(self) -> Vec<SemanticTokenWithFullRange> {

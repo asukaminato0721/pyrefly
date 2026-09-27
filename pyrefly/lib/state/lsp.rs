@@ -1008,6 +1008,18 @@ impl<'a> Transaction<'a> {
         handle: &Handle,
         position: TextSize,
     ) -> Option<IdentifierWithContext> {
+        if let Some(answers) = self.get_answers(handle)
+            && let Some((_, expr)) = answers
+                .bindings()
+                .string_annotations()
+                .iter()
+                .find(|(range, _)| range.contains(position))
+        {
+            return expr.as_ref().and_then(|expr| {
+                Self::identifier_from_covering_nodes(&Ast::locate_expr(expr, position))
+                    .filter(|id| id.identifier.range.contains(position))
+            });
+        }
         let mod_module = self.get_ast(handle)?;
         let covering_nodes = Ast::locate_node(&mod_module, position);
         Self::identifier_from_covering_nodes(&covering_nodes)
@@ -2682,7 +2694,32 @@ impl<'a> Transaction<'a> {
         let Some(mod_module) = self.get_ast(handle) else {
             return Err(EmptyResponseReason::AstNotFound);
         };
-        let covering_nodes = Ast::locate_node(&mod_module, position);
+        let answers = self.get_answers(handle);
+        let annotation = answers.as_ref().and_then(|answers| {
+            answers
+                .bindings()
+                .string_annotations()
+                .iter()
+                .find(|(range, _)| range.contains(position))
+        });
+        let covering_nodes = if let Some((_, expr)) = annotation {
+            let expr = expr
+                .as_ref()
+                .ok_or_else(|| EmptyResponseReason::NotAnIdentifier {
+                    found: "string annotation without source ranges".to_owned(),
+                })?;
+            let nodes = Ast::locate_expr(expr, position);
+            if !Self::identifier_from_covering_nodes(&nodes)
+                .is_some_and(|id| id.identifier.range.contains(position))
+            {
+                return Err(EmptyResponseReason::NotAnIdentifier {
+                    found: "string annotation".to_owned(),
+                });
+            }
+            nodes
+        } else {
+            Ast::locate_node(&mod_module, position)
+        };
 
         if covering_nodes
             .iter()
@@ -4302,6 +4339,15 @@ impl<'a> Transaction<'a> {
                 &definition_name,
             ));
         }
+        if let Some(answers) = self.get_answers(handle) {
+            references.retain(|reference| {
+                !answers
+                    .bindings()
+                    .string_annotations()
+                    .iter()
+                    .any(|(range, expr)| expr.is_none() && range.contains_range(*reference))
+            });
+        }
         references.sort_by_key(|range| range.start());
         references.dedup();
         Some(references)
@@ -4355,6 +4401,13 @@ impl<'a> Transaction<'a> {
             }
             let mut res = Vec::new();
             mod_module.visit(&mut |x| f(x, expected_name, &mut res));
+            if let Some(answers) = self.get_answers(handle) {
+                for (_, expr) in answers.bindings().string_annotations() {
+                    if let Some(expr) = expr {
+                        f(expr, expected_name, &mut res);
+                    }
+                }
+            }
             res
         } else {
             Vec::new()
@@ -4531,6 +4584,13 @@ impl<'a> Transaction<'a> {
                 x.recurse(&mut |x| f(x, is_valid_use, res));
             }
             mod_module.visit(&mut |x| f(x, &is_valid_use, &mut references));
+            if let Some(answers) = self.get_answers(handle) {
+                for (_, expr) in answers.bindings().string_annotations() {
+                    if let Some(expr) = expr {
+                        f(expr, &is_valid_use, &mut references);
+                    }
+                }
+            }
         }
 
         Some(references)

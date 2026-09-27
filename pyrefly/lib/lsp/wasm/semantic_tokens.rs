@@ -36,20 +36,25 @@ impl Transaction<'_> {
             builder.process_syntax_tokens(&tokens);
         }
 
-        builder.process_ast(
-            &ast,
-            &|range| self.get_type_trace(handle, range),
-            &|key: &Key| {
-                let find_preference = FindPreference {
-                    import_behavior: ImportBehavior::StopAtRenamedImports,
-                    ..Default::default()
-                };
-                self.key_to_export(handle, key, find_preference)
-                    .and_then(|(def_handle, export)| {
-                        export.symbol_kind.map(|sk| (def_handle.module(), sk))
-                    })
-            },
-        );
+        let get_symbol_kind = |key: &Key| {
+            let find_preference = FindPreference {
+                import_behavior: ImportBehavior::StopAtRenamedImports,
+                ..Default::default()
+            };
+            self.key_to_export(handle, key, find_preference)
+                .and_then(|(def_handle, export)| {
+                    export.symbol_kind.map(|sk| (def_handle.module(), sk))
+                })
+        };
+        let get_type_of_attribute = |range| self.get_type_trace(handle, range);
+        builder.process_ast(&ast, &get_type_of_attribute, &get_symbol_kind);
+        if let Some(answers) = self.get_answers(handle) {
+            builder.process_string_annotations(
+                answers.bindings().string_annotations(),
+                &get_type_of_attribute,
+                &get_symbol_kind,
+            );
+        }
 
         Some(legends.convert_tokens_into_lsp_semantic_tokens(
             &builder.all_tokens_sorted(),

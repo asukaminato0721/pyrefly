@@ -428,6 +428,14 @@ impl Ast {
         covering_nodes
     }
 
+    /// Locate nodes inside a parsed string annotation using its source-relative ranges.
+    pub fn locate_expr(expr: &Expr, position: TextSize) -> Vec<AnyNodeRef<'_>> {
+        let mut visitor = CoveringNodeVisitor::new(position);
+        visitor.visit_expr(expr);
+        visitor.covering_nodes.reverse();
+        visitor.covering_nodes
+    }
+
     /// The tightest AST node that strictly contains `target` — i.e. the parent
     /// of the node whose range is `target`, or `None` at module top level.
     pub fn parent_node(module: &ModModule, target: TextRange) -> Option<AnyNodeRef<'_>> {

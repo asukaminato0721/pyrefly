@@ -224,6 +224,9 @@ pub struct Bindings {
     unused_variables: Vec<UnusedVariable>,
     pytest_info: Option<PytestBindingInfo>,
     promote_ranges: SmallSet<TextRange>,
+    /// String annotations retained for IDE queries. `None` marks malformed strings
+    /// or decoded contents without an exact source range mapping.
+    string_annotations: Vec<(TextRange, Option<Expr>)>,
     /// Yield and yield-from indices for each lambda that contains yields,
     /// keyed by the lambda's TextRange. Populated at binding time so the
     /// solver can look up yield info without re-walking the AST.
@@ -328,6 +331,7 @@ pub struct BindingsBuilder<'a> {
     /// set by `stmts()` and consumed by namedtuple synthesis in `stmt()`.
     pub adjacent_namedtuple_defaults: Option<Vec<Expr>>,
     pub promote_ranges: SmallSet<TextRange>,
+    pub(super) string_annotations: Option<Vec<(TextRange, Option<Expr>)>>,
     pub type_checking_depth: usize,
     /// True while binding the outermost known-unreachable suite. The call that sets this flag
     /// owns resetting it after nested `stmts()` calls, suppressing duplicate diagnostics.
@@ -354,6 +358,10 @@ pub enum AwaitContext {
 }
 
 impl Bindings {
+    pub fn string_annotations(&self) -> &[(TextRange, Option<Expr>)] {
+        &self.string_annotations
+    }
+
     #[expect(dead_code)] // Useful API
     fn len(&self) -> usize {
         let mut res = 0;
@@ -397,6 +405,7 @@ impl Bindings {
             jaxtyping_scopes: JaxtypingScopes::default(),
             subsequently_initialized: SmallSet::new(),
             promote_ranges: SmallSet::new(),
+            string_annotations: Vec::new(),
         }
     }
 
@@ -691,6 +700,7 @@ impl Bindings {
             subsequently_initialized: SmallSet::new(),
             adjacent_namedtuple_defaults: None,
             promote_ranges: SmallSet::new(),
+            string_annotations: enable_trace.then(Vec::new),
             type_checking_depth: 0,
             in_unreachable_suite: false,
             pending_with_suppression: None,
@@ -816,6 +826,7 @@ impl Bindings {
             jaxtyping_scopes: builder.jaxtyping_scopes.finish(),
             subsequently_initialized: builder.subsequently_initialized,
             promote_ranges: builder.promote_ranges,
+            string_annotations: builder.string_annotations.unwrap_or_default(),
         }
     }
 
