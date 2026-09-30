@@ -7,6 +7,7 @@
 
 use std::mem;
 
+use pyrefly_python::module_name::ModuleName;
 use ruff_python_ast::name::Name;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
@@ -24,6 +25,9 @@ use crate::type_ord::TypeOrdCtx;
 use crate::type_ord::cmp_union_members;
 use crate::type_var::Restriction;
 use crate::types::Type;
+use crate::types::UnionDisplay;
+
+const PRESERVE_LARGE_ALIAS_DISPLAY_MIN_MEMBERS: usize = 3;
 
 /// Turn unions of unions into a flattened list for one union, and return the deduped list.
 ///
@@ -153,6 +157,71 @@ fn simplify_intersections(xs: &mut [Type], heap: &TypeHeap) {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LargeAliasUnion {
+    name: (ModuleName, Name),
+    members: Vec<Type>,
+}
+
+fn large_alias_union_info(xs: &[Type]) -> Option<LargeAliasUnion> {
+    let mut info: Option<LargeAliasUnion> = None;
+    for x in xs {
+        match x {
+            Type::Union(u)
+                if let Some(display) = u.display()
+                    && u.members.len() >= PRESERVE_LARGE_ALIAS_DISPLAY_MIN_MEMBERS =>
+            {
+                if info.is_some() {
+                    return None;
+                }
+                let extras: SmallSet<_> = display.extras.iter().copied().collect();
+                info = Some(LargeAliasUnion {
+                    name: display.name.clone(),
+                    members: u
+                        .members
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| !extras.contains(index))
+                        .map(|(_, member)| member.clone())
+                        .collect(),
+                });
+            }
+            _ => {}
+        }
+    }
+    info
+}
+
+/// If the final union is a strict superset of a single large alias union, keep that
+/// alias name in the display output and append only the extra members.
+fn large_alias_union_display(
+    members: &[Type],
+    alias_union: &LargeAliasUnion,
+) -> Option<UnionDisplay> {
+    let alias_members: SmallSet<_> = alias_union.members.iter().collect();
+    let final_members: SmallSet<_> = members.iter().collect();
+    if alias_members
+        .iter()
+        .any(|alias_member| !final_members.contains(alias_member))
+    {
+        return None;
+    }
+    if members.len() <= alias_members.len() {
+        return None;
+    }
+    let extras = members
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| !alias_members.contains(*member))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    if extras.is_empty() {
+        return None;
+    }
+    Some(UnionDisplay::new(alias_union.name.clone(), extras))
+}
+
 /// After literal/enum squashing, a union with more than this many members is widened to
 /// `Any` to bound type complexity.
 static MAX_UNION_MEMBERS: usize = 4096;
@@ -164,6 +233,7 @@ fn unions_internal(
     enum_members: Option<&dyn Fn(&Class) -> Option<usize>>,
     heap: &TypeHeap,
 ) -> Type {
+    let alias_union = large_alias_union_info(&xs);
     try_collapse(xs, heap).unwrap_or_else(|xs| {
         let ctx = &TypeOrdCtx::new(env);
         let mut res = flatten_and_dedup(xs, ctx, heap);
@@ -187,7 +257,16 @@ fn unions_internal(
             return heap.mk_any_implicit();
         }
         // `res` is collapsible again if `flatten_and_dedup` drops `xs` to 0 or 1 elements
-        try_collapse(res, heap).unwrap_or_else(|members| heap.mk_union(members))
+        try_collapse(res, heap).unwrap_or_else(|members| {
+            let display = alias_union
+                .as_ref()
+                .and_then(|alias_union| large_alias_union_display(&members, alias_union));
+            if let Some(display) = display {
+                heap.mk_union_with_display(members, display)
+            } else {
+                heap.mk_union(members)
+            }
+        })
     })
 }
 
@@ -799,6 +878,30 @@ mod tests {
                 assert_eq!(visits, 5 * depth + 1, "named={named}, depth={depth}");
             }
         }
+    }
+
+    #[test]
+    fn test_union_alias_keeps_all_extra_members() {
+        let env = &TestTypeEnv::new();
+        let heap = TypeHeap::new();
+        let members = (0..3).map(|i| LitInt::new(i).to_implicit_type()).collect();
+        let alias =
+            heap.mk_union_with_name(members, (ModuleName::unknown(), Name::new_static("Alias")));
+        let optional = unions(vec![alias, Type::None], env, &heap);
+        let extended = unions(vec![optional, Type::Ellipsis], env, &heap);
+        let Type::Union(extended) = extended else {
+            panic!("Expected a union");
+        };
+        let extras: Vec<_> = extended
+            .display()
+            .unwrap()
+            .extras
+            .iter()
+            .map(|index| &extended.members[*index])
+            .collect();
+        assert_eq!(extras.len(), 2);
+        assert!(extras.contains(&&Type::None));
+        assert!(extras.contains(&&Type::Ellipsis));
     }
 
     #[test]

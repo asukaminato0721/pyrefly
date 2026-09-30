@@ -108,22 +108,16 @@ fn canonicalize_int_tuples_sequence(candidate: &Type, env: &dyn TypeEnv, heap: &
                 suffix.iter().map(canonicalize_int_tuples_member).collect(),
             ))
         }
-        Type::Union(union) => {
-            let display_name = union.display_name.clone();
-            let mut normalized = unions(
-                union
-                    .members
+        Type::Union(union) => union.clone().map_members(|members| {
+            unions(
+                members
                     .iter()
                     .map(|member| canonicalize_int_tuples_sequence(member, env, heap))
                     .collect(),
                 env,
                 heap,
-            );
-            if let Type::Union(normalized_union) = &mut normalized {
-                normalized_union.display_name = display_name;
-            }
-            normalized
-        }
+            )
+        }),
         _ => candidate.clone(),
     }
 }
@@ -249,7 +243,6 @@ pub(crate) fn simplify_shape_type(ty: &mut Type) {
 
 #[cfg(test)]
 mod tests {
-    use pyrefly_types::identity::IdentityIgnored;
     use pyrefly_types::lit_int::LitInt;
     use pyrefly_types::shaped_array::IntTuple;
     use pyrefly_types::test_type_env::TestTypeEnv;
@@ -297,26 +290,20 @@ mod tests {
     #[test]
     fn canonicalizes_union_of_int_tuples_sequences() {
         let raw_shape = |n| Type::Tuple(Tuple::Concrete(vec![LitInt::new(n).to_explicit_type()]));
-        let candidate = Type::Union(Box::new(Union {
-            members: vec![
-                Type::Tuple(Tuple::Concrete(vec![raw_shape(2)])),
-                Type::Tuple(Tuple::Concrete(vec![raw_shape(3)])),
-            ],
-            display_name: IdentityIgnored(None),
-        }));
+        let candidate = Type::Union(Box::new(Union::new(vec![
+            Type::Tuple(Tuple::Concrete(vec![raw_shape(2)])),
+            Type::Tuple(Tuple::Concrete(vec![raw_shape(3)])),
+        ])));
         assert_eq!(
             canonicalize_int_tuples_sequence(&candidate, &TestTypeEnv::new(), &TypeHeap::new()),
-            Type::Union(Box::new(Union {
-                members: vec![
-                    Type::Tuple(Tuple::Concrete(vec![
-                        IntTuple::new(vec![Int::Literal(2)]).to_shape_arg_type(),
-                    ])),
-                    Type::Tuple(Tuple::Concrete(vec![
-                        IntTuple::new(vec![Int::Literal(3)]).to_shape_arg_type(),
-                    ])),
-                ],
-                display_name: IdentityIgnored(None),
-            }))
+            Type::Union(Box::new(Union::new(vec![
+                Type::Tuple(Tuple::Concrete(vec![
+                    IntTuple::new(vec![Int::Literal(2)]).to_shape_arg_type(),
+                ])),
+                Type::Tuple(Tuple::Concrete(vec![
+                    IntTuple::new(vec![Int::Literal(3)]).to_shape_arg_type(),
+                ])),
+            ])))
         );
     }
 }

@@ -1363,12 +1363,7 @@ impl Solver {
     fn simplify_mut(&self, t: &mut Type, env: &dyn TypeEnv) {
         t.transform_mut(&mut |x| {
             if let Type::Union(u) = x {
-                let mut merged = unions(mem::take(&mut u.members), env, &self.heap);
-                // Preserve union display names during simplification
-                if let Type::Union(merged_u) = &mut merged {
-                    merged_u.display_name.0 = u.display_name.0.take();
-                }
-                *x = merged;
+                *x = u.map_members(|members| unions(members, env, &self.heap));
             }
             if let Type::Intersect(y) = x {
                 *x = intersect(mem::take(&mut y.0), y.1.clone(), env, &self.heap);
@@ -4638,7 +4633,6 @@ mod tests {
     use pyrefly_types::dimension::Int;
     use pyrefly_types::dimension::canonicalize;
     use pyrefly_types::dimension::gradual_size;
-    use pyrefly_types::identity::IdentityIgnored;
     use pyrefly_types::lit_int::LitInt;
     use pyrefly_types::quantified::AnchorIndex;
     use pyrefly_types::quantified::QuantifiedAnchor;
@@ -5128,10 +5122,7 @@ mod tests {
     #[test]
     fn expand_with_bounds_does_not_simplify_non_int_types() {
         let env = &TestTypeEnv::new();
-        let union = Type::Union(Box::new(Union {
-            members: vec![Type::None, Type::None],
-            display_name: IdentityIgnored(None),
-        }));
+        let union = Type::Union(Box::new(Union::new(vec![Type::None, Type::None])));
         let (solver, var) = solver_with_answer(union.clone());
         let mut ty = Type::Var(var);
 

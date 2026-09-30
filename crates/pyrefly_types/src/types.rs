@@ -557,11 +557,7 @@ impl TArgs {
                 let mut ty = substitution.substitute_into(ty.clone());
                 ty.transform_mut(&mut |x| {
                     if let Type::Union(u) = x {
-                        let mut merged = unions(mem::take(&mut u.members), env, &heap);
-                        if let Type::Union(merged_u) = &mut merged {
-                            merged_u.display_name.0 = u.display_name.0.take();
-                        }
-                        *x = merged;
+                        *x = u.map_members(|members| unions(members, env, &heap));
                     }
                 });
                 ty
@@ -1050,11 +1046,94 @@ pub enum SuperObj {
     Class(ClassType),
 }
 
+/// Presentation metadata for a union that contains a named alias plus additional members.
+#[derive(Debug, Clone)]
+pub struct UnionDisplay {
+    pub name: (ModuleName, Name),
+    /// Indices into `Union::members` for the members displayed after the alias name.
+    pub extras: Box<[usize]>,
+}
+
+impl UnionDisplay {
+    pub fn new(name: (ModuleName, Name), extras: Box<[usize]>) -> Self {
+        Self { name, extras }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Visit, VisitMut, TypeEq, TypeOrd)]
 pub struct Union {
     pub members: Vec<Type>,
-    pub display_name: IdentityIgnored<Option<(ModuleName, Name)>>,
+    display: IdentityIgnored<Option<UnionDisplay>>,
+}
+
+impl Union {
+    pub fn new(members: Vec<Type>) -> Self {
+        Self {
+            members,
+            display: IdentityIgnored(None),
+        }
+    }
+
+    pub fn with_display(members: Vec<Type>, display: UnionDisplay) -> Self {
+        Self {
+            members,
+            display: IdentityIgnored(Some(display)),
+        }
+    }
+
+    pub fn display(&self) -> Option<&UnionDisplay> {
+        self.display.as_ref()
+    }
+
+    pub fn set_display_name(&mut self, name: (ModuleName, Name)) {
+        self.display.0 = Some(UnionDisplay::new(name, Box::new([])));
+    }
+
+    pub fn take_display(&mut self) -> Option<UnionDisplay> {
+        self.display.0.take()
+    }
+
+    pub fn set_display(&mut self, display: UnionDisplay) {
+        self.display.0 = Some(display);
+    }
+
+    /// Rebuild the union and retain its display when the alias still covers the same members.
+    pub fn map_members(&mut self, f: impl FnOnce(Vec<Type>) -> Type) -> Type {
+        let display = self.take_display();
+        let original_members = display
+            .as_ref()
+            .filter(|display| !display.extras.is_empty())
+            .map(|_| self.members.clone());
+        let mut result = f(mem::take(&mut self.members));
+        if let Type::Union(union) = &mut result
+            && let Some(mut display) = display
+        {
+            if let Some(original_members) = original_members {
+                let positions: SmallMap<_, _> = union
+                    .members
+                    .iter()
+                    .enumerate()
+                    .map(|(index, member)| (member, index))
+                    .collect();
+                if original_members.len() != union.members.len()
+                    || original_members
+                        .iter()
+                        .any(|member| !positions.contains_key(member))
+                {
+                    drop(positions);
+                    return result;
+                }
+                for index in &mut display.extras {
+                    *index = *positions
+                        .get(&original_members[*index])
+                        .expect("All original members are present in the rebuilt union");
+                }
+            }
+            union.set_display(display);
+        }
+        result
+    }
 }
 
 // Note: The fact that Literal and LiteralString are at the front is important for
@@ -2811,10 +2890,7 @@ impl Type {
 
     /// Creates a union from the provided types without simplifying
     pub fn union(members: Vec<Type>) -> Self {
-        Type::Union(Box::new(Union {
-            members,
-            display_name: IdentityIgnored(None),
-        }))
+        Type::Union(Box::new(Union::new(members)))
     }
 
     /// Returns `true` if this type is an explicit type variable — i.e., a `Quantified` or
@@ -2885,7 +2961,6 @@ mod tests {
     use crate::function::FuncMetadata;
     use crate::function::Function;
     use crate::function::FunctionKind;
-    use crate::identity::IdentityIgnored;
     use crate::lit_int::LitInt;
     use crate::literal::Lit;
     use crate::literal::LitStyle;
@@ -2912,6 +2987,7 @@ mod tests {
     use crate::types::TParams;
     use crate::types::Type;
     use crate::types::Union;
+    use crate::types::UnionDisplay;
     use crate::types::Var;
 
     fn test_quantified(module: &'static str, name: &'static str) -> Quantified {
@@ -3119,23 +3195,49 @@ mod tests {
         assert_eq!(free_quantifieds(&map), vec![q]);
     }
 
-    /// `display_name` is presentation-only, so two unions with identical members
-    /// but different names must agree across `Eq`, `Ord`, and `TypeEq`.
+    /// Union display metadata is presentation-only, so two unions with identical members
+    /// but different displays must agree across `Eq`, `Ord`, and `TypeEq`.
     #[test]
     fn test_union_display_name_ignored_by_comparisons() {
         let members = vec![Type::None, Type::LiteralString(LitStyle::Implicit)];
-        let named = Union {
-            members: members.clone(),
-            display_name: IdentityIgnored(Some((ModuleName::builtins(), Name::new_static("TA")))),
-        };
-        let anonymous = Union {
-            members,
-            display_name: IdentityIgnored(None),
-        };
+        let named = Union::with_display(
+            members.clone(),
+            UnionDisplay::new(
+                (ModuleName::builtins(), Name::new_static("TA")),
+                vec![1].into_boxed_slice(),
+            ),
+        );
+        let anonymous = Union::new(members);
 
         assert_eq!(named, anonymous);
         assert_eq!(named.cmp(&anonymous), Ordering::Equal);
         assert!(named.type_eq(&anonymous, &mut TypeEqCtx::default()));
+    }
+
+    #[test]
+    fn test_union_display_indices_follow_reordered_members() {
+        let mut union = Union::with_display(
+            vec![Type::None, Type::LiteralString(LitStyle::Implicit)],
+            UnionDisplay::new(
+                (ModuleName::unknown(), Name::new_static("Alias")),
+                vec![0].into_boxed_slice(),
+            ),
+        );
+        let reordered = union.map_members(|mut members| {
+            members.reverse();
+            Type::union(members)
+        });
+        let Type::Union(mut reordered) = reordered else {
+            panic!("Expected a union");
+        };
+        assert_eq!(reordered.display().unwrap().extras.as_ref(), &[1]);
+        assert_eq!(reordered.members[1], Type::None);
+
+        let changed = reordered.map_members(|_| Type::union(vec![Type::None, Type::Ellipsis]));
+        let Type::Union(changed) = changed else {
+            panic!("Expected a union");
+        };
+        assert!(changed.display().is_none());
     }
 
     #[test]

@@ -1082,7 +1082,6 @@ c2: Callable[[int], int] = f2  # E: `(x: C | int | str) -> C | int | str` is not
 );
 
 testcase!(
-    bug = "Union alias names are lost when additional members are merged",
     test_alias_display_repeated_composition,
     r#"
 from typing import assert_type, reveal_type
@@ -1092,8 +1091,8 @@ type Alias = int | str | bytes
 def grow(x: Alias | float, y: complex, flag: bool) -> None:
     value = [x if flag else y]
     assert_type(value, list[int | str | bytes | float | complex])
-    reveal_type(value)  # E: revealed type: list[bytes | complex | float | int | str]
-    result: list[None] = value  # E: `list[bytes | complex | float | int | str]` is not assignable to `list[None]`
+    reveal_type(value)  # E: revealed type: list[Alias | complex | float]
+    result: list[None] = value  # E: `list[Alias | complex | float]` is not assignable to `list[None]`
     "#,
 );
 
