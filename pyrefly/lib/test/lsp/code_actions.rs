@@ -4981,14 +4981,325 @@ def sink(values):
 }
 
 #[test]
-fn extract_function_rejects_return_statement() {
+fn extract_function_return_statement() {
     let code = r#"
 def sink(values):
     # EXTRACT-START
     return values[0]
     # EXTRACT-END
 "#;
+    let updated = apply_first_extract_action(code).expect("expected extract action for return");
+    assert!(updated.contains("return 'return', (values[0])"));
+    assert!(updated.contains("return extracted_value"));
+}
+
+#[test]
+fn extract_function_conditional_return() {
+    let code = r#"
+def find(items):
+    for item in items:
+        # EXTRACT-START
+        if item:
+            return item
+        # EXTRACT-END
+    return None
+"#;
+    let updated = apply_first_extract_action(code).expect("expected conditional return action");
+    let expected = r#"
+def extracted_function(item):
+    if item:
+        return 'return', (item)
+    return 'fallthrough', None
+
+def find(items):
+    for item in items:
+        # EXTRACT-START
+        extracted_control, extracted_value = extracted_function(item)
+        if extracted_control == 'return':
+            return extracted_value
+        # EXTRACT-END
+    return None
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+}
+
+#[test]
+fn extract_function_bare_and_constant_returns() {
+    for statement in ["return", "return None", "return 42", "return 1, 2"] {
+        let code = format!("def f():\n    # EXTRACT-START\n    {statement}\n    # EXTRACT-END\n");
+        let updated = apply_first_extract_action(&code).expect("expected return action");
+        assert!(updated.contains("extracted_control, extracted_value = extracted_function()"));
+        mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+    }
+}
+
+#[test]
+fn extract_function_mixed_exits_with_output() {
+    let code = r#"
+def process(items):
+    total = 0
+    for item in items:
+        # EXTRACT-START
+        total += item
+        if item < 0:
+            continue
+        if item == 0:
+            break
+        if total > 10:
+            return total
+        # EXTRACT-END
+        print(total)
+    return total
+"#;
+    let updated = apply_first_extract_action(code).expect("expected mixed control flow action");
+    let expected = r#"
+def extracted_function(total, item):
+    total += item
+    if item < 0:
+        return 'continue', None, total
+    if item == 0:
+        return 'break', None, total
+    if total > 10:
+        return 'return', (total), total
+    return 'fallthrough', None, total
+
+def process(items):
+    total = 0
+    for item in items:
+        # EXTRACT-START
+        extracted_control, extracted_value, total = extracted_function(total, item)
+        if extracted_control == 'return':
+            return extracted_value
+        if extracted_control == 'break':
+            break
+        if extracted_control == 'continue':
+            continue
+        # EXTRACT-END
+        print(total)
+    return total
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_method_control_flow() {
+    let code = r#"
+class Finder:
+    def find(this, items):
+        for item in items:
+            # EXTRACT-START
+            if item:
+                return item
+            # EXTRACT-END
+        return None
+"#;
+    let (info, actions, _) = compute_extract_actions(code);
+    assert_eq!(actions.len(), 2);
+    let updated = apply_refactor_edits_for_module(&info, &actions[1]);
+    let expected = r#"
+class Finder:
+    def extracted_method(this, item):
+        if item:
+            return 'return', (item)
+        return 'fallthrough', None
+
+    def find(this, items):
+        for item in items:
+            # EXTRACT-START
+            extracted_control, extracted_value = this.extracted_method(item)
+            if extracted_control == 'return':
+                return extracted_value
+            # EXTRACT-END
+        return None
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_loop_local_jumps() {
+    let code = r#"
+def process(items):
+    # EXTRACT-START
+    for item in items:
+        if item < 0:
+            continue
+        while item:
+            break
+        if item == 0:
+            break
+    # EXTRACT-END
+"#;
+    let updated = apply_first_extract_action(code).expect("expected loop extraction");
+    assert!(!updated.contains("extracted_control"));
+    assert_eq!(updated.matches("break").count(), 2);
+    assert_eq!(updated.matches("continue").count(), 1);
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_loop_else_targets_outer_loop() {
+    let code = r#"
+def process(items):
+    for item in items:
+        # EXTRACT-START
+        for other in items:
+            if other == item:
+                break
+        else:
+            continue
+        # EXTRACT-END
+        print(item)
+"#;
+    let updated = apply_first_extract_action(code).expect("expected loop else extraction");
+    assert!(updated.contains("            break\n"));
+    assert!(updated.contains("return 'continue', None"));
+    assert!(!updated.contains("return 'break'"));
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_control_flow_fresh_names() {
+    let code = r#"
+def process(extracted_control, extracted_value, extracted_function):
+    # EXTRACT-START
+    if extracted_control:
+        return extracted_value + extracted_function
+    # EXTRACT-END
+"#;
+    let updated = apply_first_extract_action(code).expect("expected extraction with fresh names");
+    assert!(updated.contains("extracted_control_2, extracted_value_2 = extracted_function_2("));
+    assert!(updated.contains("return extracted_value_2"));
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_control_flow_loop_carried_output() {
+    let code = r#"
+def process():
+    count = 0
+    while count < 3:
+        # EXTRACT-START
+        count += 1
+        continue
+        # EXTRACT-END
+"#;
+    let updated = apply_first_extract_action(code).expect("expected loop carried output");
+    assert!(updated.contains("return 'continue', None, count"));
+    assert!(
+        updated.contains("extracted_control, extracted_value, count = extracted_function(count)")
+    );
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_control_flow_initialized_output() {
+    let code = r#"
+def process(stop):
+    while True:
+        # EXTRACT-START
+        value = 42
+        if stop:
+            break
+        # EXTRACT-END
+        print(value)
+    return value
+"#;
+    let updated = apply_first_extract_action(code).expect("expected initialized output");
+    assert!(updated.contains("return 'break', None, value"));
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_control_flow_rejects_unbound_output() {
+    let code = r#"
+def process(stop):
+    # EXTRACT-START
+    if stop:
+        return
+    value = 42
+    # EXTRACT-END
+    print(value)
+"#;
     assert_no_extract_action(code);
+}
+
+#[test]
+fn extract_function_control_flow_rejects_finally_output() {
+    let code = r#"
+def process(value):
+    while True:
+        # EXTRACT-START
+        try:
+            value += 1
+            break
+        finally:
+            value += 1
+        # EXTRACT-END
+    return value
+"#;
+    assert_no_extract_action(code);
+}
+
+#[test]
+fn extract_function_return_with_finally() {
+    let code = r#"
+def process(value):
+    # EXTRACT-START
+    try:
+        return value
+    finally:
+        print("cleanup")
+    # EXTRACT-END
+"#;
+    let updated = apply_first_extract_action(code).expect("expected return with finally");
+    assert!(updated.contains("return 'return', (value)\n    finally:"));
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+}
+
+#[test]
+fn extract_function_bare_loop_jumps() {
+    for keyword in ["break", "continue"] {
+        let code = format!(
+            "def f():\n    while True:\n        # EXTRACT-START\n        {keyword}\n        # EXTRACT-END\n"
+        );
+        let updated = apply_first_extract_action(&code).expect("expected loop jump extraction");
+        assert!(updated.contains(&format!("return '{keyword}', None")));
+        assert!(updated.contains("extracted_control, extracted_value = extracted_function()"));
+        mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
+    }
+}
+
+#[test]
+fn extract_function_control_flow_rejects_yield_and_await() {
+    for code in [
+        "def f():\n    # EXTRACT-START\n    yield 1\n    return\n    # EXTRACT-END\n",
+        "async def f(g):\n    # EXTRACT-START\n    return await g()\n    # EXTRACT-END\n",
+        "async def f(items):\n    # EXTRACT-START\n    async for item in items:\n        return item\n    # EXTRACT-END\n",
+        "async def f(manager):\n    # EXTRACT-START\n    async with manager:\n        return 1\n    # EXTRACT-END\n",
+    ] {
+        assert_no_extract_action(code);
+    }
+}
+
+#[test]
+fn extract_function_exhaustive_returns() {
+    let code = r#"
+def pick(value):
+    # EXTRACT-START
+    if value:
+        return (
+            value,
+            value + 1,
+        )
+    else:
+        return
+    # EXTRACT-END
+"#;
+    let updated = apply_first_extract_action(code).expect("expected exhaustive return extraction");
+    assert!(!updated.contains("fallthrough"));
+    mk_multi_file_state_assert_no_errors(&[("main", &updated)], Require::Everything);
 }
 
 #[test]

@@ -6,12 +6,14 @@
  */
 
 use std::collections::HashSet;
+use std::slice;
 
 use dupe::Dupe;
 use lsp_types::CodeActionKind;
 use pyrefly_build::handle::Handle;
 use pyrefly_python::docstring::dedent_block_preserving_layout;
 use pyrefly_util::visit::Visit;
+use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Expr;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::ModModule;
@@ -19,6 +21,8 @@ use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::visitor::Visitor;
+use ruff_python_ast::visitor::walk_expr;
+use ruff_python_ast::visitor::walk_stmt;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -48,24 +52,20 @@ pub(crate) fn extract_function_code_actions(
     let module_len = TextSize::try_from(module_info.contents().len()).unwrap_or(TextSize::new(0));
     let module_stmt_range =
         find_enclosing_module_statement_range(ast.as_ref(), selection, module_len);
-    if selection_contains_disallowed_statements(ast.as_ref(), selection) {
-        return None;
-    }
+    let control_flow = SelectionControlFlow::collect(ast.as_ref(), selection)?;
     let (load_refs, store_refs) = collect_identifier_refs(ast.as_ref(), selection);
-    if load_refs.is_empty() && store_refs.is_empty() {
+    if load_refs.is_empty() && store_refs.is_empty() && control_flow.exits.is_empty() {
         return None;
     }
-    let post_loads = collect_post_selection_loads(ast.as_ref(), module_stmt_range, selection.end());
+    let post_loads = collect_post_selection_loads(
+        ast.as_ref(),
+        module_stmt_range,
+        selection,
+        &control_flow.enclosing_loops,
+    );
     let block_indent = detect_block_indent(selection_text);
-    let mut dedented_body = dedent_block_preserving_layout(selection_text)?;
-    if dedented_body.ends_with('\n') {
-        dedented_body.pop();
-        if dedented_body.ends_with('\r') {
-            dedented_body.pop();
-        }
-    }
 
-    let function_helper_name = generate_helper_name(module_source, "extracted_function");
+    let function_helper_name = generate_name(module_source, "extracted_function");
     let mut params = Vec::new();
     let mut seen_params = HashSet::new();
     for ident in load_refs {
@@ -112,10 +112,84 @@ pub(crate) fn extract_function_code_actions(
         returns.push(ident.name.clone());
     }
 
-    let helper_text =
-        build_helper_text(&function_helper_name, &params, &returns, &dedented_body, "");
+    // Escaping exits carry their kind, return value, and live outputs back to the
+    // caller. The caller restores the outputs before performing the exit.
+    let mut body = selection_text.to_owned();
+    let mut helper_returns = returns.clone();
+    let mut call_returns = returns.clone();
+    let mut dispatch = String::new();
+    if let Some((first_exit, _)) = control_flow.exits.first() {
+        // Every output must exist at each exit. Parameters and unconditional
+        // assignments before the first exit provide that guarantee.
+        let mut bound: HashSet<String> = params.iter().cloned().collect();
+        for (range, name) in &control_flow.assignments {
+            if range.end() <= first_exit.start() {
+                bound.insert(name.clone());
+            }
+        }
+        if !returns.is_empty()
+            && (control_flow.has_finally || returns.iter().any(|name| !bound.contains(name)))
+        {
+            // A finally block can change outputs after a return tuple is evaluated.
+            return None;
+        }
+        let control_name = generate_name(module_source, "extracted_control");
+        let value_name = generate_name(module_source, "extracted_value");
+        helper_returns.splice(0..0, ["'fallthrough'".to_owned(), "None".to_owned()]);
+        if control_flow.always_exits {
+            helper_returns.clear();
+        }
+        call_returns.splice(0..0, [control_name.clone(), value_name.clone()]);
+        // Replace from the end so that all ranges still refer to the original source.
+        for (range, exit) in control_flow.exits.iter().rev() {
+            let value = match exit {
+                SelectionExit::Return(Some(value)) => {
+                    format!("({})", module_info.code_at(*value))
+                }
+                _ => "None".to_owned(),
+            };
+            let mut values = vec![format!("'{}'", exit.keyword()), value];
+            values.extend(returns.iter().cloned());
+            body.replace_range(
+                (range.start() - selection.start()).to_usize()
+                    ..(range.end() - selection.start()).to_usize(),
+                &format!("return {}", values.join(", ")),
+            );
+        }
+        for keyword in ["return", "break", "continue"] {
+            if control_flow
+                .exits
+                .iter()
+                .any(|(_, exit)| exit.keyword() == keyword)
+            {
+                let statement = if keyword == "return" {
+                    format!("return {value_name}")
+                } else {
+                    keyword.to_owned()
+                };
+                dispatch.push_str(&format!(
+                    "{block_indent}if {control_name} == '{keyword}':\n{block_indent}{HELPER_INDENT}{statement}\n"
+                ));
+            }
+        }
+    }
+    let mut dedented_body = dedent_block_preserving_layout(&body)?;
+    if dedented_body.ends_with('\n') {
+        dedented_body.pop();
+        if dedented_body.ends_with('\r') {
+            dedented_body.pop();
+        }
+    }
+    let helper_text = build_helper_text(
+        &function_helper_name,
+        &params,
+        &helper_returns,
+        &dedented_body,
+        "",
+    );
     let call_expr = build_call_expr(&function_helper_name, None, &params);
-    let replacement_line = build_call_replacement(&block_indent, &call_expr, &returns);
+    let replacement_line =
+        build_call_replacement(&block_indent, &call_expr, &call_returns) + &dispatch;
     let helper_edit = (
         module_info.dupe(),
         TextRange::at(module_stmt_range.start(), TextSize::new(0)),
@@ -128,7 +202,7 @@ pub(crate) fn extract_function_code_actions(
         kind: CodeActionKind::RefactorExtract,
     }];
     if let Some(method_ctx) = find_enclosing_method(ast.as_ref(), selection, module_source) {
-        let method_helper_name = generate_helper_name(module_source, "extracted_method");
+        let method_helper_name = generate_name(module_source, "extracted_method");
         let mut signature_params = Vec::new();
         signature_params.push(method_ctx.info.receiver_name.clone());
         let method_params = filter_params_excluding(&params, &method_ctx.info.receiver_name);
@@ -136,7 +210,7 @@ pub(crate) fn extract_function_code_actions(
         let method_helper_text = build_helper_text(
             &method_helper_name,
             &signature_params,
-            &returns,
+            &helper_returns,
             &dedented_body,
             &method_ctx.method_indent,
         );
@@ -145,7 +219,8 @@ pub(crate) fn extract_function_code_actions(
             Some(&method_ctx.info.receiver_name),
             &method_params,
         );
-        let method_replacement = build_call_replacement(&block_indent, &method_call_expr, &returns);
+        let method_replacement =
+            build_call_replacement(&block_indent, &method_call_expr, &call_returns) + &dispatch;
         let method_helper_edit = (
             module_info.dupe(),
             TextRange::at(method_ctx.insert_position, TextSize::new(0)),
@@ -185,7 +260,7 @@ fn collect_identifier_refs(
         stores: Vec<IdentifierRef>,
     }
 
-    impl<'a> ruff_python_ast::visitor::Visitor<'a> for IdentifierCollector {
+    impl<'a> Visitor<'a> for IdentifierCollector {
         fn visit_expr(&mut self, expr: &'a Expr) {
             if self.selection.contains_range(expr.range())
                 && let Expr::Name(name) = expr
@@ -201,7 +276,7 @@ fn collect_identifier_refs(
                     ExprContext::Del | ExprContext::Invalid => {}
                 }
             }
-            ruff_python_ast::visitor::walk_expr(self, expr);
+            walk_expr(self, expr);
         }
 
         fn visit_stmt(&mut self, stmt: &'a Stmt) {
@@ -215,7 +290,7 @@ fn collect_identifier_refs(
                     synthetic_load: true,
                 });
             }
-            ruff_python_ast::visitor::walk_stmt(self, stmt);
+            walk_stmt(self, stmt);
         }
     }
 
@@ -242,36 +317,165 @@ struct MethodContext {
     method_indent: String,
 }
 
-fn selection_contains_disallowed_statements(ast: &ModModule, selection: TextRange) -> bool {
-    fn visit_stmt(stmt: &Stmt, selection: TextRange, found: &mut bool) {
-        if *found || stmt.range().intersect(selection).is_none() {
+enum SelectionExit {
+    Return(Option<TextRange>),
+    Break,
+    Continue,
+}
+
+impl SelectionExit {
+    fn keyword(&self) -> &'static str {
+        match self {
+            Self::Return(_) => "return",
+            Self::Break => "break",
+            Self::Continue => "continue",
+        }
+    }
+}
+
+#[derive(Default)]
+struct SelectionControlFlow {
+    exits: Vec<(TextRange, SelectionExit)>,
+    enclosing_loops: Vec<TextRange>,
+    assignments: Vec<(TextRange, String)>,
+    has_finally: bool,
+    always_exits: bool,
+    disallowed: bool,
+}
+
+impl SelectionControlFlow {
+    fn collect(ast: &ModModule, selection: TextRange) -> Option<Self> {
+        let mut result = Self::default();
+        for stmt in &ast.body {
+            result.visit_stmt(stmt, selection, 0, false);
+        }
+        result.exits.sort_by_key(|(range, _)| range.start());
+        if !result.exits.is_empty() {
+            fn has_suspension(expr: &Expr) -> bool {
+                if matches!(expr, Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_)) {
+                    return true;
+                }
+                let mut found = false;
+                expr.recurse(&mut |child| found |= has_suspension(child));
+                found
+            }
+            ast.visit(&mut |expr: &Expr| {
+                if selection.contains_range(expr.range()) {
+                    result.disallowed |= has_suspension(expr);
+                }
+            });
+        }
+        if result.disallowed {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    /// Only jumps targeting a loop outside the selection need a caller-side jump.
+    fn visit_stmt(
+        &mut self,
+        stmt: &Stmt,
+        selection: TextRange,
+        loop_depth: usize,
+        inside_selection: bool,
+    ) {
+        if self.disallowed || stmt.range().intersect(selection).is_none() {
             return;
         }
-        if selection.contains_range(stmt.range()) {
+        let selected = selection.contains_range(stmt.range());
+        if selected && !inside_selection {
+            self.always_exits |= statements_always_exit(slice::from_ref(stmt));
+        }
+        if selected {
             match stmt {
-                Stmt::Return(_)
-                | Stmt::Break(_)
-                | Stmt::Continue(_)
-                | Stmt::Raise(_)
-                | Stmt::FunctionDef(_)
-                | Stmt::ClassDef(_) => {
-                    *found = true;
+                Stmt::Return(ret) => self.exits.push((
+                    stmt.range(),
+                    SelectionExit::Return(ret.value.as_ref().map(|value| value.range())),
+                )),
+                Stmt::Break(_) if loop_depth == 0 => {
+                    self.exits.push((stmt.range(), SelectionExit::Break));
+                }
+                Stmt::Continue(_) if loop_depth == 0 => {
+                    self.exits.push((stmt.range(), SelectionExit::Continue));
+                }
+                Stmt::Raise(_) | Stmt::FunctionDef(_) | Stmt::ClassDef(_) | Stmt::Delete(_) => {
+                    self.disallowed = true;
                     return;
+                }
+                Stmt::For(loop_stmt) if loop_stmt.is_async => self.disallowed = true,
+                Stmt::With(block) if block.is_async => self.disallowed = true,
+                Stmt::Try(block) if !block.finalbody.is_empty() => self.has_finally = true,
+                Stmt::Assign(assign) if !inside_selection => {
+                    for target in &assign.targets {
+                        if let Expr::Name(name) = target {
+                            self.assignments.push((stmt.range(), name.id.to_string()));
+                        }
+                    }
+                }
+                Stmt::AnnAssign(assign) if !inside_selection && assign.value.is_some() => {
+                    if let Expr::Name(name) = assign.target.as_ref() {
+                        self.assignments.push((stmt.range(), name.id.to_string()));
+                    }
                 }
                 _ => {}
             }
         }
-        stmt.recurse(&mut |child| visit_stmt(child, selection, found));
-    }
-
-    let mut found = false;
-    for stmt in &ast.body {
-        visit_stmt(stmt, selection, &mut found);
-        if found {
-            break;
+        let loop_bodies = match stmt {
+            Stmt::For(loop_stmt) => Some((&loop_stmt.body, &loop_stmt.orelse)),
+            Stmt::While(loop_stmt) => Some((&loop_stmt.body, &loop_stmt.orelse)),
+            _ => None,
+        };
+        if let Some((body, orelse)) = loop_bodies {
+            if !selected {
+                self.enclosing_loops.push(stmt.range());
+            }
+            for child in body {
+                self.visit_stmt(
+                    child,
+                    selection,
+                    loop_depth + usize::from(selected),
+                    selected,
+                );
+            }
+            // A loop's else suite is outside that loop's break/continue target.
+            for child in orelse {
+                self.visit_stmt(child, selection, loop_depth, selected);
+            }
+        } else {
+            stmt.recurse(&mut |child| self.visit_stmt(child, selection, loop_depth, selected));
         }
     }
-    found
+}
+
+/// Recognizes unconditional exits without assuming that a loop executes or a
+/// context manager propagates exceptions from its body.
+fn statements_always_exit(body: &[Stmt]) -> bool {
+    body.last().is_some_and(|stmt| match stmt {
+        Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue(_) => true,
+        Stmt::If(branch) => {
+            statements_always_exit(&branch.body)
+                && branch
+                    .elif_else_clauses
+                    .last()
+                    .is_some_and(|clause| clause.test.is_none())
+                && branch
+                    .elif_else_clauses
+                    .iter()
+                    .all(|clause| statements_always_exit(&clause.body))
+        }
+        Stmt::Try(block) => {
+            statements_always_exit(&block.finalbody)
+                || (statements_always_exit(&block.body)
+                    && block
+                        .handlers
+                        .iter()
+                        .all(|ExceptHandler::ExceptHandler(handler)| {
+                            statements_always_exit(&handler.body)
+                        }))
+        }
+        _ => false,
+    })
 }
 
 fn find_enclosing_module_statement_range(
@@ -290,19 +494,38 @@ fn find_enclosing_module_statement_range(
 fn collect_post_selection_loads(
     ast: &ModModule,
     module_stmt_range: TextRange,
-    selection_end: TextSize,
+    selection: TextRange,
+    enclosing_loops: &[TextRange],
 ) -> HashSet<String> {
-    let mut loads = HashSet::new();
-    ast.visit(&mut |expr: &Expr| {
-        if let Expr::Name(name) = expr
-            && matches!(name.ctx, ExprContext::Load)
-            && module_stmt_range.contains_range(name.range)
-            && name.range.start() > selection_end
-        {
-            loads.insert(name.id.to_string());
+    struct LoadCollector<'a> {
+        module_stmt_range: TextRange,
+        selection: TextRange,
+        enclosing_loops: &'a [TextRange],
+        loads: HashSet<String>,
+    }
+    impl<'a> Visitor<'a> for LoadCollector<'_> {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if let Expr::Name(name) = expr
+                && matches!(name.ctx, ExprContext::Load)
+                && self.module_stmt_range.contains_range(name.range)
+                && !self.selection.contains_range(name.range)
+                && (name.range.start() >= self.selection.end()
+                    // An enclosing loop can read the output on the next iteration.
+                    || self.enclosing_loops.iter().any(|range| range.contains_range(name.range)))
+            {
+                self.loads.insert(name.id.to_string());
+            }
+            walk_expr(self, expr);
         }
-    });
-    loads
+    }
+    let mut collector = LoadCollector {
+        module_stmt_range,
+        selection,
+        enclosing_loops,
+        loads: HashSet::new(),
+    };
+    collector.visit_body(&ast.body);
+    collector.loads
 }
 
 fn find_enclosing_method(
@@ -445,18 +668,13 @@ fn prefix_lines_with(block: &str, indent: &str) -> String {
     result
 }
 
-fn generate_helper_name(source: &str, prefix: &str) -> String {
-    let mut counter = 1;
-    loop {
-        let candidate = if counter == 1 {
-            prefix.to_owned()
-        } else {
-            format!("{prefix}_{counter}")
-        };
-        let needle = format!("def {candidate}(");
-        if !source.contains(&needle) {
-            return candidate;
-        }
+/// Generated names must not shadow any existing reference or binding.
+fn generate_name(source: &str, prefix: &str) -> String {
+    let mut candidate = prefix.to_owned();
+    let mut counter = 2;
+    while source.contains(&candidate) {
+        candidate = format!("{prefix}_{counter}");
         counter += 1;
     }
+    candidate
 }
