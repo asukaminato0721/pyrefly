@@ -6,6 +6,7 @@
  */
 use std::collections::HashMap;
 use std::fs;
+use std::slice::from_ref;
 
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
@@ -3803,9 +3804,7 @@ def foo():
     assert_eq!(expected_b.trim(), updated_b.trim());
 }
 
-// Known bug: Unopened sibling files are not offered as move destinations.
 #[test]
-#[should_panic(expected = "expected an action for the unopened sibling")]
 fn move_module_member_to_unopened_sibling() {
     let temp = tempfile::tempdir().unwrap();
     let source = "def foo():\n    return 1\n";
@@ -3814,6 +3813,8 @@ fn move_module_member_to_unopened_sibling() {
     let target_path = temp.path().join("b.py");
     fs::write(&source_path, source).unwrap();
     fs::write(&target_path, target).unwrap();
+    fs::write(temp.path().join("a.pyi"), "def foo() -> int: ...\n").unwrap();
+    fs::write(temp.path().join("notes.ipynb"), "{}").unwrap();
 
     let mut env = TestEnv::new();
     env.add_real_path("a", source_path);
@@ -3845,6 +3846,82 @@ fn move_module_member_to_unopened_sibling() {
             &actions[0].edits,
         ),
         "from b import foo\n"
+    );
+}
+
+#[test]
+fn move_module_member_to_sibling_uses_unsaved_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("a.py");
+    let target_path = temp.path().join("b.py");
+    fs::write(&source_path, "def foo():\n    return 1\n").unwrap();
+    fs::write(&target_path, "on_disk = 0\n").unwrap();
+
+    let mut env = TestEnv::new();
+    env.add_real_path("a", source_path);
+    env.add_with_path(
+        "b",
+        target_path.to_str().unwrap(),
+        "unsaved = 1\nextra = 2\n",
+    );
+    let (state, handle_for_module) = env.to_state();
+    let transaction = state.transaction();
+    let actions = transaction
+        .move_module_member_code_actions(
+            &handle_for_module("a"),
+            TextRange::empty(TextSize::new(4)),
+            ImportFormat::Absolute,
+        )
+        .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].title, "Move `foo` to `b`");
+    assert_eq!(
+        apply_refactor_edits_for_module(
+            &transaction
+                .get_module_info(&handle_for_module("b"))
+                .unwrap(),
+            &actions[0].edits,
+        ),
+        "unsaved = 1\nextra = 2\ndef foo():\n    return 1\n"
+    );
+}
+
+#[test]
+fn move_module_member_to_indexed_sibling() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("a.py");
+    let target_path = temp.path().join("b.py");
+    fs::write(&source_path, "def foo():\n    return 1\n").unwrap();
+    fs::write(&target_path, "existing = 42\n").unwrap();
+    let mut env = TestEnv::new();
+    env.add_real_path("a", source_path);
+    env.add_real_path("b", target_path);
+    let (state, handle_for_module) = env
+        .with_default_require_level(Require::Indexing)
+        .with_run_require(Require::Indexing)
+        .to_state();
+    let handle = handle_for_module("a");
+    let mut transaction = state.new_committable_transaction(Require::Indexing, None);
+    transaction
+        .as_mut()
+        .run(from_ref(&handle), Require::Everything, None);
+    state.commit_transaction(transaction, None);
+
+    let transaction = state.transaction();
+    let target_handle = handle_for_module("b");
+    assert!(transaction.get_ast(&target_handle).is_none());
+    let target_info = transaction.get_module_info(&target_handle).unwrap();
+    let actions = transaction
+        .move_module_member_code_actions(
+            &handle,
+            TextRange::empty(TextSize::new(4)),
+            ImportFormat::Absolute,
+        )
+        .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        apply_refactor_edits_for_module(&target_info, &actions[0].edits),
+        "existing = 42\ndef foo():\n    return 1\n"
     );
 }
 

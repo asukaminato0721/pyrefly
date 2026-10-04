@@ -6,6 +6,8 @@
  */
 
 use std::collections::HashSet;
+use std::fs;
+use std::iter::once;
 use std::sync::Arc;
 
 use dupe::Dupe;
@@ -800,49 +802,61 @@ fn sibling_module_targets(
     transaction: &Transaction<'_>,
     handle: &Handle,
     module_info: &Module,
-) -> Option<Vec<(Handle, Module, std::sync::Arc<ModModule>)>> {
-    let current_module = handle.module();
-    let current_components = current_module.components();
-    let parent_len = current_components.len().saturating_sub(1);
-    let parent_prefix = &current_components[..parent_len];
+) -> Option<Vec<(Handle, Module, Arc<ModModule>)>> {
+    let source_path = module_info.path().as_path();
+    let directory = source_path.parent()?;
+    let mut candidates = transaction.handles();
+    // Unopened files need not be indexed or imported to be move destinations.
+    if let Some(root) = module_info.path().root_of(handle.module())
+        && let Ok(entries) = fs::read_dir(directory)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("py" | "pyi")
+            ) && path.is_file()
+                && let Some(name) = ModuleName::from_path(&path, once(&root), &[])
+            {
+                candidates.push(Handle::new(
+                    name,
+                    ModulePath::filesystem(path),
+                    handle.sys_info().dupe(),
+                ));
+            }
+        }
+    }
+    // Prefer open buffers so insertion ranges reflect unsaved edits.
+    candidates.sort_by_key(|candidate| !candidate.path().is_memory());
+    let mut seen = HashSet::new();
     let mut targets = Vec::new();
-
-    for module_name in transaction.modules() {
-        if module_name == current_module || module_name.as_str() == "builtins" {
-            continue;
-        }
-        let components = module_name.components();
-        let is_sibling = if parent_len == 0 {
-            components.len() == 1
-        } else {
-            components.len() == parent_len + 1 && &components[..parent_len] == parent_prefix
-        };
-        let is_parent_module =
-            parent_len > 0 && components.len() == parent_len && components == parent_prefix;
-        if !is_sibling && !is_parent_module {
-            continue;
-        }
-        let Some(target_handle) = transaction
-            .import_handle(handle, module_name, None)
-            .finding()
-        else {
-            continue;
-        };
-        let Some(target_info) = transaction.get_module_info(&target_handle) else {
-            continue;
-        };
+    for target_handle in candidates {
+        let target_path = target_handle.path().as_path();
         if !matches!(
-            target_info.path().details(),
+            target_handle.path().details(),
             ModulePathDetails::FileSystem(_) | ModulePathDetails::Memory(_)
-        ) {
+        ) || target_handle.module() == handle.module()
+            || target_path == source_path
+            || target_path.parent() != Some(directory)
+            || !seen.insert(target_path.to_owned())
+        {
             continue;
         }
-        if target_info.path() == module_info.path() {
-            continue;
-        }
-        let Some(target_ast) = transaction.get_ast(&target_handle) else {
+        let target_info = transaction.get_module_info(&target_handle).or_else(|| {
+            if target_handle.path().is_memory() {
+                return None;
+            }
+            let contents = fs::read_to_string(target_path).ok()?;
+            Some(Module::new(
+                target_handle.module(),
+                target_handle.path().dupe(),
+                Arc::new(contents),
+            ))
+        });
+        let Some(target_info) = target_info else {
             continue;
         };
+        let target_ast = transaction.get_ast_or_parse_module(&target_handle, &target_info);
         targets.push((target_handle, target_info, target_ast));
     }
     if targets.is_empty() {
