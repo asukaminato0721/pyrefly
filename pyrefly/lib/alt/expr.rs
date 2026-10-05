@@ -311,6 +311,7 @@ impl<'a> HintCoercion<'a> {
 
 #[derive(Debug, Clone)]
 enum ConditionRedundantReason {
+    None,
     /// The boolean indicates whether it's equivalent to True
     IntLiteral(bool),
     StrLiteral(bool),
@@ -326,6 +327,7 @@ enum ConditionRedundantReason {
 impl ConditionRedundantReason {
     fn equivalent_boolean(&self) -> Option<bool> {
         match self {
+            ConditionRedundantReason::None => Some(false),
             ConditionRedundantReason::Function(..)
             | ConditionRedundantReason::Class(..)
             | ConditionRedundantReason::InstanceAlwaysTruthy(..) => Some(true),
@@ -338,6 +340,7 @@ impl ConditionRedundantReason {
 
     fn description(&self) -> String {
         match self {
+            ConditionRedundantReason::None => "`None` used as condition".to_owned(),
             ConditionRedundantReason::IntLiteral(..) => {
                 "Integer literal used as condition".to_owned()
             }
@@ -5391,6 +5394,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Return the reason why we think `ty` is suspicious to use as a branching condition
     fn get_condition_redundant_reason(&self, ty: &Type) -> Option<ConditionRedundantReason> {
         match ty {
+            Type::None => Some(ConditionRedundantReason::None),
             Type::Literal(lit) if let Lit::Bool(_) = lit.value => None,
             Type::Literal(lit) if let Lit::Int(i) = &lit.value => {
                 Some(ConditionRedundantReason::IntLiteral(i.as_bool()))
