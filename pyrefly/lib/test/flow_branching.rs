@@ -1459,6 +1459,32 @@ while Foo:  # E: Class name `Foo` used as condition
 );
 
 testcase!(
+    test_redundant_condition_none,
+    r#"
+def narrowed(x: str | None) -> None:
+    if x is None:
+        if x:  # E: `None` used as condition. It's equivalent to `False`
+            print("unreachable")
+        if not x:
+            pass
+
+def conditions(x: None) -> None:
+    if x:  # E: `None` used as condition. It's equivalent to `False`
+        pass  # E: This code is unreachable
+    while x:  # E: `None` used as condition. It's equivalent to `False`
+        pass
+    [i for i in range(3) if x]  # E: `None` used as condition. It's equivalent to `False`
+    value = 1 if x else 0  # E: `None` used as condition. It's equivalent to `False`
+
+def optional(x: str | None) -> None:
+    if x:
+        pass
+    if not x:
+        pass
+"#,
+);
+
+testcase!(
     test_redundant_condition_int,
     r#"
 if 42:  # E: Integer literal used as condition. It's equivalent to `True`
