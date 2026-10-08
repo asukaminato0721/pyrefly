@@ -18,8 +18,39 @@ class Reporter(models.Model):
     name = models.CharField(max_length=100)
 
 reporter = Reporter()
-assert_type(reporter.id, int)
-assert_type(reporter.pk, int)
+assert_type(reporter.id, int | None)
+assert_type(reporter.pk, int | None)
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5153
+django_testcase!(
+    test_unsaved_primary_key_narrowing,
+    r#"
+from typing import Self, assert_type
+from django.db import models
+
+class Alert(models.Model):
+    secret_key = models.CharField(max_length=40)
+
+    def save(self, *args, **kwargs):
+        if self.pk is None:
+            assert_type(self, Self)
+            self.secret_key = "new token"
+        else:
+            assert_type(self.pk, int)
+        super().save(*args, **kwargs)
+
+    def check_id(self):
+        if self.id is None:
+            assert_type(self, Self)
+            self.secret_key = "new token"
+        else:
+            assert_type(self.id, int)
+
+def reset(alert: Alert):
+    alert.pk = None
+    alert.id = None
 "#,
 );
 
@@ -54,12 +85,12 @@ class B(Article):
 article = Article()
 article.id # E: Object of class `Article` has no attribute `id`
 assert_type(article.uuid, UUID)
-assert_type(article.pk, UUID)
+assert_type(article.pk, UUID | None)
 
 article2 = B()
 article2.id # E: Object of class `B` has no attribute `id`
 assert_type(article2.uuid, UUID)
-assert_type(article2.pk, UUID)
+assert_type(article2.pk, UUID | None)
 "#,
 );
 
@@ -79,7 +110,7 @@ class StrIdChildModel(StrIdMixin):
 
 child = StrIdChildModel()
 assert_type(child.id, str)
-assert_type(child.pk, str)
+assert_type(child.pk, str | None)
 "#,
 );
 
@@ -104,10 +135,10 @@ class Child(Y):
 
 assert_type(Y().x, X)
 assert_type(Y().x_id, int)
-assert_type(Y().pk, int)
+assert_type(Y().pk, int | None)
 assert_type(Z().y, Y)
 assert_type(Z().y_id, int)
-assert_type(Child().pk, int)
+assert_type(Child().pk, int | None)
 Y().id  # E: Object of class `Y` has no attribute `id`
 "#,
 );
@@ -131,10 +162,10 @@ class Z(models.Model):
 class Reference(models.Model):
     z = models.ForeignKey(Z, models.DO_NOTHING, null=True)
 
-assert_type(Y().pk, UUID)
+assert_type(Y().pk, UUID | None)
 assert_type(Z().y, Y)
 assert_type(Z().y_id, UUID)
-assert_type(Z().pk, UUID)
+assert_type(Z().pk, UUID | None)
 assert_type(Reference().z_id, UUID | None)
 "#,
 );
@@ -162,6 +193,6 @@ class ConcreteModel(StrIdMixin, AuditMixin):
 
 obj = ConcreteModel()
 assert_type(obj.id, str)
-assert_type(obj.pk, str)
+assert_type(obj.pk, str | None)
 "#,
 );

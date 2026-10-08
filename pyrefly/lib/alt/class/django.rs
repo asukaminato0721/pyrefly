@@ -678,7 +678,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if is_foreign_key_nullable {
             Some(self.union(pk_type, self.heap.mk_none()))
         } else {
-            Some(pk_type)
+            // A related model's pk can be None before saving, but this field's
+            // null setting determines whether its stored key is nullable.
+            let mut pk_types = pk_type.into_unions();
+            pk_types.retain(|ty| !ty.is_none());
+            Some(self.unions(pk_types))
         }
     }
 
@@ -692,6 +696,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let mut fields = SmallMap::new();
 
         if let Some((pk_type, has_custom_pk)) = self.get_pk_field_type(cls) {
+            // A primary key can be None before the model is saved.
+            let pk_type = self.union(pk_type, self.heap.mk_none());
             if !has_custom_pk {
                 // No custom pk, so synthesize an id field
                 fields.insert(ID, ClassSynthesizedField::new(pk_type.clone()));
