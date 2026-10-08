@@ -90,8 +90,11 @@ class Reporter(models.Model):
     # Django auto-adds: id = models.AutoField(primary_key=True)
 
 reporter = Reporter()
-assert_type(reporter.id, int)
+assert_type(reporter.id, int | None)
+assert_type(reporter.pk, int | None)
 ```
+
+The generated `id` and `pk` attributes can be `None` before you save the model.
 
 #### Custom Primary Keys
 
@@ -106,8 +109,10 @@ class Reporter(models.Model):
 
 reporter = Reporter()
 assert_type(reporter.uuid, UUID)
-assert_type(reporter.pk, UUID)  # pk aliases the custom primary key
+assert_type(reporter.pk, UUID | None)  # pk aliases the custom primary key
 ```
+
+The `pk` attribute also includes `None` for custom primary keys.
 
 #### ForeignKey `_id` Suffix Fields
 
