@@ -190,6 +190,25 @@ del x["name"]
 );
 
 testcase!(
+    test_del_nested_targets_validation,
+    r#"
+from typing import Final, TypedDict
+
+class C:
+    value: int = 0
+    fixed: Final[int] = 1
+
+class D(TypedDict):
+    required: int
+
+def f(c: C, d: D, items: list[int]):
+    del (c.value, [items[0]])
+    del (c.fixed,)  # E: Cannot delete field `fixed`
+    del [d["required"]]  # E: Key `required` in TypedDict `D` may not be deleted
+"#,
+);
+
+testcase!(
     test_class_method,
     r#"
 from typing import assert_type

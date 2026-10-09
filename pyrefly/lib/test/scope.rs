@@ -786,6 +786,55 @@ z = str(z)  # E: `z` is uninitialized  # E: `str` is not assignable to variable 
 );
 
 testcase!(
+    test_del_nested_targets,
+    r#"
+a = 1
+b = 2
+del (a, b)
+a  # E: `a` is uninitialized
+b  # E: `b` is uninitialized
+
+c = 3
+d = 4
+del [c, d]
+c  # E: `c` is uninitialized
+d  # E: `d` is uninitialized
+
+e = 5
+f = 6
+g = 7
+del (e, [f, (g,)])
+e  # E: `e` is uninitialized
+f  # E: `f` is uninitialized
+g  # E: `g` is uninitialized
+
+del (), []
+
+items = [1]
+del (items[0], items)
+items  # E: `items` is uninitialized
+
+other = [1]
+del [other, other[0]]  # E: `other` is uninitialized
+
+repeated = 1
+del (repeated, [repeated])  # E: `repeated` is uninitialized
+"#,
+);
+
+testcase!(
+    test_del_nested_targets_define_locals,
+    r#"
+x = 1
+y = 2
+def f():
+    print(x)  # E: `x` is uninitialized
+    print(y)  # E: `y` is uninitialized
+    del (x, [y])
+"#,
+);
+
+testcase!(
     test_uninitialized_when_shadowing,
     r#"
 from typing import assert_type

@@ -699,6 +699,20 @@ def validates_delattr(value: BadDelattr) -> None:
 );
 
 testcase!(
+    test_del_nested_targets_attribute_narrowing,
+    r#"
+class Foo: pass
+
+def f(foo: Foo) -> None:
+    if hasattr(foo, "uid"):
+        if hasattr(foo, "name"):
+            del ([foo.uid],)
+            foo.uid  # E: Object of class `Foo` has no attribute `uid`
+            foo.name
+"#,
+);
+
+testcase!(
     test_del_attribute_unknown_index_invalidates_narrows,
     r#"
 from typing import assert_type
