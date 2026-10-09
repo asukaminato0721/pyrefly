@@ -771,9 +771,9 @@ impl DefinitionsBuilder {
             Stmt::Delete(x) => {
                 for target in &x.targets {
                     self.named_in_expr(target);
-                    if let Expr::Name(name) = target {
+                    Ast::expr_lvalue(target, &mut |name| {
                         self.add_name(&name.id, name.range, DefinitionStyle::Delete)
-                    }
+                    });
                 }
             }
             Stmt::Expr(StmtExpr { value, .. }) => {

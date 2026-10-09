@@ -859,7 +859,15 @@ impl<'a> BindingsBuilder<'a> {
                 self.record_return(x);
             }
             Stmt::Delete(mut x) => {
-                for target in &mut x.targets {
+                // Reverse the stack so nested targets are deleted in source order.
+                let mut targets = x.targets.iter_mut().rev().collect::<Vec<_>>();
+                while let Some(target) = targets.pop() {
+                    if let Expr::Tuple(ExprTuple { elts, .. }) | Expr::List(ExprList { elts, .. }) =
+                        target
+                    {
+                        targets.extend(elts.iter_mut().rev());
+                        continue;
+                    }
                     let mut delete_idx = self.declare_current_idx(Key::Delete(target.range()));
                     if let Expr::Name(name) = target {
                         self.ensure_expr_name(name, delete_idx.usage());
