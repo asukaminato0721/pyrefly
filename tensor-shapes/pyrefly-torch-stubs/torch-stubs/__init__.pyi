@@ -55,6 +55,7 @@ from torch._C import (
     BoolType as BoolType,
     BufferDict as BufferDict,
     CallStack as CallStack,
+    channels_last as channels_last,
     ClassType as ClassType,
     clear_autocast_cache as clear_autocast_cache,
     CompilationUnit as CompilationUnit,
@@ -665,6 +666,7 @@ from torch.random import (
     thread_safe_generator as thread_safe_generator,
 )
 from torch.storage import TypedStorage as TypedStorage, UntypedStorage as UntypedStorage
+from typing_extensions import TypeIs
 
 if TYPE_CHECKING:
     from shape_extensions import Int as _Int
@@ -695,6 +697,9 @@ int64: Any
 int: Any
 bool: Any
 ops: Any
+
+# Dtypes are not tracked, so the legacy float tensor uses the Tensor type.
+FloatTensor = Tensor
 
 # ============================================================================
 # Tensor Class
@@ -3246,6 +3251,76 @@ def topk[Shape: IntTuple, K: _Int, Dim: Flag[builtins.int]](
     """Top k elements. Returns (values, indices). Shape inference via meta-shape: torch.topk"""
     ...
 
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    return_counts: Literal[False] = False,
+    dim: builtins.int | None = None,
+) -> Tensor:
+    """Return distinct elements or slices. Their number depends on the tensor values."""
+    ...
+
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool,
+    return_inverse: Literal[True],
+    return_counts: Literal[False] = False,
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    *,
+    return_inverse: Literal[True],
+    return_counts: Literal[False] = False,
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool,
+    return_inverse: Literal[False],
+    return_counts: Literal[True],
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: Literal[False] = False,
+    *,
+    return_counts: Literal[True],
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool,
+    return_inverse: Literal[True],
+    return_counts: Literal[True],
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    *,
+    return_inverse: Literal[True],
+    return_counts: Literal[True],
+    dim: builtins.int | None = None,
+) -> tuple[Tensor, Tensor, Tensor]: ...
+@overload
+def unique(
+    input: Tensor,
+    sorted: builtins.bool = True,
+    return_inverse: builtins.bool = False,
+    return_counts: builtins.bool = False,
+    dim: builtins.int | None = None,
+) -> Tensor | tuple[Tensor, Tensor] | tuple[Tensor, Tensor, Tensor]: ...
 def sort[Shape: IntTuple](
     input: Tensor[Shape], dim: int = -1, descending: bool = False, stable: bool = False
 ) -> return_types.sort[Shape]:
@@ -4107,7 +4182,7 @@ def poisson[Shape: IntTuple](input: Tensor[Shape]) -> Tensor[Shape]:
     ...
 
 # Tensor property functions
-def is_tensor(obj: object, /) -> builtins.bool:
+def is_tensor(obj: object, /) -> TypeIs[Tensor]:
     """Return whether an object is a PyTorch tensor."""
     ...
 
@@ -4138,6 +4213,7 @@ class dtype:
     ...
 
 float: dtype = ...
+uint8: dtype = ...
 
 # ==============================================================================
 # Tensor Creation with dtype support
@@ -4185,15 +4261,29 @@ def from_numpy(ndarray: Any) -> Tensor:
     """Create a CPU tensor that shares memory with a numpy array."""
     ...
 
+@overload
 def randint[Shape: IntTuple](
-    low: int,
-    high: int,
+    high: builtins.int,
     size: Shape,
     *,
     generator: Any = None,
     dtype: Any = None,
     device: Any = None,
-    requires_grad: bool = False,
+    requires_grad: builtins.bool = False,
+) -> Tensor[Shape]:
+    """Create random integers from zero to high. Shape is inferred from `size`."""
+    ...
+
+@overload
+def randint[Shape: IntTuple](
+    low: builtins.int,
+    high: builtins.int,
+    size: Shape,
+    *,
+    generator: Any = None,
+    dtype: Any = None,
+    device: Any = None,
+    requires_grad: builtins.bool = False,
 ) -> Tensor[Shape]:
     """Create a tensor of random integers. Shape is inferred from `size`."""
     ...
