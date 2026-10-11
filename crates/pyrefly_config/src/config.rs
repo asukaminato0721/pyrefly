@@ -66,6 +66,7 @@ use uv_pep440::Version;
 #[cfg(not(target_arch = "wasm32"))]
 use uv_pep440::VersionSpecifiers;
 
+use crate::auto_import::AutoImportFilter;
 use crate::base::ConfigBase;
 use crate::base::ExtraConfigs;
 use crate::base::InferReturnTypes;
@@ -751,6 +752,14 @@ pub struct ConfigFile {
     #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
     pub skip_lsp_config_indexing: bool,
 
+    /// Exclude installed transitive dependencies from auto-import completions.
+    #[serde(default, skip_serializing_if = "crate::util::skip_default_false")]
+    pub auto_import_exclude_transitive_dependencies: bool,
+
+    /// Package metadata cached for auto-import completions.
+    #[serde(skip)]
+    pub auto_import_filter: AutoImportFilter,
+
     /// Additional file extensions to treat as Python source files.
     /// Used for Python dialects that use non-standard extensions.
     /// Unlike standard Python extensions, these extensions become part
@@ -810,6 +819,8 @@ impl Default for ConfigFile {
             min_severity: None,
             output_format: None,
             skip_lsp_config_indexing: false,
+            auto_import_exclude_transitive_dependencies: false,
+            auto_import_filter: AutoImportFilter::default(),
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
         }
@@ -829,6 +840,11 @@ pub struct SourceDbQueryOutcome {
 }
 
 impl ConfigFile {
+    /// Whether an auto-import may suggest this module in the current project.
+    pub fn allows_auto_import(&self, handle: &Handle) -> bool {
+        !self.auto_import_exclude_transitive_dependencies || self.auto_import_filter.allows(handle)
+    }
+
     /// Gets a ConfigFile for a project directory. `fallback` indicates whether this is a guessed
     /// project root that we're falling back to after failing to otherwise find an import.
     pub fn init_at_root(root: &Path, layout: &ProjectLayout, fallback: bool) -> Self {
@@ -1668,6 +1684,14 @@ impl ConfigFile {
             }
         }
 
+        self.auto_import_filter = if self.auto_import_exclude_transitive_dependencies
+            && let Some(root) = project_root.as_deref()
+        {
+            AutoImportFilter::from_project(root, self.site_package_path().cloned().collect())
+        } else {
+            AutoImportFilter::default()
+        };
+
         if !self.disable_project_excludes_heuristics {
             let project_excludes = mem::take(&mut self.project_excludes);
             // do this after overwriting CLI values so that we can preserve the required
@@ -2467,6 +2491,8 @@ mod tests {
                 baseline_auto_update: false,
                 min_severity: None,
                 skip_lsp_config_indexing: false,
+                auto_import_exclude_transitive_dependencies: false,
+                auto_import_filter: AutoImportFilter::default(),
                 extra_file_extensions: Vec::new(),
                 synthesized_preset_reason: None,
             }
@@ -2806,6 +2832,8 @@ mod tests {
             baseline_auto_update: false,
             min_severity: None,
             skip_lsp_config_indexing: false,
+            auto_import_exclude_transitive_dependencies: false,
+            auto_import_filter: AutoImportFilter::default(),
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
         };
@@ -2884,6 +2912,8 @@ mod tests {
             baseline_auto_update: false,
             min_severity: None,
             skip_lsp_config_indexing: false,
+            auto_import_exclude_transitive_dependencies: false,
+            auto_import_filter: AutoImportFilter::default(),
             extra_file_extensions: Vec::new(),
             synthesized_preset_reason: None,
         };

@@ -6,6 +6,7 @@
  */
 
 pub mod args;
+pub mod auto_import;
 pub mod base;
 pub mod config;
 pub mod environment;

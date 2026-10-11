@@ -220,6 +220,12 @@ impl Transaction<'_> {
             return None;
         }
         let module_handle = self.import_handle(handle, module_name, None).finding()?;
+        if self
+            .get_config(handle)
+            .is_some_and(|config| !config.allows_auto_import(&module_handle))
+        {
+            return None;
+        }
         let (position, import_text, completion_label) =
             import_regular_import_edit(ast, module_handle, Some(identifier_text));
         let import_text_edit = TextEdit {
@@ -663,6 +669,7 @@ impl Transaction<'_> {
             && let Some(module_info) = self.get_module_info(handle)
         {
             let identifier_text = identifier.as_str();
+            let config = self.get_config(handle);
             let mut aliased_modules = SmallSet::new();
             if let Some(module_name) = self.add_common_alias_autoimport_completion(
                 handle,
@@ -685,6 +692,9 @@ impl Transaction<'_> {
                 // Using handle itself doesn't always work because handles can be made separately and have different hashes
                 if handle_to_import_from.module() == handle.module()
                     || handle_to_import_from.module() == ModuleName::builtins()
+                    || config
+                        .as_ref()
+                        .is_some_and(|config| !config.allows_auto_import(&handle_to_import_from))
                 {
                     continue;
                 }
@@ -751,6 +761,16 @@ impl Transaction<'_> {
                 if aliased_modules.contains(&module_name) {
                     continue;
                 }
+                let Some(module_handle) = self.import_handle(handle, module_name, None).finding()
+                else {
+                    continue;
+                };
+                if config
+                    .as_ref()
+                    .is_some_and(|config| !config.allows_auto_import(&module_handle))
+                {
+                    continue;
+                }
                 let module_name_str = module_name.as_str().to_owned();
                 let source = autoimport_source(&module_name_str);
                 if let Some((submodule_name, import_edit)) =
@@ -782,38 +802,34 @@ impl Transaction<'_> {
                         is_incompatible: false,
                     });
                 }
-                if let Some(module_handle) = self.import_handle(handle, module_name, None).finding()
-                {
-                    let (import_text, additional_text_edits) = {
-                        let (position, import_text, _) =
-                            import_regular_import_edit(&ast, module_handle, None);
-                        let import_text_edit = TextEdit {
-                            range: module_info
-                                .to_lsp_range(TextRange::at(position, TextSize::new(0))),
-                            new_text: import_text.clone(),
-                        };
-                        (import_text, Some(vec![import_text_edit]))
+                let (import_text, additional_text_edits) = {
+                    let (position, import_text, _) =
+                        import_regular_import_edit(&ast, module_handle, None);
+                    let import_text_edit = TextEdit {
+                        range: module_info.to_lsp_range(TextRange::at(position, TextSize::new(0))),
+                        new_text: import_text.clone(),
                     };
-                    let auto_import_label_detail = format!(" (import {module_name_str})");
+                    (import_text, Some(vec![import_text_edit]))
+                };
+                let auto_import_label_detail = format!(" (import {module_name_str})");
 
-                    completions.push(RankedCompletion {
-                        item: CompletionItem {
-                            label: module_name_str.clone(),
-                            detail: Some(import_text),
-                            kind: Some(CompletionItemKind::Module),
-                            additional_text_edits,
-                            label_details: supports_completion_item_details.then_some(
-                                CompletionItemLabelDetails {
-                                    detail: Some(auto_import_label_detail),
-                                    description: Some(module_name_str.clone()),
-                                },
-                            ),
-                            ..Default::default()
-                        },
-                        source,
-                        is_incompatible: false,
-                    });
-                }
+                completions.push(RankedCompletion {
+                    item: CompletionItem {
+                        label: module_name_str.clone(),
+                        detail: Some(import_text),
+                        kind: Some(CompletionItemKind::Module),
+                        additional_text_edits,
+                        label_details: supports_completion_item_details.then_some(
+                            CompletionItemLabelDetails {
+                                detail: Some(auto_import_label_detail),
+                                description: Some(module_name_str.clone()),
+                            },
+                        ),
+                        ..Default::default()
+                    },
+                    source,
+                    is_incompatible: false,
+                });
             }
         }
     }
