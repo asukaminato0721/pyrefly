@@ -899,6 +899,18 @@ impl<'a> BindingsBuilder<'a> {
         self.maybe_record_pytest_fixture_definition(&x, class_key);
 
         let decorators = self.decorators(mem::take(&mut x.decorator_list), def_idx.usage());
+        for decorator in &decorators.decorators {
+            if self
+                .idx_to_binding(*decorator)
+                .expect("Decorator is bound before its function")
+                .trailing_name
+                .as_ref()
+                .is_some_and(|name| name == "register")
+            {
+                self.single_dispatch_registrations
+                    .push((*decorator, function_idx));
+            }
+        }
 
         self.scopes.push(Scope::annotation(x.range, false));
         let (return_ann_with_range, legacy_tparams) =

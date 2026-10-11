@@ -65,6 +65,7 @@ use crate::binding::binding::BindingDjangoRelations;
 use crate::binding::binding::BindingExpect;
 use crate::binding::binding::BindingExport;
 use crate::binding::binding::BindingLegacyTypeParam;
+use crate::binding::binding::BindingSingleDispatchRegistry;
 use crate::binding::binding::BranchInfo;
 use crate::binding::binding::DjangoRelationClass;
 use crate::binding::binding::FirstUse;
@@ -76,10 +77,12 @@ use crate::binding::binding::KeyAnnotation;
 use crate::binding::binding::KeyClass;
 use crate::binding::binding::KeyClassField;
 use crate::binding::binding::KeyDecoratedFunction;
+use crate::binding::binding::KeyDecorator;
 use crate::binding::binding::KeyDjangoRelations;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyLegacyTypeParam;
+use crate::binding::binding::KeySingleDispatchRegistry;
 use crate::binding::binding::KeyTypeAlias;
 use crate::binding::binding::KeyUndecoratedFunction;
 use crate::binding::binding::KeyUndecoratedFunctionRange;
@@ -314,6 +317,7 @@ pub struct BindingsBuilder<'a> {
     unused_imports: Vec<UnusedImport>,
     unused_variables: Vec<UnusedVariable>,
     django_relation_classes: Vec<DjangoRelationClass>,
+    pub(super) single_dispatch_registrations: Vec<(Idx<KeyDecorator>, Idx<KeyDecoratedFunction>)>,
     semantic_checker: SemanticSyntaxChecker,
     semantic_syntax_errors: RefCell<Vec<SemanticSyntaxError>>,
     pytest_info: Option<crate::binding::pytest::PytestBindingInfo>,
@@ -687,6 +691,7 @@ impl Bindings {
             unused_imports: Vec::new(),
             unused_variables: Vec::new(),
             django_relation_classes: Vec::new(),
+            single_dispatch_registrations: Vec::new(),
             semantic_checker: SemanticSyntaxChecker::new(),
             semantic_syntax_errors: RefCell::new(Vec::new()),
             pytest_info,
@@ -798,6 +803,12 @@ impl Bindings {
                 );
             }
         }
+        builder.table.insert(
+            KeySingleDispatchRegistry,
+            BindingSingleDispatchRegistry {
+                registrations: builder.single_dispatch_registrations.into_boxed_slice(),
+            },
+        );
         let module_deletes = scope_trace.module_deletes().clone();
         builder.table.insert(
             KeyDjangoRelations,
@@ -1051,7 +1062,7 @@ impl<'a> BindingsBuilder<'a> {
         self.table.get::<K>().0.idx_to_key(idx)
     }
 
-    fn idx_to_binding<K>(&self, idx: Idx<K>) -> Option<&K::Value>
+    pub(super) fn idx_to_binding<K>(&self, idx: Idx<K>) -> Option<&K::Value>
     where
         K: Keyed,
         BindingTable: TableKeyed<K, Value = BindingEntry<K>>,

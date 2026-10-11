@@ -58,6 +58,7 @@ use vec1::Vec1;
 
 use crate::alt::class::class_field::ClassField;
 use crate::alt::class::variance_inference::VarianceMap;
+use crate::alt::singledispatch::SingleDispatchRegistry;
 use crate::alt::solve::TypeFormContext;
 use crate::alt::types::abstract_class::AbstractClassMembers;
 use crate::alt::types::class_bases::ClassBases;
@@ -169,6 +170,7 @@ pub enum AnyIdx {
     KeyAnnotation(Idx<KeyAnnotation>),
     KeyClassMetadata(Idx<KeyClassMetadata>),
     KeyDjangoRelations(Idx<KeyDjangoRelations>),
+    KeySingleDispatchRegistry(Idx<KeySingleDispatchRegistry>),
     KeyClassMro(Idx<KeyClassMro>),
     KeyClassDisjointBase(Idx<KeyClassDisjointBase>),
     KeyAbstractClassCheck(Idx<KeyAbstractClassCheck>),
@@ -241,6 +243,9 @@ macro_rules! dispatch_anyidx {
             }
             AnyIdx::KeyDjangoRelations(idx) => {
                 $self.$method::<$crate::binding::binding::KeyDjangoRelations>(*idx)
+            }
+            AnyIdx::KeySingleDispatchRegistry(idx) => {
+                $self.$method::<$crate::binding::binding::KeySingleDispatchRegistry>(*idx)
             }
             AnyIdx::KeyClassMro(idx) => {
                 $self.$method::<$crate::binding::binding::KeyClassMro>(*idx)
@@ -318,6 +323,9 @@ macro_rules! dispatch_anyidx {
             AnyIdx::KeyDjangoRelations(idx) => {
                 $self.$method::<$crate::binding::binding::KeyDjangoRelations>(*idx, $($args),+)
             }
+            AnyIdx::KeySingleDispatchRegistry(idx) => {
+                $self.$method::<$crate::binding::binding::KeySingleDispatchRegistry>(*idx, $($args),+)
+            }
             AnyIdx::KeyClassMro(idx) => {
                 $self.$method::<$crate::binding::binding::KeyClassMro>(*idx, $($args),+)
             }
@@ -367,6 +375,7 @@ impl DisplayWith<Bindings> for AnyIdx {
             Self::KeyAnnotation(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyClassMetadata(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyDjangoRelations(idx) => write!(f, "{}", ctx.display(*idx)),
+            Self::KeySingleDispatchRegistry(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyClassMro(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyClassDisjointBase(idx) => write!(f, "{}", ctx.display(*idx)),
             Self::KeyAbstractClassCheck(idx) => write!(f, "{}", ctx.display(*idx)),
@@ -390,6 +399,7 @@ pub enum AnyExportedKey {
     KeyExport(KeyExport),
     KeyClassMetadata(KeyClassMetadata),
     KeyDjangoRelations(KeyDjangoRelations),
+    KeySingleDispatchRegistry(KeySingleDispatchRegistry),
     KeyClassMro(KeyClassMro),
     KeyClassDisjointBase(KeyClassDisjointBase),
     KeyAbstractClassCheck(KeyAbstractClassCheck),
@@ -737,6 +747,28 @@ impl Keyed for KeyDjangoRelations {
 impl Exported for KeyDjangoRelations {
     fn to_anykey(&self) -> AnyExportedKey {
         AnyExportedKey::KeyDjangoRelations(self.clone())
+    }
+}
+impl Keyed for KeySingleDispatchRegistry {
+    const EXPORTED: bool = true;
+    type Value = BindingSingleDispatchRegistry;
+    type Answer = SingleDispatchRegistry;
+    fn to_anyidx(idx: Idx<Self>) -> AnyIdx {
+        AnyIdx::KeySingleDispatchRegistry(idx)
+    }
+    fn try_to_anykey(&self) -> Option<AnyExportedKey> {
+        Some(self.to_anykey())
+    }
+    fn range_with(_idx: Idx<Self>, _bindings: &Bindings) -> TextRange
+    where
+        BindingTable: TableKeyed<Self, Value = BindingEntry<Self>>,
+    {
+        TextRange::default()
+    }
+}
+impl Exported for KeySingleDispatchRegistry {
+    fn to_anykey(&self) -> AnyExportedKey {
+        AnyExportedKey::KeySingleDispatchRegistry(self.clone())
     }
 }
 impl Keyed for KeyClassMro {
@@ -1821,6 +1853,22 @@ impl Ranged for KeyDjangoRelations {
 impl DisplayWith<ModuleInfo> for KeyDjangoRelations {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, _ctx: &ModuleInfo) -> fmt::Result {
         write!(f, "KeyDjangoRelations")
+    }
+}
+
+/// Key for method registrations in a module.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KeySingleDispatchRegistry;
+
+impl Ranged for KeySingleDispatchRegistry {
+    fn range(&self) -> TextRange {
+        TextRange::default()
+    }
+}
+
+impl DisplayWith<ModuleInfo> for KeySingleDispatchRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, _ctx: &ModuleInfo) -> fmt::Result {
+        write!(f, "KeySingleDispatchRegistry")
     }
 }
 
@@ -3797,5 +3845,21 @@ impl DisplayWith<Bindings> for BindingYieldFrom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, ctx: &Bindings) -> fmt::Result {
         let m = ctx.module();
         write!(f, "BindingYieldFrom({})", m.display(&self.expr()))
+    }
+}
+
+/// Registration candidates in source order. Solving determines which dispatchers they extend.
+#[derive(Clone, Debug)]
+pub struct BindingSingleDispatchRegistry {
+    pub registrations: Box<[(Idx<KeyDecorator>, Idx<KeyDecoratedFunction>)]>,
+}
+
+impl DisplayWith<Bindings> for BindingSingleDispatchRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, _ctx: &Bindings) -> fmt::Result {
+        write!(
+            f,
+            "BindingSingleDispatchRegistry(len={})",
+            self.registrations.len()
+        )
     }
 }
