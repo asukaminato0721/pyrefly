@@ -5,13 +5,23 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::fs;
+
 use lsp_types::CompletionItem;
 use lsp_types::CompletionItemKind;
 use lsp_types::CompletionItemTag;
 use pretty_assertions::assert_eq;
 use pyrefly_build::handle::Handle;
+use pyrefly_config::config::ConfigFile;
+use pyrefly_config::config::ConfigSource;
+use pyrefly_config::finder::ConfigFinder;
+use pyrefly_python::module_name::ModuleName;
+use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::PythonVersion;
+use pyrefly_util::arc_id::ArcId;
+use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
 use ruff_text_size::TextSize;
+use tempfile::TempDir;
 
 use crate::state::lsp::ImportFormat;
 use crate::state::require::Require;
@@ -3515,6 +3525,119 @@ kendalltau
         "expected scipy.stats import detail, got {:?}",
         autoimport.detail
     );
+}
+
+// https://github.com/facebook/pyrefly/issues/4761
+#[test]
+fn autoimport_exclude_transitive_dependencies() {
+    let root = TempDir::new().unwrap();
+    let site_packages = root.path().join("site-packages");
+    fs::create_dir(&site_packages).unwrap();
+    fs::write(
+        root.path().join("pyproject.toml"),
+        "[project]\ndependencies = ['direct-dist>=1']\n",
+    )
+    .unwrap();
+    for (distribution, module, source) in [
+        (
+            "direct_dist",
+            "direct",
+            "from indirect import completion_value as completion_value\n",
+        ),
+        ("indirect", "indirect", "completion_value = 1\n"),
+        ("numpy", "numpy", "completion_array = 1\n"),
+        ("hidden_module", "hidden_module", "value = 1\n"),
+    ] {
+        fs::write(site_packages.join(format!("{module}.py")), source).unwrap();
+        let metadata = site_packages.join(format!("{distribution}-1.0.dist-info"));
+        fs::create_dir(&metadata).unwrap();
+        fs::write(metadata.join("METADATA"), format!("Name: {distribution}\n")).unwrap();
+        fs::write(metadata.join("top_level.txt"), module).unwrap();
+    }
+    fs::write(root.path().join("local.py"), "completion_local = 1\n").unwrap();
+    let code = r#"
+completion_
+#          ^
+hidden_mod
+#         ^
+np
+# ^
+pathli
+#     ^
+import indirect as dep
+dep.completion_
+#              ^
+"#;
+    fs::write(root.path().join("main.py"), code).unwrap();
+
+    for exclude in [false, true] {
+        let mut config: ConfigFile = toml::from_str(&format!(
+            "auto-import-exclude-transitive-dependencies = {exclude}"
+        ))
+        .unwrap();
+        config.source = ConfigSource::File(root.path().join("pyrefly.toml"));
+        config.interpreters.skip_interpreter_query = true;
+        config.search_path_from_file = vec![root.path().to_path_buf()];
+        config.python_environment.site_package_path = Some(vec![site_packages.clone()]);
+        config.configure();
+        let handles: Vec<_> = ["main", "local", "direct", "indirect", "numpy"]
+            .into_iter()
+            .map(|module| {
+                let path = if matches!(module, "main" | "local") {
+                    root.path().join(format!("{module}.py"))
+                } else {
+                    site_packages.join(format!("{module}.py"))
+                };
+                Handle::new(
+                    ModuleName::from_str(module),
+                    ModulePath::filesystem(path),
+                    config.get_sys_info(),
+                )
+            })
+            .collect();
+        let state = State::new(
+            ConfigFinder::new_constant(ArcId::new(config)),
+            TEST_THREAD_COUNT,
+        );
+        let mut transaction = state.new_committable_transaction(Require::Everything, None);
+        transaction
+            .as_mut()
+            .run(&handles, Require::Everything, None);
+        state.commit_transaction(transaction, None);
+        let transaction = state.transaction();
+        let positions = extract_cursors_for_test(code);
+        let complete = |index| {
+            transaction.completion(
+                &handles[0],
+                positions[index],
+                ImportFormat::Absolute,
+                true,
+                None,
+            )
+        };
+        let symbols = complete(0);
+        for (module, expected) in [("local", true), ("direct", true), ("indirect", !exclude)] {
+            assert_eq!(
+                symbols.iter().any(|item| item
+                    .detail
+                    .as_ref()
+                    .is_some_and(|detail| detail.starts_with(&format!("from {module} import")))),
+                expected,
+                "{module}, exclude={exclude}: {symbols:?}"
+            );
+        }
+        assert_eq!(
+            complete(1).iter().any(|item| item.label == "hidden_module"),
+            !exclude
+        );
+        assert_eq!(complete(2).iter().any(|item| item.label == "np"), !exclude);
+        assert!(complete(3).iter().any(|item| item.label == "pathlib"));
+        assert!(
+            complete(4)
+                .iter()
+                .any(|item| item.label == "completion_value")
+        );
+    }
 }
 
 #[test]
