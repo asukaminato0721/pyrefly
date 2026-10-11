@@ -227,6 +227,11 @@
           "type": "boolean",
           "default": true
         },
+        "auto-import-exclude-transitive-dependencies": {
+          "description": "Exclude installed transitive dependencies from auto-import completions using dependency declarations in pyproject.toml.",
+          "type": "boolean",
+          "default": false
+        },
         "skip-lsp-config-indexing": {
           "description": "Should Pyrefly try to index the project's files? Disabling this may speed up LSP operations on large projects.",
           "type": "boolean",

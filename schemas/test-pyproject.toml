@@ -38,6 +38,7 @@ recursion-depth-limit = 100
 recursion-overflow-handler = "break-with-placeholder"
 
 # Import handling
+auto-import-exclude-transitive-dependencies = true
 replace-imports-with-any = ["sympy.*", "*.series"]
 ignore-missing-imports = ["numpy.*"]
 replace-untyped-imports-with-any = ["pandas.*"]
