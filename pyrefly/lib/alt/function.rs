@@ -1960,6 +1960,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         range: TextRange,
         errors: &ErrorCollector,
     ) -> Type {
+        if matches!(&decorator, Type::ClassDef(cls) if cls.has_toplevel_qname("functools", "singledispatchmethod") || cls.has_toplevel_qname("singledispatch", "singledispatchmethod"))
+        {
+            let mut decoratee = decoratee;
+            if let Some(metadata) = decoratee.toplevel_func_metadata_mut() {
+                metadata.flags.is_singledispatchmethod = true;
+            }
+            return decoratee;
+        }
+        if decorator
+            .toplevel_func_metadata()
+            .is_some_and(|m| matches!(m.kind, FunctionKind::SingleDispatchMethodRegister(..)))
+        {
+            return decoratee;
+        }
         // Bare `@fn.register`: validate the impl's dispatch type against the fallback, then return
         // the impl's own type so direct calls to the registered function are type-checked, rather
         // than the stub `register`'s erased `Callable[..., _T]` return.

@@ -5,15 +5,20 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-//! Solving-phase support for `functools.singledispatch`, whose typing behavior the typeshed stub
-//! cannot express.
+//! Solving support for `functools.singledispatch` and `functools.singledispatchmethod`.
 
+use std::fmt;
+
+use pyrefly_derive::TypeEq;
+use pyrefly_derive::Visit;
+use pyrefly_derive::VisitMut;
 use pyrefly_types::class::Class;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::types::BoundMethodType;
 use ruff_python_ast::Arguments;
 use ruff_python_ast::Expr;
 use ruff_python_ast::name::Name;
+use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 
 use crate::alt::answers::LookupAnswer;
@@ -21,6 +26,8 @@ use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::callable::CallArg;
 use crate::alt::callable::CallKeyword;
 use crate::alt::unwrap::HintRef;
+use crate::binding::binding::BindingSingleDispatchRegistry;
+use crate::binding::binding::KeySingleDispatchRegistry;
 use crate::config::error_kind::ErrorKind;
 use crate::error::collector::ErrorCollector;
 use crate::types::callable::Callable;
@@ -44,7 +51,218 @@ pub(crate) struct DispatcherDef<'a> {
     pub is_staticmethod: bool,
 }
 
+/// Resolved registrations for method dispatchers referenced in a module.
+#[derive(Clone, Debug, Default, PartialEq, Eq, TypeEq, Visit, VisitMut)]
+pub struct SingleDispatchRegistry {
+    /// Each entry contains the dispatcher identity, dispatch type, and implementation.
+    registrations: Vec<(FunctionKind, Type, Type)>,
+}
+
+impl fmt::Display for SingleDispatchRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SingleDispatchRegistry(len={})",
+            self.registrations.len()
+        )
+    }
+}
+
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
+    /// Resolve registration candidates once, with normal incremental dependencies.
+    pub(crate) fn solve_single_dispatch_registry(
+        &self,
+        binding: &BindingSingleDispatchRegistry,
+    ) -> SingleDispatchRegistry {
+        let mut registrations = Vec::new();
+        for (decorator_idx, function_idx) in &binding.registrations {
+            let decorator = &self.get_idx(*decorator_idx).ty;
+            let Some(FuncMetadata {
+                kind: FunctionKind::SingleDispatchMethodRegister(target, explicit),
+                ..
+            }) = decorator.toplevel_func_metadata()
+            else {
+                continue;
+            };
+            let target = target
+                .toplevel_func_metadata()
+                .expect("Registration retains dispatcher metadata");
+            let implementation = self.get_idx(*function_idx).clone();
+            let is_static = implementation
+                .toplevel_func_metadata()
+                .is_some_and(|m| m.flags.is_staticmethod);
+            let dispatch_type = explicit.as_deref().cloned().or_else(|| {
+                let (signature, _) = implementation.toplevel_callable_signatures().next()?;
+                if is_static {
+                    Self::first_positional_param_type(signature)
+                } else {
+                    signature
+                        .strip_first_param()
+                        .as_ref()
+                        .and_then(Self::first_positional_param_type)
+                }
+            });
+            if let Some(dispatch_type) = dispatch_type {
+                self.map_over_union(&dispatch_type, |dispatch_type| {
+                    registrations.push((
+                        target.kind.clone(),
+                        dispatch_type.clone(),
+                        implementation.clone(),
+                    ));
+                });
+            }
+        }
+        SingleDispatchRegistry { registrations }
+    }
+
+    /// Preserve the dispatcher's identity through both registration decorator forms.
+    pub(crate) fn singledispatchmethod_register(
+        &self,
+        dispatcher: Type,
+        dispatch_type: Option<Type>,
+    ) -> Type {
+        self.heap.mk_function(Function {
+            signature: Callable {
+                params: Params::Ellipsis,
+                ret: Type::any_implicit(),
+            },
+            metadata: FuncMetadata {
+                kind: FunctionKind::SingleDispatchMethodRegister(
+                    Box::new(dispatcher),
+                    dispatch_type.map(Box::new),
+                ),
+                flags: FuncFlags::default(),
+            },
+        })
+    }
+
+    /// Select an implementation by the dispatch argument, then check its complete signature.
+    pub(crate) fn call_singledispatchmethod(
+        &self,
+        dispatcher: &Type,
+        args: &[CallArg],
+        kws: &[CallKeyword],
+        callee_range: TextRange,
+        arg_range: TextRange,
+        hint: Option<HintRef>,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let metadata = dispatcher
+            .toplevel_func_metadata()
+            .expect("A dispatcher has function metadata");
+        let local_registry = self.get(&KeySingleDispatchRegistry);
+        let source_registry = metadata.kind.class().and_then(|cls| {
+            (cls.module_name() != self.module().name() || cls.module_path() != self.module().path())
+                .then(|| self.get_from_class(&cls, &KeySingleDispatchRegistry))
+                .flatten()
+        });
+        let registrations = source_registry
+            .into_iter()
+            .chain([local_registry])
+            .flat_map(|registry| &registry.registrations)
+            .filter(|(target, _, _)| target == &metadata.kind);
+        let Some(CallArg::Arg(first)) = args.first() else {
+            return self
+                .freeform_call_infer(
+                    dispatcher.clone(),
+                    args,
+                    kws,
+                    callee_range,
+                    arg_range,
+                    hint,
+                    errors,
+                )
+                .ty;
+        };
+        let arg_ty = first.infer(self, errors);
+        let registrations: Vec<_> = registrations.collect();
+        self.distribute_over_union(&arg_ty, |arg_ty| {
+            if arg_ty.is_any() {
+                return arg_ty.clone();
+            }
+            let runtime_type = self.type_of(arg_ty.clone());
+            let runtime_class = match &runtime_type {
+                Type::ClassDef(cls) => Some(cls),
+                Type::Type(ty) => match &**ty {
+                    Type::ClassType(cls) | Type::SelfType(cls) => Some(cls.class_object()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let mut selected: Option<(&Type, usize)> = None;
+            for (_, dispatch_type, implementation) in &registrations {
+                // Dispatch uses the runtime MRO. Assignment compatibility would incorrectly
+                // dispatch an `int` to a `float` registration.
+                let priority = match (runtime_class, dispatch_type) {
+                    (Some(cls), Type::ClassType(dispatch_cls)) => {
+                        if cls == dispatch_cls.class_object() {
+                            Some(0)
+                        } else {
+                            self.get_mro_for_class(cls)
+                                .ancestors(self.stdlib)
+                                .position(|ancestor| {
+                                    ancestor.class_object() == dispatch_cls.class_object()
+                                })
+                                .map(|index| index + 1)
+                        }
+                    }
+                    _ => self
+                        .is_subset_eq(arg_ty, dispatch_type)
+                        .then_some(usize::MAX),
+                };
+                if let Some(priority) = priority
+                    && selected.is_none_or(|(_, previous)| priority <= previous)
+                {
+                    selected = Some((implementation, priority));
+                }
+            }
+            let mut callable = selected.map_or_else(
+                || dispatcher.clone(),
+                |(implementation, _)| implementation.clone(),
+            );
+            if selected.is_some()
+                && let Type::BoundMethod(method) = dispatcher
+            {
+                let receiver = match &method.obj {
+                    Type::Type(cls) => &**cls,
+                    receiver => receiver,
+                };
+                if let Type::ClassType(cls) = receiver
+                    && let Some(defining_cls) = callable
+                        .toplevel_func_metadata()
+                        .and_then(|m| m.kind.class())
+                    && let Some(ancestor) = self.as_superclass(cls, &defining_cls)
+                {
+                    callable = ancestor.targs().substitution().substitute_into(callable);
+                }
+                callable.subst_self_type_mut(receiver);
+            }
+            if selected.is_some()
+                && let Some(flags) = callable.toplevel_func_metadata().map(|m| &m.flags)
+                && !flags.is_staticmethod
+                && (matches!(dispatcher, Type::BoundMethod(_)) || flags.is_classmethod)
+            {
+                callable.transform_toplevel_callable_signatures(|signature, _| {
+                    if let Some(bound) = signature.strip_first_param() {
+                        *signature = bound;
+                    }
+                });
+            }
+            let mut narrowed_args = vec![CallArg::ty(arg_ty, first.range())];
+            narrowed_args.extend_from_slice(&args[1..]);
+            self.freeform_call_infer(
+                callable,
+                &narrowed_args,
+                kws,
+                callee_range,
+                arg_range,
+                hint,
+                errors,
+            )
+            .ty
+        })
+    }
+
     /// Whether `ct` is a `@singledispatch` dispatcher class (`_SingleDispatchCallable`)
     fn is_singledispatch_class(ct: &ClassType) -> bool {
         ct.has_qname("functools", "_SingleDispatchCallable")
@@ -168,7 +386,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         def: DispatcherDef,
         errors: &ErrorCollector,
     ) {
-        if !Self::is_singledispatch_dispatcher(ty) {
+        if !Self::is_singledispatch_dispatcher(ty)
+            && !ty
+                .toplevel_func_metadata()
+                .is_some_and(|m| m.flags.is_singledispatchmethod)
+        {
             return;
         }
         let skip_self = def.defining_cls.is_some()

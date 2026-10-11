@@ -2752,6 +2752,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         errors,
                     )
                 }
+                Some(CalleeKind::Function(FunctionKind::SingleDispatchMethodRegister(target, explicit)))
+                    if x.arguments.args.len() == 1 && x.arguments.keywords.is_empty() =>
+                {
+                    let arg = self.expr_infer(&x.arguments.args[0], errors);
+                    if explicit.is_none()
+                        && let Some((_, dispatch_type)) = self.unwrap_class_object_silently(&arg)
+                    {
+                        self.singledispatchmethod_register(*target, Some(dispatch_type))
+                    } else {
+                        arg
+                    }
+                }
+                _ if ty.toplevel_func_metadata().is_some_and(|m| m.flags.is_singledispatchmethod) => {
+                    self.call_singledispatchmethod(ty, &args, &kws, x.func.range(), x.arguments.range(), hint, errors)
+                }
                 // `f.register(C)(impl)`: applying the tagged factory decorator by call.
                 _ if let Type::KwCall(kw) = ty
                     && matches!(&kw.func_metadata.kind, FunctionKind::SingleDispatchRegister(_))

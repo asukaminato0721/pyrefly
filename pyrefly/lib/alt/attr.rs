@@ -629,6 +629,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         context: Option<&dyn Fn() -> ErrorContext>,
         todo_ctx: &str,
     ) -> Type {
+        if attr_name.as_str() == "register"
+            && base
+                .toplevel_func_metadata()
+                .is_some_and(|m| m.flags.is_singledispatchmethod)
+        {
+            return self.singledispatchmethod_register(base.clone(), None);
+        }
         let attr_base = self.as_attribute_base(base.clone());
         let lookup_result = attr_base.clone().map_or_else(
             || LookupResult::internal_error(InternalError::AttributeBaseUndefined(base.clone())),

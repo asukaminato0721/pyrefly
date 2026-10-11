@@ -17,6 +17,7 @@ use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::alt::class::class_field::ClassField;
 use crate::alt::class::variance_inference::VarianceMap;
+use crate::alt::singledispatch::SingleDispatchRegistry;
 use crate::alt::types::abstract_class::AbstractClassMembers;
 use crate::alt::types::class_bases::ClassBases;
 use crate::alt::types::class_metadata::ClassDisjointBase;
@@ -50,6 +51,7 @@ use crate::binding::binding::BindingDjangoRelations;
 use crate::binding::binding::BindingExpect;
 use crate::binding::binding::BindingExport;
 use crate::binding::binding::BindingLegacyTypeParam;
+use crate::binding::binding::BindingSingleDispatchRegistry;
 use crate::binding::binding::BindingTParams;
 use crate::binding::binding::BindingTypeAlias;
 use crate::binding::binding::BindingUndecoratedFunction;
@@ -76,6 +78,7 @@ use crate::binding::binding::KeyDjangoRelations;
 use crate::binding::binding::KeyExpect;
 use crate::binding::binding::KeyExport;
 use crate::binding::binding::KeyLegacyTypeParam;
+use crate::binding::binding::KeySingleDispatchRegistry;
 use crate::binding::binding::KeyTParams;
 use crate::binding::binding::KeyTypeAlias;
 use crate::binding::binding::KeyUndecoratedFunction;
@@ -432,6 +435,21 @@ impl<Ans: LookupAnswer> Solve<Ans> for KeyDjangoRelations {
 
     fn promote_recursive(_heap: &TypeHeap, _: Var) -> Self::Answer {
         DjangoReverseRelationIndex::default()
+    }
+}
+
+impl<Ans: LookupAnswer> Solve<Ans> for KeySingleDispatchRegistry {
+    fn solve(
+        answers: &AnswersSolver<Ans>,
+        binding: &BindingSingleDispatchRegistry,
+        _range: TextRange,
+        _errors: &ErrorCollector,
+    ) -> SolveResult<Self> {
+        SolveResult::Answer(answers.solve_single_dispatch_registry(binding))
+    }
+
+    fn promote_recursive(_heap: &TypeHeap, _: Var) -> Self::Answer {
+        SingleDispatchRegistry::default()
     }
 }
 
