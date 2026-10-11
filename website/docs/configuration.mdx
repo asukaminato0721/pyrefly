@@ -845,6 +845,31 @@ _only_ want to see type errors on CLI/CI runs.
   to turn on/off specific errors, you may be looking for the [`errors`](#errors) config
   option instead.
 
+### `auto-import-exclude-transitive-dependencies`
+
+Exclude installed packages from auto-import completions unless the project declares them as direct dependencies.
+Project modules and standard-library modules remain available. Explicit imports and their member completions continue to work.
+
+Pyrefly reads `project.dependencies`, all `project.optional-dependencies`, and all `dependency-groups`
+from `pyproject.toml` in the configuration directory. It includes all extras and groups, regardless of environment markers.
+Installed distribution metadata maps package names to import names, such as `Pillow` to `PIL`.
+A namespace shared with a direct dependency remains available. Symbols re-exported by a direct dependency also remain available.
+
+If dependency declarations are missing, invalid, or dynamic, Pyrefly keeps all suggestions.
+Packages without usable installed metadata also remain available.
+This option does not read `requirements.txt` or legacy Poetry dependency tables.
+
+```toml
+[tool.pyrefly]
+auto-import-exclude-transitive-dependencies = true
+```
+
+In `pyrefly.toml`, omit the `[tool.pyrefly]` header.
+
+- Type: `bool`
+- Default: `false`
+- Flag equivalent: none
+
 ### `skip-lsp-config-indexing`
 
 Disables automatic project indexing when running Pyrefly as a language server.

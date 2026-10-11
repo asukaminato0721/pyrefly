@@ -214,6 +214,10 @@ Automatically insert parentheses when completing a function or method.
 
 Controls whether completions include symbols that are not yet imported. When enabled, accepting such a completion also inserts the required import statement. Set to `false` to only complete symbols that are already in scope.
 
+To exclude transitive dependencies from auto-import suggestions, set
+[`auto-import-exclude-transitive-dependencies`](../configuration#auto-import-exclude-transitive-dependencies)
+in your project configuration.
+
 #### `pyrefly.pyreflyExecutable`
 
 **Type:** enum (`bundled`, `from-environment`) &nbsp; **Default:** `"from-environment"`
