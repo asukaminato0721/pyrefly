@@ -193,6 +193,8 @@ pub struct FuncFlags {
     pub is_overload: bool,
     pub is_staticmethod: bool,
     pub is_classmethod: bool,
+    /// A method decorated with `functools.singledispatchmethod`.
+    pub is_singledispatchmethod: bool,
     /// Parameter indices whose annotations directly name a type parameter of the defining class.
     /// This is used when a subclass binds that parameter to a shape `Flag`.
     pub shape_flag_constructor_sources: Option<Box<Vec<usize>>>,
@@ -448,6 +450,8 @@ pub enum FunctionKind {
     /// The `register` method of a `functools.singledispatch` dispatcher, tagged with the fallback's
     /// first-parameter type so the registered dispatch type can be validated against it.
     SingleDispatchRegister(Box<Type>),
+    /// A method dispatcher's registration decorator, carrying the original dispatcher.
+    SingleDispatchMethodRegister(Box<Type>, Option<Box<Type>>),
     TotalOrdering,
     DisjointBase,
     /// `numba.jit()`
@@ -566,7 +570,9 @@ impl FunctionKind {
             Self::RevealType => ModuleName::typing(),
             Self::RuntimeCheckable => ModuleName::typing(),
             Self::CallbackProtocol(cls) => cls.qname().module_name(),
-            Self::SingleDispatchRegister(_) => ModuleName::functools(),
+            Self::SingleDispatchRegister(_) | Self::SingleDispatchMethodRegister(..) => {
+                ModuleName::functools()
+            }
             Self::AbstractMethod => ModuleName::abc(),
             Self::NoTypeCheck => ModuleName::typing(),
             Self::TotalOrdering => ModuleName::functools(),
@@ -607,7 +613,9 @@ impl FunctionKind {
             Self::RevealType => Cow::Owned(Name::new_static("reveal_type")),
             Self::RuntimeCheckable => Cow::Owned(Name::new_static("runtime_checkable")),
             Self::CallbackProtocol(_) => Cow::Owned(dunder::CALL),
-            Self::SingleDispatchRegister(_) => Cow::Owned(Name::new_static("register")),
+            Self::SingleDispatchRegister(_) | Self::SingleDispatchMethodRegister(..) => {
+                Cow::Owned(Name::new_static("register"))
+            }
             Self::AbstractMethod => Cow::Owned(Name::new_static("abstractmethod")),
             Self::NoTypeCheck => Cow::Owned(Name::new_static("no_type_check")),
             Self::TotalOrdering => Cow::Owned(Name::new_static("total_ordering")),
@@ -651,7 +659,7 @@ impl FunctionKind {
             Self::NumbaNjit => None,
             Self::Synthesized(id) => id.cls.clone(),
             Self::CallbackProtocol(cls) => Some(cls.class_object().dupe()),
-            Self::SingleDispatchRegister(_) => None,
+            Self::SingleDispatchRegister(_) | Self::SingleDispatchMethodRegister(..) => None,
             Self::AbstractMethod => None,
             Self::NoTypeCheck => None,
             Self::TotalOrdering => None,
