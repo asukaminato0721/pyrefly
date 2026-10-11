@@ -183,6 +183,8 @@ pub struct ModuleDeps {
     pub type_aliases: SmallSet<TypeAliasIndex>,
     /// Do we depend on module-level Django reverse relation metadata?
     pub django_relations: bool,
+    /// Do we depend on registrations for method dispatchers?
+    pub single_dispatch_registry: bool,
 }
 
 /// Per-module change tracking. Represents what changed in a module's exports.
@@ -282,6 +284,9 @@ impl ModuleChanges {
         if self.0.django_relations && other.0.django_relations {
             return true;
         }
+        if self.0.single_dispatch_registry && other.0.single_dispatch_registry {
+            return true;
+        }
         for (name, self_dep) in &self.0.names {
             if let Some(other_dep) = other.0.names.get(name) {
                 // Either side is an existence change — overlaps with any
@@ -321,6 +326,9 @@ impl ModuleDeps {
             }
             AnyExportedKey::KeyDjangoRelations(_) => {
                 self.django_relations = true;
+            }
+            AnyExportedKey::KeySingleDispatchRegistry(_) => {
+                self.single_dispatch_registry = true;
             }
             AnyExportedKey::KeyTParams(KeyTParams(c))
             | AnyExportedKey::KeyClassBaseType(KeyClassBaseType(c))
@@ -385,6 +393,7 @@ impl ModuleDeps {
         self.type_aliases.extend(other.type_aliases);
         self.wildcard |= other.wildcard;
         self.django_relations |= other.django_relations;
+        self.single_dispatch_registry |= other.single_dispatch_registry;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -393,6 +402,7 @@ impl ModuleDeps {
             && self.classes.is_empty()
             && self.type_aliases.is_empty()
             && !self.django_relations
+            && !self.single_dispatch_registry
     }
 
     /// Check if these dependencies are affected by the given change.
@@ -425,6 +435,9 @@ impl ModuleDeps {
             }
         }
         if self.django_relations && changed.0.django_relations {
+            return true;
+        }
+        if self.single_dispatch_registry && changed.0.single_dispatch_registry {
             return true;
         }
         if self.classes.iter().any(|c| changed.0.classes.contains(c)) {
