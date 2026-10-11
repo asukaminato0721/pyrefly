@@ -2959,3 +2959,38 @@ def first(shapes: IntTuple) -> IntTuple:
     changed.check_recompute(&["consumer", "helpers", "main"]);
     changed.check_errors();
 }
+
+#[test]
+fn test_singledispatchmethod_registration_invalidates_importer() {
+    let mut i = Incremental::with_files(vec!["foo".to_owned(), "main".to_owned()]);
+    let source = r#"
+from functools import singledispatchmethod
+class Base:
+    @singledispatchmethod
+    def method(self, value: object) -> None:
+        return None
+
+    @method.register
+    def integer(self, value: int) -> int:
+        return 1
+"#;
+    i.set("foo", source);
+    i.set(
+        "main",
+        "from foo import Base\nresult: int = Base().method(1)",
+    );
+    i.check(&["main"], &["foo", "main"]);
+
+    i.set(
+        "foo",
+        &source
+            .replace("-> int:", "-> str:")
+            .replace("return 1", "return 'text'"),
+    );
+    let changed = i.unchecked(&["main"]);
+    changed.check_recompute(&["foo", "main"]);
+    let errors = changed.errors.collect_display_errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].module().name(), ModuleName::from_str("main"));
+    assert!(errors[0].msg().contains("not assignable to `int`"));
+}

@@ -11,4 +11,5 @@ mod partial_edge;
 mod partial_generics;
 mod singledispatch;
 mod singledispatch_register;
+mod singledispatchmethod;
 mod util;

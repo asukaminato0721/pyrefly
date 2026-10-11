@@ -423,13 +423,12 @@ reveal_type(f.registry)  # E: revealed type: MappingProxyType[Any, (...) -> None
 "#,
 );
 
-// An annotated `singledispatchmethod` fallback whose body only raises keeps its declared return:
-// the annotation pins it, so `Never` does not leak into the revealed call type.
+// Registered methods retain their return types even when the fallback only raises.
 functools_testcase!(
     test_singledispatchmethod_raising_fallback_annotated_return,
     r#"
 from functools import singledispatchmethod
-from typing import reveal_type
+from typing import assert_type
 class Negator:
     @singledispatchmethod
     def neg(self, arg) -> object:
@@ -439,22 +438,24 @@ class Negator:
     @neg.register
     def _(self, arg: bool) -> bool: return not arg
 n = Negator()
-reveal_type(n.neg(5))  # E: revealed type: object
+assert_type(n.neg(5), int)
+assert_type(n.neg(True), bool)
+assert_type(n.neg("text"), object)
 "#,
 );
 
-// `singledispatchmethod` is not modeled (only the `singledispatch` function form), so an
-// unannotated raising fallback collapses to `Never` and `.register` is spuriously rejected.
+// An inferred `Never` fallback does not constrain registered methods.
 functools_testcase!(
-    bug = "unannotated raising singledispatchmethod fallback poisons the element type to Never, so .register is spuriously rejected",
-    test_singledispatchmethod_unannotated_raising_fallback_poisons,
+    test_singledispatchmethod_unannotated_raising_fallback,
     r#"
 from functools import singledispatchmethod
+from typing import assert_type
 class Negator:
     @singledispatchmethod
     def neg(self, arg):
         raise NotImplementedError
-    @neg.register  # E: No matching overload found for function `functools.singledispatchmethod.register`
+    @neg.register
     def _(self, arg: int) -> int: return -arg
+assert_type(Negator().neg(5), int)
 "#,
 );
