@@ -7076,6 +7076,94 @@ def f(i: int, s3: Int[3]) -> None:
 );
 
 testcase!(
+    test_unknown_shape_dimension_arguments,
+    shape_extensions_env().enable_unknown_shape_dimension_error(),
+    r#"
+from shape_extensions import Int, IntVar
+from typing import Any, Literal, TypedDict, assert_type
+
+def size[N: IntVar](x: Int[N]) -> Int[N]: ...
+def gradual(x: Int) -> None: ...
+def exact(x: Int[3]) -> None: ...
+def ordinary(x: int) -> None: ...
+def variadic(*xs: Int) -> None: ...
+
+class SizeArgs(TypedDict):
+    x: int
+
+def f(i: int, symbolic: Int[3], intentional: Int, literal: Literal[3], any_value: Any, args: tuple[int], kwargs: SizeArgs) -> None:
+    result = size(i)  # E: Argument of type `int` makes this shape dimension unknown. Use `Int[...]` to preserve dimension information.
+    assert_type(result, Int)
+    size(x=i)  # E: Argument of type `int` makes this shape dimension unknown
+    size(*args)  # E: Argument of type `int` makes this shape dimension unknown
+    size(**kwargs)  # E: Argument of type `int` makes this shape dimension unknown
+    gradual(i)  # E: Argument of type `int` makes this shape dimension unknown
+    variadic(i)  # E: Argument of type `int` makes this shape dimension unknown
+    size(i)  # pyrefly: ignore[unknown-shape-dimension]
+    ordinary(i)
+    size(3)
+    size(literal)
+    size(symbolic)
+    size(intentional)
+    size(any_value)
+    exact(i)  # E: Argument `int` is not assignable to parameter `x` with type `Int[3]`
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5166
+testcase!(
+    test_unknown_shape_dimension_constructor,
+    shape_extensions_env_with_torch().enable_unknown_shape_dimension_error(),
+    r#"
+from shape_extensions import Int, IntVar
+from torch import Tensor
+from typing import assert_type
+
+class Layer[C: IntVar]:
+    def __init__(self, channels: Int[C]) -> None: ...
+    def __call__[B: IntVar](self, x: Tensor[[B, C, 8, 8]]) -> Tensor[[B, 128, 8, 8]]: ...
+
+class FuseInt:
+    def __init__(self, in_ch: int) -> None:
+        self.layer = Layer(in_ch)  # E: Argument of type `int` makes this shape dimension unknown
+
+    def forward[B: IntVar](self, x: Tensor[[B, 256, 8, 8]]) -> Tensor[[B, 128, 8, 8]]:
+        return self.layer(x)
+
+class FuseTyped[C: IntVar]:
+    def __init__(self, in_ch: Int[C]) -> None:
+        self.layer = Layer(in_ch)
+
+    def forward[B: IntVar](self, x: Tensor[[B, C, 8, 8]]) -> Tensor[[B, 128, 8, 8]]:
+        return self.layer(x)
+
+def run[B: IntVar](x: Tensor[[B, 256, 8, 8]]) -> None:
+    assert_type(FuseInt(192).forward(x), Tensor[[B, 128, 8, 8]])
+    Layer(192)(x)  # E: Argument `Tensor[[B, 256, 8, 8]]` is not assignable
+    FuseTyped(192).forward(x)  # E: Argument `Tensor[[B, 256, 8, 8]]` is not assignable
+"#,
+);
+
+testcase!(
+    test_unknown_shape_dimension_overload,
+    shape_extensions_env().enable_unknown_shape_dimension_error(),
+    r#"
+from shape_extensions import Int
+from typing import Literal, assert_type, overload
+
+@overload
+def choose(x: Int) -> Literal["shape"]: ...
+@overload
+def choose(x: int) -> Literal["ordinary"]: ...
+def choose(x: int) -> str: ...
+
+def f(i: int) -> None:
+    result = choose(i)  # E: Argument of type `int` makes this shape dimension unknown
+    assert_type(result, Literal["shape"])
+"#,
+);
+
+testcase!(
     test_tensor_shapes_gradual_size_satisfies_fresh_symbolic_size,
     shape_extensions_env(),
     r#"

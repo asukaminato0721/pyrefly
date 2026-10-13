@@ -216,6 +216,7 @@ pub struct TestEnv {
     invalid_abstract_method_error: bool,
     empty_body_error: bool,
     unknown_argument_type_error: bool,
+    unknown_shape_dimension_error: bool,
     unknown_return_type_error: bool,
     unknown_variable_type_error: bool,
     unknown_attribute_access_error: bool,
@@ -281,6 +282,7 @@ impl TestEnv {
             invalid_abstract_method_error: false,
             empty_body_error: false,
             unknown_argument_type_error: false,
+            unknown_shape_dimension_error: false,
             unknown_return_type_error: false,
             unknown_variable_type_error: false,
             unknown_attribute_access_error: false,
@@ -573,6 +575,11 @@ impl TestEnv {
         self
     }
 
+    pub fn enable_unknown_shape_dimension_error(mut self) -> Self {
+        self.unknown_shape_dimension_error = true;
+        self
+    }
+
     pub fn enable_unknown_return_type_error(mut self) -> Self {
         self.unknown_return_type_error = true;
         self
@@ -810,6 +817,9 @@ impl TestEnv {
         }
         if self.unknown_argument_type_error {
             errors.set_error_severity(ErrorKind::UnknownArgumentType, Severity::Error);
+        }
+        if self.unknown_shape_dimension_error {
+            errors.set_error_severity(ErrorKind::UnknownShapeDimension, Severity::Error);
         }
         if self.implicit_any_lambda_error {
             errors.set_error_severity(ErrorKind::ImplicitAnyLambda, Severity::Error);
