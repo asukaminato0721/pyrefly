@@ -3623,6 +3623,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         match subset_result {
             Ok(()) => {
                 self.check_string_as_iterable(got, want, loc, options.errors);
+                // This soft diagnostic preserves argument compatibility and overload selection.
+                if call_context.is_some()
+                    && matches!(got, Type::ClassType(cls) if cls.is_builtin("int"))
+                    && matches!(want, Type::Int(_))
+                {
+                    self.error(
+                        options.errors,
+                        loc,
+                        ErrorKind::UnknownShapeDimension,
+                        "Argument of type `int` makes this shape dimension unknown. Use `Int[...]` to preserve dimension information.".to_owned(),
+                    );
+                }
                 None
             }
             Err(error) => {
