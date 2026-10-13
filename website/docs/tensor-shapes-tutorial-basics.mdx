@@ -57,6 +57,14 @@ Both flow to sub-module constructors, so both must be `Int`, not `int`.
 (`Int[X]` is a type that bridges a runtime integer value to a type-level
 symbol `X` — see [Getting Started](./tensor-shapes-setup.mdx) for details.)
 
+Enable [`unknown-shape-dimension`](./error-kinds.mdx#unknown-shape-dimension)
+to report calls where a plain `int` argument makes a dimension unknown:
+
+```toml
+[errors]
+unknown-shape-dimension = "warn"
+```
+
 There are also two fixed constants: `400` (hidden dimension). These are
 literal values, not parameters, so they don't need type params.
 

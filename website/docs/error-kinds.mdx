@@ -2123,6 +2123,41 @@ def get(obj: Config) -> int:
     return obj.value
 ```
 
+## unknown-shape-dimension
+
+Default severity: `ignore`
+
+A plain `int` argument passed to an `Int[...]` parameter makes the dimension unknown.
+Pyrefly accepts the argument, but cannot check that dimension against other tensor dimensions.
+Use an `Int[N]` annotation with an `IntVar` type parameter to preserve the dimension information.
+Integer literals and arguments already annotated with `Int[...]` do not cause this diagnostic.
+
+For example, a plain `int` constructor parameter can hide a channel mismatch:
+
+```python
+from shape_extensions import Int, IntVar
+from torch import nn
+
+class Layer(nn.Module):
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(channels, 128, 3)  # unknown-shape-dimension
+
+class TypedLayer[C: IntVar](nn.Module):
+    def __init__(self, channels: Int[C]) -> None:
+        super().__init__()
+        self.conv = nn.Conv2d(channels, 128, 3)
+```
+
+Enable the diagnostic in `pyrefly.toml`:
+
+```toml
+[errors]
+unknown-shape-dimension = "warn"
+```
+
+This diagnostic reports plain `int` arguments at calls. It does not measure all gaps in tensor shape checking.
+
 ## unknown-variable-type
 
 Default severity: `ignore`

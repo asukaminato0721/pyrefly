@@ -134,6 +134,7 @@
     "unknown-column": ["legacy", "default", "strict", "all"],
     "unknown-name": ["basic", "legacy", "default", "strict", "all"],
     "unknown-return-type": ["all"],
+    "unknown-shape-dimension": ["all"],
     "unknown-variable-type": ["all"],
     "unnecessary-comparison": ["legacy", "default", "strict", "all"],
     "unnecessary-type-conversion": ["legacy", "default", "strict", "all"],
