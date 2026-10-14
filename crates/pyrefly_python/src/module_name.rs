@@ -763,6 +763,19 @@ mod tests {
     }
 
     #[test]
+    fn test_module_from_path_digit_filename() {
+        let includes = [PathBuf::from("/root")];
+        for filename in ["0001_initial.py", "0001_initial.pyi", "123.py"] {
+            let path = Path::new("/root/pkg/migrations").join(filename);
+            let stem = path.file_stem().unwrap().to_str().unwrap();
+            assert_eq!(
+                ModuleName::from_path(&path, includes.iter(), &[]),
+                Some(ModuleName::from_str(&format!("pkg.migrations.{stem}")))
+            );
+        }
+    }
+
+    #[test]
     fn test_module_from_path_extra_extensions() {
         let includes = [PathBuf::from("/root")];
         let extra = vec!["cinc".to_owned(), "cconf".to_owned(), "mcconf".to_owned()];
@@ -891,16 +904,21 @@ mod tests {
             false
         ));
         assert!(!path_parts_form_valid_module_name(&["pkg.v1"], true));
-        // Extra-extension files: only the stem of the filename must be valid.
+        // Extra-extension files require identifier characters only in the stem.
         assert!(path_parts_form_valid_module_name(
             &["service", "config.cinc"],
             false
         ));
-        // A filename whose stem is not a valid identifier is rejected.
-        assert!(!path_parts_form_valid_module_name(
+        // A filename can start with a digit, but a directory cannot.
+        assert!(path_parts_form_valid_module_name(
             &["service", "1config.cinc"],
             false
         ));
+        assert!(!path_parts_form_valid_module_name(
+            &["1service", "config.cinc"],
+            false
+        ));
+        assert!(!path_parts_form_valid_module_name(&[".cinc"], false));
         assert!(!path_parts_form_valid_module_name(&["pkg-bad"], false));
         assert!(!path_parts_form_valid_module_name(
             &["service", "with space"],
@@ -962,7 +980,7 @@ mod tests {
             None
         );
 
-        // A filename whose stem is not a valid identifier is also rejected.
+        // Hyphens in a filename are rejected.
         assert_eq!(
             ModuleName::from_path(
                 Path::new("/outer/pkg/inner/bad-name.py"),

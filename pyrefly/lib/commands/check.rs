@@ -2583,6 +2583,35 @@ def go(w: Widget) -> int:
     }
 
     #[test]
+    fn check_relative_imports_in_digit_filename() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("pkg/migrations")).unwrap();
+        fs::write(root.join("pkg/__init__.py"), "").unwrap();
+        fs::write(root.join("pkg/models.py"), "value: int = 1\n").unwrap();
+        fs::write(root.join("pkg/migrations/__init__.py"), "local: int = 2\n").unwrap();
+        let mut files = Vec::new();
+        for filename in ["0001_initial.py", "0002_initial.pyi", "initial.py"] {
+            let path = root.join("pkg/migrations").join(filename);
+            fs::write(
+                &path,
+                "from typing import assert_type\n\
+                 from . import local\n\
+                 from .. import models\n\
+                 from ..models import value\n\
+                 assert_type(local, int)\n\
+                 assert_type(models.value, int)\n\
+                 assert_type(value, int)\n",
+            )
+            .unwrap();
+            files.push(path);
+        }
+        let mut checker = incremental_checker(root, files);
+        let errors = check(&mut checker, &CategorizedEvents::default()).diagnostics;
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
     fn incremental_checker_rechecks_modified_files() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("project");
