@@ -582,9 +582,9 @@ pub fn is_python_identifier(s: &str) -> bool {
 ///
 /// The filename component may legitimately contain `.` for extra-extension
 /// files (e.g. `config.cinc` → `config.cinc`), where the dots become module
-/// separators. Only its stem (the first dot-separated segment, i.e. the base
-/// name) must be a valid identifier; the trailing extension segments are not
-/// checked.
+/// separators. The stem (the first dot-separated segment) must contain only
+/// identifier characters. It can start with a digit, as in Django migration
+/// files loaded through `importlib`. The trailing extension segments are not checked.
 fn path_parts_form_valid_module_name(parts: &[impl AsRef<str>], is_init: bool) -> bool {
     if is_init {
         // Every remaining component is a directory.
@@ -593,8 +593,14 @@ fn path_parts_form_valid_module_name(parts: &[impl AsRef<str>], is_init: bool) -
     let (filename, dirs) = parts
         .split_last()
         .expect("path parts are non-empty when forming a module name");
+    let stem = filename
+        .as_ref()
+        .split('.')
+        .next()
+        .expect("splitting a filename always produces a stem");
     dirs.iter().all(|c| is_python_identifier(c.as_ref()))
-        && is_python_identifier(filename.as_ref().split('.').next().unwrap_or(""))
+        && !stem.is_empty()
+        && stem.chars().all(is_xid_continue)
 }
 
 #[cfg(test)]
