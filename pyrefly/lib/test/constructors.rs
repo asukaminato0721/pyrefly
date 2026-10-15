@@ -35,6 +35,43 @@ assert_type(v, Foo)
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5219
+testcase!(
+    test_constructor_after_explicit_object_mixin,
+    r#"
+from typing import assert_type
+
+class Mixin(object): ...
+
+class Field:
+    def __init__(self, *, db_column: str) -> None: ...
+
+class IntegerField(Field): ...
+class LdapIntegerField(Mixin, IntegerField): ...
+
+assert_type(LdapIntegerField(db_column="test"), LdapIntegerField)
+LdapIntegerField(db_column=0)  # E: Argument `Literal[0]` is not assignable to parameter `db_column` with type `str`
+"#,
+);
+
+testcase!(
+    test_new_after_explicit_object_mixin,
+    r#"
+from typing import Self, assert_type
+
+class Mixin(object): ...
+
+class Base:
+    def __new__(cls, *, value: int) -> Self:
+        return super().__new__(cls)
+
+class Child(Mixin, Base): ...
+
+assert_type(Child(value=1), Child)
+Child(value="test")  # E: Argument `Literal['test']` is not assignable to parameter `value` with type `int`
+"#,
+);
+
 testcase!(
     test_constructor_union,
     r#"

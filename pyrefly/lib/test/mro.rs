@@ -74,6 +74,28 @@ class C(B): pass
 }
 
 #[test]
+fn test_mro_explicit_object() {
+    let (handle, state) = mk_state(
+        r#"
+class Mixin(object): pass
+class Base: pass
+class Child(Mixin, Base): pass
+class ExplicitChild(Mixin, Base, object): pass
+"#,
+    );
+    assert_no_errors(&handle, &state);
+    assert!(get_mro_names("Mixin", &handle, &state).is_empty());
+    assert_eq!(
+        get_mro_names("Child", &handle, &state),
+        vec!["Mixin", "Base"]
+    );
+    assert_eq!(
+        get_mro_names("ExplicitChild", &handle, &state),
+        vec!["Mixin", "Base"]
+    );
+}
+
+#[test]
 fn test_mro_triangle() {
     let (handle, driver) = mk_state(
         r#"
