@@ -183,11 +183,16 @@ impl<'a> BindingsBuilder<'a> {
     ///
     /// Return the value of the attribute assignment (as an ExprOrBinding);
     /// this might be used to record self-attribute assignments.
+    /// The callback receives the target after expression binding.
     pub fn bind_attr_assign_impl(
         &mut self,
         mut attr: ExprAttribute,
         mut assigned: Option<&mut Expr>,
-        make_assigned_value: impl FnOnce(Option<&Expr>, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprAttribute,
+            Option<&Expr>,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
         ensure_assigned: bool,
     ) -> ExprOrBinding {
         let narrowing_identifier =
@@ -209,7 +214,7 @@ impl<'a> BindingsBuilder<'a> {
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }
-        let value = make_assigned_value(assigned.as_deref(), None);
+        let value = make_assigned_value(&attr, assigned.as_deref(), None);
         let idx = self.insert_binding_current(
             user,
             Binding::AssignToAttribute(Box::new(AssignToAttribute {
@@ -228,23 +233,32 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         attr: ExprAttribute,
         assigned: &mut Expr,
-        make_assigned_value: impl FnOnce(&Expr, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprAttribute,
+            &Expr,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
     ) -> ExprOrBinding {
         self.bind_attr_assign_impl(
             attr,
             Some(assigned),
-            |expr, ann| make_assigned_value(expr.unwrap(), ann),
+            |attr, expr, ann| make_assigned_value(attr, expr.unwrap(), ann),
             true,
         )
     }
 
     /// Create a binding to verify that a subscript assignment is valid and
     /// potentially narrow (or invalidate narrows on) the name assigned to.
+    /// The callback receives the target after expression binding.
     pub fn bind_subscript_assign_impl(
         &mut self,
         mut subscript: ExprSubscript,
         mut assigned: Option<&mut Expr>,
-        make_assigned_value: impl FnOnce(Option<&Expr>, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprSubscript,
+            Option<&Expr>,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
         ensure_assigned: bool,
     ) {
         let narrowing_identifier =
@@ -260,7 +274,7 @@ impl<'a> BindingsBuilder<'a> {
         if ensure_assigned && let Some(assigned) = &mut assigned {
             self.ensure_expr(assigned, user.usage());
         }
-        let value = make_assigned_value(assigned.as_deref(), None);
+        let value = make_assigned_value(&subscript, assigned.as_deref(), None);
         let idx = self.insert_binding_current(
             user,
             Binding::AssignToSubscript(Box::new((subscript, Box::new(value)))),
@@ -274,12 +288,16 @@ impl<'a> BindingsBuilder<'a> {
         &mut self,
         subscript: ExprSubscript,
         assigned: &mut Expr,
-        make_assigned_value: impl FnOnce(&Expr, Option<Idx<KeyAnnotation>>) -> ExprOrBinding,
+        make_assigned_value: impl FnOnce(
+            &ExprSubscript,
+            &Expr,
+            Option<Idx<KeyAnnotation>>,
+        ) -> ExprOrBinding,
     ) {
         self.bind_subscript_assign_impl(
             subscript,
             Some(assigned),
-            |expr, ann| make_assigned_value(expr.unwrap(), ann),
+            |subscript, expr, ann| make_assigned_value(subscript, expr.unwrap(), ann),
             true,
         )
     }
@@ -324,7 +342,7 @@ impl<'a> BindingsBuilder<'a> {
                 let attr_value = self.bind_attr_assign_impl(
                     x.clone(),
                     assigned,
-                    make_assigned_value,
+                    |_, expr, ann| make_assigned_value(expr, ann),
                     ensure_assigned,
                 );
                 // If this is a self-assignment, record it because we may use it to infer
@@ -335,7 +353,7 @@ impl<'a> BindingsBuilder<'a> {
                 self.bind_subscript_assign_impl(
                     x.clone(),
                     assigned,
-                    make_assigned_value,
+                    |_, expr, ann| make_assigned_value(expr, ann),
                     ensure_assigned,
                 );
             }

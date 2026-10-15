@@ -1173,7 +1173,7 @@ impl<'a> BindingsBuilder<'a> {
                     );
                     let value = match x.value {
                         Some(mut assigned) => {
-                            self.bind_attr_assign(attr.clone(), &mut assigned, |v, _| {
+                            self.bind_attr_assign(attr.clone(), &mut assigned, |_, v, _| {
                                 ExprOrBinding::Expr(v.clone())
                             })
                         }
@@ -1245,17 +1245,23 @@ impl<'a> BindingsBuilder<'a> {
                     }
                     Expr::Attribute(attr) => {
                         let mut x_cloned = x.clone();
-                        self.bind_attr_assign(attr.clone(), &mut x.value, move |expr, ann| {
-                            *x_cloned.value = expr.clone();
-                            ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
-                        });
+                        self.bind_attr_assign(
+                            attr.clone(),
+                            &mut x.value,
+                            move |attr, expr, ann| {
+                                *x_cloned.target = Expr::Attribute(attr.clone());
+                                *x_cloned.value = expr.clone();
+                                ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
+                            },
+                        );
                     }
                     Expr::Subscript(subscr) => {
                         let mut x_cloned = x.clone();
                         self.bind_subscript_assign(
                             subscr.clone(),
                             &mut x.value,
-                            move |expr, ann| {
+                            move |subscript, expr, ann| {
+                                *x_cloned.target = Expr::Subscript(subscript.clone());
                                 *x_cloned.value = expr.clone();
                                 ExprOrBinding::Binding(Binding::AugAssign(ann, Box::new(x_cloned)))
                             },
