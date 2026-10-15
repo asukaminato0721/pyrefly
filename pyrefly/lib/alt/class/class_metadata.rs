@@ -2107,6 +2107,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let bases = self.get_base_types_for_class(cls);
         let bases_with_mros: Vec<_> = bases
             .iter()
+            // `ClassMro::ancestors` adds `object` last, including when it is an explicit base.
+            .filter(|base| !base.is_builtin("object"))
             .map(|base| {
                 let mro = self.get_mro_for_class(base.class_object());
                 (base, mro)
