@@ -628,6 +628,48 @@ x += [1]  # E: Augmented assignment result `list[int | list[int]]` is not assign
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5220
+testcase!(
+    test_aug_assign_subscript_forward_ref,
+    r#"
+from typing import cast
+
+index = 0
+values = [1]
+values[cast("int", index)] += 1
+values[cast("int", index)] -= 1
+values[cast("int", index)] *= 1
+values[cast("int", index)] **= 1
+values[cast("int", index)] //= 1
+values[cast("int", index)] %= 1
+values[cast("int", index)] >>= 1
+values[cast("int", index)] <<= 1
+values[cast("int", index)] &= 1
+values[cast("int", index)] ^= 1
+values[cast("int", index)] |= 1
+values[cast(typ="int", val=index)] += 1
+values[cast("int", index)] += "bad"  # E: `+=` is not supported
+
+def update(values: object, index: int):
+    cast("list[int]", values)[index] += 1
+    "#,
+);
+
+testcase!(
+    test_aug_assign_attr_forward_ref,
+    r#"
+from typing import cast
+
+class C:
+    value: int = 0
+
+def update(obj: object):
+    cast("C", obj).value += 1
+    cast(typ="C", val=obj).value += 1
+    cast("C", obj).value += "bad"  # E: `+=` is not supported
+    "#,
+);
+
 testcase!(
     test_assign_special_subtype,
     r#"
