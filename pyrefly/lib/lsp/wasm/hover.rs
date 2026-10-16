@@ -1519,7 +1519,40 @@ pub fn get_hover_with_verbosity(
                 .map(|range| Docstring(range, item.module))
         })
         .filter(|docstring| !docstring.resolve().trim().is_empty())
-        .or(fallback_docstring);
+        .or(fallback_docstring)
+        .filter(|docstring| !docstring.resolve().trim().is_empty())
+        .or_else(|| {
+            if !matches!(name.as_deref(), Some("__init__" | "__new__")) {
+                return None;
+            }
+            // Constructor calls use the class documentation when the method has no documentation.
+            [true, false].into_iter().find_map(|prefer_pyi| {
+                transaction
+                    .find_definition(
+                        handle,
+                        position,
+                        FindPreference {
+                            prefer_pyi,
+                            resolve_call_dunders: false,
+                            include_interpreter_stdlib: true,
+                            ..Default::default()
+                        },
+                    )
+                    .ok()?
+                    .into_iter()
+                    .filter(|item| {
+                        matches!(
+                            item.metadata.symbol_kind(),
+                            Some(SymbolKind::Class | SymbolKind::Attribute)
+                        )
+                    })
+                    .find_map(|item| {
+                        item.docstring_range
+                            .map(|range| Docstring(range, item.module))
+                            .filter(|docstring| !docstring.resolve().trim().is_empty())
+                    })
+            })
+        });
 
     let name = name.or_else(|| identifier_text_at(transaction, handle, position));
 
