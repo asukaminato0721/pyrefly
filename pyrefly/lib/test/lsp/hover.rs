@@ -2484,6 +2484,117 @@ y = 1 or 2 or 3
 }
 
 #[test]
+fn hover_on_constructor_uses_class_docstring_when_init_has_no_docstring() {
+    for init_docstring in ["", "\"\"\"\"\"\"", "\"\"\"Constructor documentation.\"\"\""] {
+        let lib = format!(
+            r#"
+class Person:
+    """Class documentation."""
+    def __init__(self, name: str) -> None:
+        {init_docstring}
+        pass
+"#
+        );
+        let code = r#"
+from lib import Person
+import lib
+
+Person("Alice")
+#^
+lib.Person("Alice")
+#    ^
+"#;
+        let report =
+            get_batched_lsp_operations_report(&[("main", code), ("lib", &lib)], get_test_report);
+        let expected_docstring = if init_docstring.contains("Constructor documentation.") {
+            "Constructor documentation."
+        } else {
+            "Class documentation."
+        };
+        assert_eq!(report.matches(expected_docstring).count(), 2, "{report}");
+        if expected_docstring == "Constructor documentation." {
+            assert!(!report.contains("Class documentation."), "{report}");
+        }
+        assert!(report.contains("-> Person"), "{report}");
+    }
+}
+
+#[test]
+fn hover_on_inherited_constructor_uses_subclass_docstring() {
+    let code = r#"
+class Base:
+    """Base documentation."""
+    def __init__(self, name: str) -> None: ...
+
+class Child(Base):
+    """Child documentation."""
+
+Child("Alice")
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(report.contains("Child documentation."), "{report}");
+    assert!(!report.contains("Base documentation."), "{report}");
+}
+
+#[test]
+fn hover_on_direct_init_call_does_not_use_class_docstring() {
+    let code = r#"
+class Person:
+    """Class documentation."""
+    def __init__(self, name: str) -> None: ...
+
+person = Person("Alice")
+person.__init__("Bob")
+#         ^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(!report.contains("Class documentation."), "{report}");
+    assert!(report.contains("-> None"), "{report}");
+}
+
+#[test]
+fn hover_on_constructor_class_docstring_prefers_nonempty_stub() {
+    for stub_docstring in ["Stub documentation.", ""] {
+        let mut test_env = TestEnv::new();
+        test_env.add_with_path(
+            "lib",
+            "lib.py",
+            r#"
+class Person:
+    """Implementation documentation."""
+    def __init__(self, name: str) -> None: ...
+"#,
+        );
+        test_env.add_with_path(
+            "lib",
+            "lib.pyi",
+            &format!(
+                r#"
+class Person:
+    """{stub_docstring}"""
+    def __init__(self, name: str) -> None: ...
+"#
+            ),
+        );
+        let code = r#"
+from lib import Person
+Person("Alice")
+#^
+"#;
+        test_env.add("main", code);
+        let (state, handle) = test_env.to_state();
+        let report = get_test_report(&state, &handle("main"), extract_cursors_for_test(code)[0]);
+        let expected_docstring = if stub_docstring.trim().is_empty() {
+            "Implementation documentation."
+        } else {
+            stub_docstring
+        };
+        assert!(report.contains(expected_docstring), "{report}");
+    }
+}
+
+#[test]
 fn hover_on_constructor_with_arguments() {
     let code = r#"
 class Person:
