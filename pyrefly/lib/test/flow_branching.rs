@@ -250,6 +250,114 @@ print("not reported for parity") if False else None
 );
 
 testcase!(
+    test_comprehension_unpack,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+from collections.abc import Generator
+from typing import assert_type
+
+lists = [[1, 2], [3]]
+dicts = [{"a": 1}, {"b": 2}]
+
+assert_type([*x for x in lists], list[int])
+assert_type({*x for x in lists}, set[int])
+assert_type((*x for x in lists), Generator[int, None, None])
+assert_type({**d for d in dicts}, dict[str, int])
+"#,
+);
+
+testcase!(
+    test_comprehension_unpack_iterables,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+from collections.abc import Generator, Iterable
+from typing import Any, assert_type
+
+def f(xs: Iterable[Iterable[int | str]], ys: list[list[int] | None], unknown: Any):
+    assert_type([*x for x in xs], list[int | str])
+    assert_type({*x for x in xs}, set[int | str])
+    assert_type((*x for x in xs), Generator[int | str, None, None])
+    assert_type([*y for y in ys if y is not None], list[int])
+    assert_type([*x for x in unknown], list[Any])
+
+assert_type([*x for x in ["ab", "cd"]], list[str])
+assert_type({*x for x in [(1, "a")]}, set[int | str])
+assert_type((*x for x in [{"a": 1}]), Generator[str, None, None])
+"#,
+);
+
+testcase!(
+    test_comprehension_unpack_mappings,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+from collections.abc import Iterable, Mapping
+from typing import Any, TypedDict, assert_type
+
+class StructuralMapping:
+    def keys(self) -> list[str]:
+        return ["a"]
+    def __getitem__(self, key: str) -> int:
+        return 1
+
+class Row(TypedDict):
+    name: str
+    count: int
+
+def f(mappings: Iterable[Mapping[str, int]], rows: list[Row], unknown: Any):
+    assert_type({**d for d in mappings}, dict[str, int])
+    # An open TypedDict can contain additional fields with unknown value types.
+    assert_type({**d for d in rows}, dict[str, object])
+    assert_type({**d for d in unknown}, dict[Any, Any])
+
+assert_type({**d for d in [StructuralMapping()]}, dict[str, int])
+"#,
+);
+
+testcase!(
+    test_comprehension_unpack_context,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+from collections.abc import Generator
+
+class A: ...
+class B(A): ...
+
+xs: list[A] = [*[B()] for _ in [0]]
+ys: set[A] = {*[B()] for _ in [0]}
+zs: Generator[list[A], None, None] = (*[[B()]] for _ in [0])
+ds: dict[A, A | None] = {**d for d in [{B(): B()}]}
+"#,
+);
+
+testcase!(
+    test_comprehension_unpack_async,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+from collections.abc import AsyncGenerator, AsyncIterable
+from typing import assert_type
+
+async def f(xs: AsyncIterable[list[int]], ds: AsyncIterable[dict[str, int]]):
+    assert_type([*x async for x in xs], list[int])
+    assert_type({*x async for x in xs}, set[int])
+    assert_type((*x async for x in xs), AsyncGenerator[int, None])
+    assert_type({**d async for d in ds}, dict[str, int])
+"#,
+);
+
+testcase!(
+    test_comprehension_unpack_errors,
+    TestEnv::new_with_version(PythonVersion::new(3, 15, 0)),
+    r#"
+def f(xs: list[int]):
+    [*x for x in xs]  # E: Expected an iterable, got `int`
+    {*x for x in xs}  # E: Expected an iterable, got `int`
+    (*x for x in xs)  # E: Expected an iterable, got `int`
+    {**x for x in xs}  # E: Expected a mapping, got int
+    {**x for x in [[("a", 1)]]}  # E: Expected a mapping
+"#,
+);
+
+testcase!(
     test_listcomp_simple,
     r#"
 from typing import assert_type
