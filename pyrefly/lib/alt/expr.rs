@@ -850,11 +850,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         .map(ListElementHint::into_parts)
                         .unwrap_or_default();
                     self.ifs_infer(&x.generators, errors);
-                    let elem_ty = self.expr_infer_with_hint_promote(
+                    let elem_ty = self.elt_infer(
                         &x.elt,
                         HintRef::with_ty_opt(hint, elem_hint.as_ref()),
                         errors,
-                        HintCoercion::BestEffort,
                     );
                     let ty = self.heap.mk_class_type(self.stdlib.list(elem_ty));
                     if let Some(partial_fallback) = partial_fallback {
@@ -870,11 +869,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 |hint| self.decompose_set(hint),
                 |elem_hint, hint| {
                     self.ifs_infer(&x.generators, errors);
-                    let elem_ty = self.expr_infer_with_hint_promote(
+                    let elem_ty = self.elt_infer(
                         &x.elt,
                         HintRef::with_ty_opt(hint, elem_hint.as_ref()),
                         errors,
-                        HintCoercion::BestEffort,
                     );
                     self.heap.mk_class_type(self.stdlib.set(elem_ty))
                 },
@@ -891,6 +889,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 },
                 |decomposed_hints, hint| {
                     let (key_hint, value_hint) = decomposed_hints.unwrap_or_default();
+                    self.ifs_infer(&x.generators, errors);
+                    // A missing key represents dictionary unpacking: `{**d for d in dicts}`.
+                    let Some(key) = &x.key else {
+                        let ty = self.expr_infer(&x.value, errors);
+                        let Some((mut key_ty, mut value_ty)) =
+                            self.unwrap_mapping_for_unpacking(&ty)
+                        else {
+                            return self.error(
+                                errors,
+                                x.value.range(),
+                                ErrorKind::InvalidArgument,
+                                format!("Expected a mapping, got {}", self.for_display(ty)),
+                            );
+                        };
+                        if let Some(hint) = key_hint
+                            && self.is_subset_eq(&key_ty, &hint)
+                        {
+                            key_ty = hint;
+                        }
+                        if let Some(hint) = value_hint
+                            && self.is_subset_eq(&value_ty, &hint)
+                        {
+                            value_ty = hint;
+                        }
+                        return self.heap.mk_class_type(self.stdlib.dict(key_ty, value_ty));
+                    };
                     let key_hint = key_hint.as_ref().and_then(|key_hint| {
                         hint.as_ref()
                             .map(|hint| HintRef::new(key_hint, hint.errors()))
@@ -899,18 +923,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         hint.as_ref()
                             .map(|hint| HintRef::new(value_hint, hint.errors()))
                     });
-                    self.ifs_infer(&x.generators, errors);
-                    // `key` is only `None` for a syntactically invalid dict comprehension
-                    // (parser error recovery); the parser already reports the syntax error.
-                    let key_ty = match &x.key {
-                        Some(key) => self.dict_key_infer_with_hint(
-                            key,
-                            key_hint,
-                            errors,
-                            HintCoercion::BestEffort,
-                        ),
-                        None => self.heap.mk_any_error(),
-                    };
+                    let key_ty = self.dict_key_infer_with_hint(
+                        key,
+                        key_hint,
+                        errors,
+                        HintCoercion::BestEffort,
+                    );
                     let value_ty = self.expr_infer_with_hint_promote(
                         &x.value,
                         value_hint,
@@ -925,14 +943,13 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 |hint| self.decompose_generator(hint).map(|(y, _, _)| y),
                 |yield_hint, hint| {
                     self.ifs_infer(&x.generators, errors);
-                    let yield_ty = self
-                        .expr_infer_impl(
-                            &x.elt,
-                            HintRef::with_ty_opt(hint, yield_hint.as_ref()),
-                            errors,
-                            None,
-                        )
-                        .into_ty();
+                    let yield_hint = HintRef::with_ty_opt(hint, yield_hint.as_ref());
+                    let yield_ty = if x.elt.is_starred_expr() {
+                        self.elt_infer(&x.elt, yield_hint, errors)
+                    } else {
+                        self.expr_infer_impl(&x.elt, yield_hint, errors, None)
+                            .into_ty()
+                    };
                     if self.generator_expr_is_async(x) {
                         self.heap.mk_class_type(
                             self.stdlib.async_generator(yield_ty, self.heap.mk_none()),
@@ -3251,16 +3268,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         elt_hint: Option<HintRef>,
         errors: &ErrorCollector,
     ) -> Vec<Type> {
-        let star_hint = LazyCell::new(|| {
-            elt_hint.map(|hint| {
-                Type::union(
-                    hint.types()
-                        .map(|hint| self.heap.mk_class_type(self.stdlib.iterable(hint.clone()))),
-                )
-            })
-        });
-        elts.map(|x| match x {
+        elts.map(|x| self.elt_infer(x, elt_hint, errors))
+    }
+
+    /// Infers an element type, including iterable unpacking in literals and comprehensions.
+    fn elt_infer(&self, x: &Expr, elt_hint: Option<HintRef>, errors: &ErrorCollector) -> Type {
+        match x {
             Expr::Starred(ExprStarred { value, .. }) => {
+                let star_hint =
+                    elt_hint.map(|hint| {
+                        Type::union(hint.types().map(|hint| {
+                            self.heap.mk_class_type(self.stdlib.iterable(hint.clone()))
+                        }))
+                    });
                 let unpacked_ty = self.expr_infer_with_hint_promote(
                     value,
                     HintRef::with_ty_opt(elt_hint, star_hint.as_ref()),
@@ -3282,7 +3302,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 }
             }
             _ => self.expr_infer_with_hint_promote(x, elt_hint, errors, HintCoercion::BestEffort),
-        })
+        }
     }
 
     fn is_enum_class_type(&self, ty: &Type) -> bool {
