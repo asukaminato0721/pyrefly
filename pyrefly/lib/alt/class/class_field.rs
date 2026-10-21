@@ -4309,11 +4309,20 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             {
                 continue;
             }
-            // Should we compare callable ClassVars before method binding removes their first parameter?
-            let should_compare_as_class_attributes = class_field.is_class_var()
-                && want_class_field.is_class_var()
-                && (matches!(&class_field.0, ClassFieldInner::Method { .. })
-                    || matches!(&want_class_field.0, ClassFieldInner::Method { .. }));
+            // Static methods and class methods must remain callable on the class.
+            // Callable ClassVars must also preserve their unbound signatures.
+            let should_compare_as_class_attributes =
+                (Self::is_ordinary_instance_method_type(&class_field.ty())
+                    && want_class_field
+                        .ty()
+                        .toplevel_func_metadata()
+                        .is_some_and(|meta| {
+                            meta.flags.is_staticmethod || meta.flags.is_classmethod
+                        }))
+                    || (class_field.is_class_var()
+                        && want_class_field.is_class_var()
+                        && (matches!(&class_field.0, ClassFieldInner::Method { .. })
+                            || matches!(&want_class_field.0, ClassFieldInner::Method { .. })));
             let want_attribute = {
                 // Substitute `Self` with the derived class to support contravariant occurrences.
                 let parent_instance = Instance::of_protocol(parent, self.instantiate(cls));
@@ -5650,7 +5659,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    /// Filter out overloads from a parent's attribute whose `self` parameter type is
+    /// Filter out overloads from a parent's attribute whose receiver type is
     /// incompatible with the child class. This prevents false positive `bad-override` errors.
     fn filter_overloads_for_override(
         &self,
@@ -5671,6 +5680,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     else {
                         unreachable!("guarded by matches! above")
                     };
+                    let receiver_type = if overload.metadata.flags.is_classmethod {
+                        Type::type_of(child_type.clone())
+                    } else {
+                        child_type.clone()
+                    };
                     let applicable: Vec<_> = overload
                         .signatures
                         .into_iter()
@@ -5681,7 +5695,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                     forall.body.signature.get_first_param()
                                 }
                             };
-                            self_param.is_none_or(|param| self.is_subset_eq(&child_type, param))
+                            self_param.is_none_or(|param| self.is_subset_eq(&receiver_type, param))
                         })
                         .collect();
                     let signatures = vec1::Vec1::try_from_vec(applicable).ok()?;
