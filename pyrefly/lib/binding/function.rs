@@ -43,6 +43,7 @@ use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 use starlark_map::Hashed;
 use starlark_map::small_map::SmallMap;
+use starlark_map::small_set::SmallSet;
 use thin_vec::ThinVec;
 
 use crate::binding::binding::AnnotationTarget;
@@ -104,6 +105,7 @@ struct Decorators {
     is_classmethod: bool,
     is_staticmethod: bool,
     decorator_kind: FunctionDecorators,
+    is_triton_jit: bool,
     decorators: Box<[Idx<KeyDecorator>]>,
 }
 
@@ -340,6 +342,7 @@ impl<'a> BindingsBuilder<'a> {
         has_receiver: bool,
         override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotations: bool,
+        triton_constexpr_parameters: &SmallSet<Name>,
     ) {
         let mut self_name = None;
         for x in x.iter_non_variadic_params() {
@@ -347,7 +350,11 @@ impl<'a> BindingsBuilder<'a> {
                 self_name = Some(x.parameter.name.clone());
             }
             self.bind_function_param(
-                AnnotationTarget::Param(x.parameter.name.id.clone()),
+                if triton_constexpr_parameters.contains(&x.parameter.name.id) {
+                    AnnotationTarget::TritonConstexprParam(x.parameter.name.id.clone())
+                } else {
+                    AnnotationTarget::Param(x.parameter.name.id.clone())
+                },
                 &x.parameter,
                 undecorated_idx,
                 class_key,
@@ -554,6 +561,7 @@ impl<'a> BindingsBuilder<'a> {
         method_self_kind: MethodSelfKind,
         has_receiver: bool,
         override_func: Option<Idx<KeyUndecoratedFunction>>,
+        triton_constexpr_parameters: &SmallSet<Name>,
     ) -> (
         YieldsAndReturns,
         Option<SelfAssignments>,
@@ -570,6 +578,7 @@ impl<'a> BindingsBuilder<'a> {
             has_receiver,
             override_func,
             false,
+            triton_constexpr_parameters,
         );
         self.init_static_scope(&body, false);
         self.seed_captured_variables();
@@ -616,6 +625,7 @@ impl<'a> BindingsBuilder<'a> {
         has_receiver: bool,
         override_func: Option<Idx<KeyUndecoratedFunction>>,
         ignore_annotations: bool,
+        triton_constexpr_parameters: &SmallSet<Name>,
     ) -> Option<SelfAssignments> {
         // Push a scope to create the parameter keys (but do nothing else with it).
         self.scopes
@@ -628,6 +638,7 @@ impl<'a> BindingsBuilder<'a> {
             has_receiver,
             override_func,
             ignore_annotations,
+            triton_constexpr_parameters,
         );
         self.scopes.pop();
         // Receiver methods use a simple visitor to find `self.<attr>` assignments.
@@ -830,6 +841,7 @@ impl<'a> BindingsBuilder<'a> {
         let mut is_staticmethod = false;
         let mut decorator_kind = FunctionDecorators::Undecorated;
         let mut all_receiver_overload = true;
+        let mut is_triton_jit = false;
         for d in &decorator_list {
             let special_export = self.as_special_export(&d.expression);
             let receiver_special = if self.track_classmethod_uses {
@@ -843,6 +855,11 @@ impl<'a> BindingsBuilder<'a> {
             } else {
                 FunctionDecorators::Other
             };
+            let decorator_export = match &d.expression {
+                Expr::Call(call) => self.as_special_export(&call.func),
+                _ => special_export,
+            };
+            is_triton_jit = is_triton_jit || decorator_export == Some(SpecialExport::TritonJit);
             is_overload = is_overload || matches!(special_export, Some(SpecialExport::Overload));
             is_override = is_override || matches!(special_export, Some(SpecialExport::Override));
             is_abstract_method = is_abstract_method
@@ -878,6 +895,7 @@ impl<'a> BindingsBuilder<'a> {
             is_classmethod,
             is_staticmethod,
             decorator_kind,
+            is_triton_jit,
             decorators,
         }
     }
@@ -897,6 +915,20 @@ impl<'a> BindingsBuilder<'a> {
         undecorated_idx: Idx<KeyUndecoratedFunction>,
         class_key: Option<Idx<KeyClass>>,
     ) -> (BodyKind, bool, bool, Option<SelfAssignments>) {
+        // Resolve markers before parameter names can shadow imports from Triton.
+        let triton_constexpr_parameters = if decorators.is_triton_jit {
+            parameters
+                .iter_non_variadic_params()
+                .filter(|p| {
+                    p.annotation().is_some_and(|annotation| {
+                        self.as_special_export(annotation) == Some(SpecialExport::TritonConstexpr)
+                    })
+                })
+                .map(|p| p.parameter.name.id.clone())
+                .collect::<SmallSet<_>>()
+        } else {
+            SmallSet::new()
+        };
         // If the first statement in the body is a docstring, remove it
         let body_no_docstring = if let Some(s) = body.first()
             && is_docstring(s)
@@ -986,6 +1018,7 @@ impl<'a> BindingsBuilder<'a> {
                 has_receiver,
                 override_func,
                 decorators.has_no_type_check,
+                &triton_constexpr_parameters,
             );
             (false, self_assignments)
         } else if is_unannotated {
@@ -1002,6 +1035,7 @@ impl<'a> BindingsBuilder<'a> {
                 method_self_kind,
                 has_receiver,
                 override_func,
+                &triton_constexpr_parameters,
             );
             self.analyze_return_type(
                 func_name,
@@ -1032,6 +1066,7 @@ impl<'a> BindingsBuilder<'a> {
                     method_self_kind,
                     has_receiver,
                     override_func,
+                    &triton_constexpr_parameters,
                 );
             if !ignore_unused_parameters {
                 self.record_unused_parameters(unused_parameters);
