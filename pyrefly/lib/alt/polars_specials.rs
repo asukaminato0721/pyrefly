@@ -1841,11 +1841,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         kind: DataFrameKind,
         errors: &ErrorCollector,
     ) -> Option<(Vec<(Name, PolarsDType)>, SchemaCompleteness)> {
-        let completeness = if kind == DataFrameKind::Polars {
-            SchemaCompleteness::Complete
-        } else {
-            SchemaCompleteness::Partial
-        };
+        let completeness = SchemaCompleteness::Complete;
         let element_from_data = |name: &Name, value: &Expr| match value {
             Expr::List(ExprList { elts, .. }) => {
                 self.dataframe_list_element_type(name, elts.iter(), kind, construct.strict, errors)

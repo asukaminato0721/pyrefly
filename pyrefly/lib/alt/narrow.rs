@@ -12,6 +12,7 @@ use pyrefly_graph::index::Idx;
 use pyrefly_python::ast::Ast;
 use pyrefly_python::dunder;
 use pyrefly_types::class::Class;
+use pyrefly_types::data_frame::DataFrameKind;
 use pyrefly_types::display::TypeDisplayContext;
 use pyrefly_types::facet::FacetChain;
 use pyrefly_types::facet::FacetKind;
@@ -1852,6 +1853,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     self.polars_series_constructor(callee)
                 })
             }
+            AtomicNarrowOp::PandasColumnMutation => self.distribute_over_union(ty, |ty| {
+                if let Type::DataFrame(schema) = ty
+                    && schema.kind == DataFrameKind::Pandas
+                {
+                    schema.underlying_type()
+                } else {
+                    ty.clone()
+                }
+            }),
             AtomicNarrowOp::Eq(v) => {
                 let right = self.expr_infer(v, errors);
                 if Self::is_literal(&right) {

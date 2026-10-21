@@ -115,6 +115,8 @@ pub enum AtomicNarrowOp {
     IsFalsy,
     /// An unconditional in-place DataFrame schema mutation.
     PolarsColumnMutation(PolarsMutationKind),
+    /// Discard a pandas schema after an unsupported in-place mutation.
+    PandasColumnMutation,
     /// An operation that might be true or false, but does not narrow the name
     /// currently under consideration (for example, if we are modeling the
     /// narrowing for name `x` from `x is None or y is None`). We need to
@@ -229,6 +231,7 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             AtomicNarrowOp::PolarsColumnMutation(kind) => {
                 write!(f, "PolarsColumnMutation({kind:?})")
             }
+            AtomicNarrowOp::PandasColumnMutation => write!(f, "PandasColumnMutation"),
             AtomicNarrowOp::Placeholder => write!(f, "Placeholder"),
             AtomicNarrowOp::ClassCoverageGate(ks) => write!(f, "ClassCoverageGate({ks:?})"),
             AtomicNarrowOp::ClassCoverageGateNeg(ks) => write!(f, "ClassCoverageGateNeg({ks:?})"),
@@ -336,7 +339,7 @@ impl AtomicNarrowOp {
             }
             Self::IsTruthy => Some(subject.to_owned()),
             Self::IsFalsy => Some(format!("not {subject}")),
-            Self::PolarsColumnMutation(_) => None,
+            Self::PolarsColumnMutation(_) | Self::PandasColumnMutation => None,
             Self::TypeGuard(_, arguments) => Some(format!(
                 "TypeGuard{}",
                 snippet(arguments.range()).unwrap_or_default()
@@ -397,6 +400,7 @@ impl AtomicNarrowOp {
             Self::IsTruthy => Self::IsFalsy,
             Self::IsFalsy => Self::IsTruthy,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
+            Self::PandasColumnMutation => Self::PandasColumnMutation,
             Self::Placeholder => Self::Placeholder,
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),
             Self::ClassCoverageGateNeg(ks) => Self::ClassCoverageGate(ks.clone()),

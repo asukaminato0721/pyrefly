@@ -2057,10 +2057,23 @@ impl<'a> BindingsBuilder<'a> {
                 let mutated_receiver = if let Expr::Call(call) = &*x.value
                     && let Expr::Attribute(func) = &*call.func
                     && let Expr::Name(receiver) = &*func.value
-                    && let Some(kind) =
-                        polars_column_mutation(func.attr.id.as_str(), &call.arguments)
                 {
-                    Some((receiver.id.clone(), func.attr.range, kind))
+                    let op = if let Some(kind) =
+                        polars_column_mutation(func.attr.id.as_str(), &call.arguments)
+                    {
+                        Some(AtomicNarrowOp::PolarsColumnMutation(kind))
+                    } else if matches!(
+                        func.attr.id.as_str(),
+                        "insert" | "pop" | "update" | "__setitem__" | "__delitem__"
+                    ) || call.arguments.keywords.iter().any(|kw| {
+                        kw.arg.as_ref().is_some_and(|arg| arg.as_str() == "inplace")
+                            && !matches!(&kw.value, Expr::BooleanLiteral(b) if !b.value)
+                    }) {
+                        Some(AtomicNarrowOp::PandasColumnMutation)
+                    } else {
+                        None
+                    };
+                    op.map(|op| (receiver.id.clone(), func.attr.range, op))
                 } else {
                     None
                 };
@@ -2108,15 +2121,11 @@ impl<'a> BindingsBuilder<'a> {
                     .insert_binding_current(current, Binding::StmtExpr(x.value, special_export));
                 // Track this StmtExpr as the trailing statement for type-based termination
                 self.scopes.set_last_stmt_expr(Some(key));
-                if let Some((name, range, kind)) = mutated_receiver {
+                if let Some((name, range, op)) = mutated_receiver {
                     let mut narrow_ops = NarrowOps::new();
-                    narrow_ops.0.insert(
-                        name,
-                        (
-                            NarrowOp::Atomic(None, AtomicNarrowOp::PolarsColumnMutation(kind)),
-                            range,
-                        ),
-                    );
+                    narrow_ops
+                        .0
+                        .insert(name, (NarrowOp::Atomic(None, op), range));
                     self.bind_narrow_ops(
                         &narrow_ops,
                         NarrowUseLocation::Span(range),

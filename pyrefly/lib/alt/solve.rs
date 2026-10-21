@@ -15,11 +15,14 @@ use pyrefly_python::dunder;
 use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_types::data_frame::DataFrameKind;
+use pyrefly_types::data_frame::SchemaCompleteness;
 use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::function::BodyKind;
 use pyrefly_types::identity::IdentityIgnored;
+use pyrefly_types::polars_dtype::PolarsDType;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
@@ -5877,6 +5880,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             attr.range,
             errors,
         );
+        // Replacing pandas column labels invalidates the constructor's schema.
+        if attr.attr.id == "columns"
+            && matches!(&*attr.value, Expr::Name(_))
+            && let Type::DataFrame(schema) = &base
+            && schema.kind == DataFrameKind::Pandas
+        {
+            return TypeInfo::of_ty(schema.underlying_type());
+        }
         // Assignment targets are not inferred as reads, so record their types for hover.
         if let Some(ty) = &narrowed {
             self.record_type_trace(attr.range, ty);
@@ -5930,6 +5941,31 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> TypeInfo {
         // If we can't assign to this subscript, then we don't narrow the type
         let (assigned_ty, base_ty) = self.check_assign_to_subscript(subscript, value, errors);
+        // Indexer writes can add columns or change their dtypes.
+        if let Expr::Attribute(indexer) = &*subscript.value
+            && matches!(indexer.attr.id.as_str(), "loc" | "iloc" | "at" | "iat")
+            && matches!(&*indexer.value, Expr::Name(_))
+            && let Type::DataFrame(schema) =
+                self.expr_infer(&indexer.value, &self.error_swallower())
+            && schema.kind == DataFrameKind::Pandas
+        {
+            return TypeInfo::of_ty(schema.underlying_type());
+        }
+        if matches!(&*subscript.value, Expr::Name(_))
+            && let Type::DataFrame(schema) = &base_ty
+            && schema.kind == DataFrameKind::Pandas
+        {
+            let name = self.polars_column_name(&subscript.slice);
+            let mut schema = (**schema).clone();
+            schema.completeness = SchemaCompleteness::Partial;
+            // A dynamic key can overwrite any known column's dtype.
+            for (column, dtype) in &mut schema.columns {
+                if name.as_ref().is_none_or(|name| name == column) {
+                    *dtype = PolarsDType::Unknown;
+                }
+            }
+            return TypeInfo::of_ty(schema.to_type());
+        }
         let narrowed = if assigned_ty.is_any() {
             None
         } else {
