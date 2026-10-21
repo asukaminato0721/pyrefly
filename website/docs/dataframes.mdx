@@ -109,6 +109,7 @@ reveal_type(complete)  # DataFrame[name: String, age: Int64]
 complete["nickname"]  # Error unknown-column
 
 partial = pd.DataFrame(data={"name": ["Alice"], "age": [30]})
+partial["nickname"] = ["Al"]
 reveal_type(partial)  # DataFrame[name: String, age: Int64, ...]
 partial["nickname"]  # No error, a partial schema cannot prove the column is absent
 
@@ -135,13 +136,16 @@ Pyrefly updates the schema when the mutation is statically known, downgrades to
 a partial schema when extra columns may have appeared, and downgrades to an
 opaque frame when no reliable schema remains.
 
-In contrast, pandas permits direct column assignment and other open-ended
-mutation on an existing DataFrame. A column can be added through
-`df[name] = values`, including when `name` is only known at runtime. Pyrefly
-therefore treats every inferred pandas schema as partial, keeping columns
-defined at construction while allowing untracked columns to exist. This is why
-an unrecognized column name is an error on a Polars frame but not on a pandas
-one.
+For pandas, a supported dictionary constructor also produces a complete schema.
+Pyrefly reports an error for a known column name that is absent from that schema.
+A column assignment such as `df[name] = values` makes the schema partial.
+Pyrefly preserves the constructor's known columns and allows untracked columns.
+An assignment to an existing column changes its dtype to `Unknown`.
+A dynamic name makes all known dtypes `Unknown`, because the assignment can
+replace any column.
+Assigning through `loc`, `iloc`, `at`, or `iat` discards the schema for that variable.
+Assigning `df.columns`, calling a mutating method such as `insert`, or calling a
+method with `inplace=True` also discards the schema.
 
 ---
 
@@ -552,15 +556,16 @@ reveal_type(df)  # DataFrame[name: String, active: Unknown, age: Int64]
 
 ### pandas Support
 
-Everything above this section describes Polars. pandas gets a smaller feature
-set, because its open-ended mutation model means an inferred schema is always
-partial.
+Everything above this section describes Polars. pandas supports constructor
+inference and reduces schema precision after supported forms of mutation.
 
 Pyrefly infers visible primitive columns from a pandas dictionary constructor
 passed positionally or through `data=`. A static `columns=` list projects and
-reorders known columns. Because the schema is partial, column accesses return
-the ordinary pandas Series type and an unrecognized name is not reported as an
-error.
+reorders known columns. These constructors produce complete schemas.
+Column accesses return the ordinary pandas Series type. A known name that is
+absent from a complete schema produces an `unknown-column` error.
+Column assignment makes the schema partial, so subsequent accesses can use
+untracked names.
 
 Record input, `TypedDict`, mixed or temporal column values, `None`, `dtype=`,
 subclasses, and uncertain coercions use the ordinary pandas stubs. A projected
@@ -573,7 +578,7 @@ df = pd.DataFrame(
     columns=["age", "name"],
 )
 
-reveal_type(df)  # DataFrame[age: Int64, name: String, ...]
+reveal_type(df)  # DataFrame[age: Int64, name: String]
 reveal_type(df["age"])  # Series
 ```
 
