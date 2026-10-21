@@ -100,12 +100,20 @@ fn env_with_pandas_frame_stubs() -> TestEnv {
         "pandas.core.frame",
         r#"
 class Series: ...
+class Indexer:
+    def __setitem__(self, key: object, value: object) -> None: ...
 class DataFrame:
     columns: list[str]
+    loc: Indexer
+    iloc: Indexer
+    at: Indexer
+    iat: Indexer
     def __init__(self, data: object = None, columns: object = None, dtype: object = None) -> None: ...
     def __getitem__(self, key: object) -> Series: ...
+    def __setitem__(self, key: object, value: object) -> None: ...
+    def insert(self, loc: int, column: str, value: object) -> None: ...
     def drop(self, labels: object = None, *, axis: int = 0) -> "DataFrame": ...
-    def rename(self, mapping: object = None, *, axis: int = 0) -> "DataFrame": ...
+    def rename(self, mapping: object = None, *, axis: int = 0, inplace: bool = False) -> "DataFrame": ...
     def filter(self, items: object = None, *, axis: int = 0) -> "DataFrame": ...
 "#,
     );
@@ -117,12 +125,12 @@ class DataFrame:
 }
 
 testcase!(
-    test_pandas_construct_partial_schema_with_trailing_marker,
+    test_pandas_construct_complete_schema,
     env_with_pandas_frame_stubs(),
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String, ...]
+reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String]
 "#,
 );
 
@@ -132,7 +140,7 @@ testcase!(
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame({"a": [2.0, 1]}))  # E: revealed type: DataFrame[a: Float64, ...]
+reveal_type(pd.DataFrame({"a": [2.0, 1]}))  # E: revealed type: DataFrame[a: Float64]
 "#,
 );
 
@@ -142,7 +150,7 @@ testcase!(
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame(data={"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String, ...]
+reveal_type(pd.DataFrame(data={"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String]
 "#,
 );
 
@@ -152,7 +160,7 @@ testcase!(
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame(data={"a": [1]}, columns=["a"]))  # E: revealed type: DataFrame[a: Int64, ...]
+reveal_type(pd.DataFrame(data={"a": [1]}, columns=["a"]))  # E: revealed type: DataFrame[a: Int64]
 "#,
 );
 
@@ -216,13 +224,135 @@ reveal_type(pd.DataFrame([{"a": 1}, {"a": 2}]))  # E: revealed type: DataFrame
 );
 
 testcase!(
-    test_pandas_unknown_column_read_delegates_without_error,
+    test_pandas_unknown_column_read_errors,
     env_with_pandas_frame_stubs(),
     r#"
 import pandas as pd
 from typing import reveal_type
 df = pd.DataFrame({"a": [1]})
-reveal_type(df["missing"])  # E: revealed type: Series
+reveal_type(df["missing"])  # E: revealed type: Series # E: Column `missing` is not in the DataFrame schema
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/5297
+testcase!(
+    test_pandas_column_assignment_makes_schema_partial,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import assert_type, reveal_type
+
+df = pd.DataFrame({"a": [1, 2, 3]})
+df["c"]  # E: Column `c` is not in the DataFrame schema
+df["c"] = [4, 5, 6]
+reveal_type(df)  # E: revealed type: DataFrame[a: Int64, ...]
+assert_type(df["c"], pd.Series)
+
+def dynamic_column(name: str) -> None:
+    frame = pd.DataFrame({"a": [1]})
+    frame[name] = ["x"]
+    reveal_type(frame)  # E: revealed type: DataFrame[a: Unknown, ...]
+    assert_type(frame["other"], pd.Series)
+
+replaced = pd.DataFrame({"a": [1], "b": [True]})
+replaced["a"] = ["x"]
+reveal_type(replaced)  # E: revealed type: DataFrame[a: Unknown, b: Boolean, ...]
+assert_type(replaced["a"], pd.Series)
+"#,
+);
+
+testcase!(
+    test_pandas_indexer_assignment_discards_schema,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import assert_type, reveal_type
+
+df = pd.DataFrame({"a": [1]})
+df.loc[:, "b"] = [2]
+reveal_type(df)  # E: revealed type: DataFrame
+assert_type(df["b"], pd.Series)
+
+df = pd.DataFrame({"a": [1]})
+df.at[0, "b"] = 2
+reveal_type(df)  # E: revealed type: DataFrame
+assert_type(df["b"], pd.Series)
+
+df = pd.DataFrame({"a": [1]})
+df.iloc[:, 0] = ["x"]
+reveal_type(df)  # E: revealed type: DataFrame
+
+df = pd.DataFrame({"a": [1]})
+df.iat[0, 0] = "x"
+reveal_type(df)  # E: revealed type: DataFrame
+"#,
+);
+
+testcase!(
+    test_pandas_columns_assignment_discards_schema,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import assert_type, reveal_type
+
+df = pd.DataFrame({"a": [1]})
+df.columns = ["b"]
+reveal_type(df)  # E: revealed type: DataFrame
+assert_type(df["b"], pd.Series)
+"#,
+);
+
+testcase!(
+    test_pandas_insert_discards_schema,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import assert_type, reveal_type
+
+df = pd.DataFrame({"a": [1]})
+df.insert(1, "b", [2])
+reveal_type(df)  # E: revealed type: DataFrame
+assert_type(df["b"], pd.Series)
+"#,
+);
+
+testcase!(
+    test_pandas_inplace_rename_discards_schema,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import assert_type, reveal_type
+
+df = pd.DataFrame({"a": [1]})
+df.rename({"a": "b"}, axis=1, inplace=False)
+reveal_type(df)  # E: revealed type: DataFrame[a: Int64]
+df["b"]  # E: Column `b` is not in the DataFrame schema
+df.rename({"a": "b"}, axis=1, inplace=True)
+reveal_type(df)  # E: revealed type: DataFrame
+assert_type(df["b"], pd.Series)
+
+def uncertain(inplace: bool) -> None:
+    frame = pd.DataFrame({"a": [1]})
+    frame.rename({"a": "b"}, axis=1, inplace=inplace)
+    reveal_type(frame)  # E: revealed type: DataFrame
+    assert_type(frame["b"], pd.Series)
+"#,
+);
+
+testcase!(
+    test_pandas_projected_schema_rejects_missing_column,
+    env_with_pandas_frame_stubs(),
+    r#"
+import pandas as pd
+from typing import Final, Literal, assert_type
+
+df = pd.DataFrame({"a": [1], "b": ["x"]}, columns=["b"])
+assert_type(df["b"], pd.Series)
+df["a"]  # E: Column `a` is not in the DataFrame schema
+missing: Literal["missing"] = "missing"
+df[missing]  # E: Column `missing` is not in the DataFrame schema
+MISSING: Final = "missing"
+df[MISSING]  # E: Column `missing` is not in the DataFrame schema
 "#,
 );
 
@@ -244,8 +374,8 @@ testcase!(
 import pandas as pd
 from typing import reveal_type
 df = pd.DataFrame({"a": [1]})
-k = "missing"
-reveal_type(df[k])  # E: revealed type: Series
+def read_column(k: str) -> None:
+    reveal_type(df[k])  # E: revealed type: Series
 "#,
 );
 

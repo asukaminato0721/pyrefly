@@ -1288,12 +1288,12 @@ reveal_type(pl.DataFrame(schema={"a": 5}))  # E: revealed type: DataFrame
 );
 
 testcase!(
-    test_pandas_construct_infers_partial_schema,
+    test_pandas_construct_infers_complete_schema,
     env_with_pandas_stubs(),
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String, ...]
+reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}))  # E: revealed type: DataFrame[a: Int64, b: String]
 "#,
 );
 
@@ -1303,8 +1303,8 @@ testcase!(
     r#"
 import pandas as pd
 from typing import reveal_type
-reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=["b"]))  # E: revealed type: DataFrame[b: String, ...]
-reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=["b", "a"]))  # E: revealed type: DataFrame[b: String, a: Int64, ...]
+reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=["b"]))  # E: revealed type: DataFrame[b: String]
+reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=["b", "a"]))  # E: revealed type: DataFrame[b: String, a: Int64]
 "#,
 );
 
@@ -5894,7 +5894,7 @@ reveal_type(pl.DataFrame({"a": [X]}))  # E: revealed type: DataFrame[a: Unknown]
 );
 
 testcase!(
-    test_construct_element_variable_dtype_pandas_partial,
+    test_construct_element_variable_dtype_pandas_falls_back,
     env_with_pandas_stubs(),
     r#"
 import pandas as pd
@@ -5986,7 +5986,7 @@ testcase!(
 import pandas as pd
 from typing import Final, reveal_type
 B: Final = "b"
-reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=[B]))  # E: revealed type: DataFrame[b: String, ...]
+reveal_type(pd.DataFrame({"a": [1], "b": ["x"]}, columns=[B]))  # E: revealed type: DataFrame[b: String]
 "#,
 );
 
