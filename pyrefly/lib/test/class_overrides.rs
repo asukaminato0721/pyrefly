@@ -1117,6 +1117,92 @@ class B(A):
 );
 
 testcase!(
+    test_override_static_and_class_methods_with_instance_methods,
+    r#"
+from typing import override
+
+class Base:
+    @staticmethod
+    def sm() -> None: ...
+
+    @classmethod
+    def cm(cls) -> None: ...
+
+class ExplicitOverride(Base):
+    @override
+    def sm(self) -> None: ...  # E: Class member `ExplicitOverride.sm` overrides parent class `Base` in an inconsistent manner
+
+    @override
+    def cm(self) -> None: ...  # E: Class member `ExplicitOverride.cm` overrides parent class `Base` in an inconsistent manner
+
+class ImplicitOverride(Base):
+    def sm(self) -> None: ...  # E: Class member `ImplicitOverride.sm` overrides parent class `Base` in an inconsistent manner
+    def cm(self) -> None: ...  # E: Class member `ImplicitOverride.cm` overrides parent class `Base` in an inconsistent manner
+
+class InheritedBase(Base): ...
+
+class InheritedOverride(InheritedBase):
+    def sm(self) -> None: ...  # E: Class member `InheritedOverride.sm` overrides parent class `InheritedBase` in an inconsistent manner
+    def cm(self) -> None: ...  # E: Class member `InheritedOverride.cm` overrides parent class `InheritedBase` in an inconsistent manner
+
+class CompatibleOverride(Base):
+    @classmethod
+    def sm(cls) -> None: ...
+
+    @staticmethod
+    def cm() -> None: ...
+
+def call_on_class(cls: type[Base]) -> None:
+    cls.sm()
+    cls.cm()
+
+call_on_class(ExplicitOverride)
+call_on_class(CompatibleOverride)
+"#,
+);
+
+testcase!(
+    test_override_overloaded_static_and_class_methods_with_instance_methods,
+    r#"
+from typing import overload
+
+class Base:
+    @staticmethod
+    @overload
+    def sm(x: int) -> None: ...
+    @staticmethod
+    @overload
+    def sm(x: str) -> None: ...
+    @staticmethod
+    def sm(x: int | str) -> None: ...
+
+    @classmethod
+    @overload
+    def cm(cls, x: int) -> None: ...
+    @classmethod
+    @overload
+    def cm(cls, x: str) -> None: ...
+    @classmethod
+    def cm(cls, x: int | str) -> None: ...
+
+class Derived(Base):
+    def sm(self, x: int | str) -> None: ...  # E: Class member `Derived.sm` overrides parent class `Base` in an inconsistent manner
+    def cm(self, x: int | str) -> None: ...  # E: Class member `Derived.cm` overrides parent class `Base` in an inconsistent manner
+
+class CompatibleOverride(Base):
+    @staticmethod
+    def sm(x: int | str) -> None: ...
+
+    @classmethod
+    def cm(cls, x: int | str) -> None: ...
+
+class IncompatibleOverride(Base):
+    @classmethod
+    def cm(cls, x: int) -> None: ...  # E: Class member `IncompatibleOverride.cm` overrides parent class `Base` in an inconsistent manner
+"#,
+);
+
+testcase!(
     test_override_instance_method_with_staticmethod,
     r#"
 class A:
