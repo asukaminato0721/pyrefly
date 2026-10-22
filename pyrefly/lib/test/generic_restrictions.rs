@@ -1765,7 +1765,6 @@ def f[T: bytes | str](x: T):
 );
 
 testcase!(
-    bug = "We sometimes solve to the wrong constraint when one constraint is a subtype of another",
     test_constraint_subtyping,
     r#"
 from typing import assert_type
@@ -1778,8 +1777,7 @@ def f[T: (Child, Parent, Unrelated)](x: T, y: T) -> T:
     return x
 
 assert_type(f(Parent(), Child()), Parent)
-# BUG: this `f` call and `assert_type` should succeed
-assert_type(f(Child(), Parent()), Parent)  # E: assert_type(Child, Parent)  # E: `Parent` is not assignable to parameter `y` with type `Child`
+assert_type(f(Child(), Parent()), Parent)
 
 # The below is a real error that we need to make sure to catch.
 # This shows why it would be incorrect for the solver to just ignore the `Child` bound when it does

@@ -367,6 +367,64 @@ def test(m: MyStr, s: str):
 "#,
 );
 
+// https://github.com/facebook/pyrefly/issues/5317
+testcase!(
+    test_constrained_typevar_widens_constraint,
+    r#"
+from typing import TypeVar, assert_type
+
+T = TypeVar("T", int, float)
+
+def g(start: T | None = None, freq: T | None = None) -> list[T]:
+    return []
+
+assert_type(g(start=0, freq=1.5), list[float])
+assert_type(g(0, 1.5), list[float])
+assert_type(g(1.5, 0), list[float])
+assert_type(g(0, 1), list[int])
+assert_type(g(0), list[int])
+assert_type(g(None, 1.5), list[float])
+
+def pair[T: (float, int)](x: T, y: T) -> tuple[T, T]:
+    return x, y
+
+assert_type(pair(0, 1.5), tuple[float, float])
+assert_type(pair(1.5, 0), tuple[float, float])
+assert_type(pair(0, 1), tuple[int, int])
+
+def triple[T: (int, float, complex)](x: T, y: T, z: T) -> list[T]:
+    return [x, y, z]
+
+assert_type(triple(0, 1.5, 2j), list[complex])
+assert_type(triple(2j, 1.5, 0), list[complex])
+assert_type(triple(0, 1.5, 1), list[float])
+"#,
+);
+
+testcase!(
+    test_constrained_typevar_widens_to_common_base,
+    r#"
+from typing import assert_type
+
+class Base: ...
+class Left(Base): ...
+class Right(Base): ...
+
+def pair[T: (Left, Right, Base)](x: T, y: T) -> list[T]:
+    return [x, y]
+
+assert_type(pair(Left(), Right()), list[Base])
+assert_type(pair(Right(), Left()), list[Base])
+assert_type(pair(Left(), Left()), list[Left])
+
+def append[T: (int, float)](xs: list[T], x: T) -> None:
+    xs.append(x)
+
+def test(xs: list[int]):
+    append(xs, 1.5)  # E: Argument `float` is not assignable
+"#,
+);
+
 testcase!(
     test_constrained_typevar_any_does_not_pin_constraint,
     r#"
