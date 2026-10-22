@@ -3652,7 +3652,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         }
     }
 
-    /// For a constrained TypeVar, find the narrowest constraint that `ty` is assignable to.
+    /// Find the narrowest constraint that accepts `ty` and the existing lower bound.
     ///
     /// Per the typing spec, a constrained TypeVar (`T = TypeVar("T", int, str)`) must resolve
     /// to exactly one of its constraint types — never a subtype like `bool` or `Literal[42]`.
@@ -3662,13 +3662,17 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         &mut self,
         ty: &Type,
         constraints: &'c [Type],
+        lower_bound: Option<&Type>,
     ) -> Option<&'c Type> {
         if ty.is_any() {
             return None;
         }
         let matching: Vec<&Type> = constraints
             .iter()
-            .filter(|c| self.is_subset_eq(ty, c).is_ok())
+            .filter(|c| {
+                self.is_subset_eq(ty, c).is_ok()
+                    && lower_bound.is_none_or(|lower| self.is_subset_eq(lower, c).is_ok())
+            })
             .collect();
         if matching.is_empty() {
             return None;
@@ -3770,9 +3774,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         });
                     (t1.clone(), err)
                 // Try promoted type first, then fall back to original (for literal bounds).
-                } else if let Some(constraint) = self.find_matching_constraint(&t1_p, constraints) {
+                } else if let Some(constraint) =
+                    self.find_matching_constraint(&t1_p, constraints, lower_bound)
+                {
                     (constraint.clone(), None)
-                } else if let Some(constraint) = self.find_matching_constraint(t1, constraints) {
+                } else if let Some(constraint) =
+                    self.find_matching_constraint(t1, constraints, lower_bound)
+                {
                     (constraint.clone(), None)
                 } else {
                     // `Any` falls through to here because it does not match a specific constraint.
@@ -4119,7 +4127,7 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                                     );
                                 }
                             } else if let Some(constraint) =
-                                self.find_matching_constraint(t2, &constraints)
+                                self.find_matching_constraint(t2, &constraints, None)
                             {
                                 let constraint =
                                     normalize_answer_for_kind(kind, Cow::Borrowed(constraint));
@@ -4239,12 +4247,13 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                         let q = q.clone();
                         let is_shape_extension_binding_source =
                             self.is_shape_extension_binding_source(&q, *v2);
-                        // Optimization: compute the lower bound only when it is needed for
-                        // shape-extension value checks. Computing it unconditionally makes pytorch
+                        // Compute the lower bound only for restrictions that need it.
+                        // Computing it unconditionally makes pytorch
                         // incremental edits 4-5x slower on our LSP benchmarks.
-                        let lower_bound = is_shape_extension_binding_source
-                            .then(|| self.solver.get_current_bound(bounds.lower.clone()))
-                            .flatten();
+                        let lower_bound = (is_shape_extension_binding_source
+                            || matches!(q.restriction(), Restriction::Constraints(_)))
+                        .then(|| self.solver.get_current_bound(bounds.lower.clone()))
+                        .flatten();
                         // A fallback bound must not prevent ordinary implicit-literal promotion.
                         let upper_bound = self.solver.get_current_bound(
                             bounds
@@ -4264,20 +4273,38 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                             is_shape_extension_binding_source,
                         );
                         if let Some(specialization_error) = specialization_error {
+                            if matches!(q.restriction(), Restriction::Constraints(_))
+                                && let Some(lower_bound) = &lower_bound
+                            {
+                                // Incompatible arguments cannot share a constraint.
+                                self.is_subset_eq(t1, lower_bound)?;
+                            }
                             self.solver
                                 .instantiation_errors
                                 .write()
                                 .insert(*v2, specialization_error);
                         }
+                        // Keep a constraint as a lower bound while a wider constraint can accept
+                        // later arguments. For example, (int, float) can widen from int to float.
+                        // Any supplies no constraint, and symbolic type parameters stay symbolic.
+                        let pin_constraint =
+                            if let Restriction::Constraints(constraints) = q.restriction() {
+                                !answer.is_any()
+                                    && (matches!(answer, Type::Quantified(_))
+                                        || !constraints.iter().any(|constraint| {
+                                            constraint != &answer
+                                                && self.is_subset_eq(&answer, constraint).is_ok()
+                                        }))
+                            } else {
+                                false
+                            };
                         if q.kind() == QuantifiedKind::ParamSpec
-                            // For constraints, `Any` usually does not provide any information, so
-                            // we drop it and pin to the first non-`Any` answer.
-                            || (matches!(q.restriction(), Restriction::Constraints(_)) && !answer.is_any())
+                            || pin_constraint
                             || is_shape_extension_binding_source
                         {
-                            // If the TypeVar has constraints, we write the answer immediately to
-                            // enforce that we always match the same constraint.
-                            //
+                            if pin_constraint && let Some(upper_bound) = &upper_bound {
+                                self.is_subset_eq(&answer, upper_bound)?;
+                            }
                             // TODO(https://github.com/facebook/pyrefly/issues/105): figure out
                             // what to do with ParamSpec.
                             let answer = normalize_answer_for_kind(q.kind(), Cow::Owned(answer));
