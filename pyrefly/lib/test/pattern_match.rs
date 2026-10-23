@@ -1896,21 +1896,92 @@ def three_elements(a: int | None, b: str | None, c: bytes | None) -> None:
 "#,
 );
 
-// https://github.com/facebook/pyrefly/issues/3213
+// https://github.com/facebook/pyrefly/issues/5013
 testcase!(
-    bug = "match on a tuple of optionals does not narrow the elements based on earlier None cases",
+    test_match_tuple_exhaustive_return_and_assignment,
+    r#"
+from typing import assert_type
+
+def boolean_tuple_matching(left: bool, right: bool) -> int:
+    match left, right:
+        case True, True: return 0
+        case True, False: return 1
+        case False, True: return 2
+        case False, False: return 3
+
+def exhaustive_tuple_case_assignment(previous: int | None, role: str | None) -> str:
+    match previous, role:
+        case _, str():
+            result = role
+        case int(), None:
+            result = str(previous)
+        case None, None:
+            result = "default"
+    assert_type(result, str)
+    return result
+
+def guarded(left: bool, right: bool, flag: bool) -> int:  # E: one or more paths are missing an explicit
+    match left, right:
+        case True, True if flag: return 0
+        case True, False: return 1
+        case False, True: return 2
+        case False, False: return 3
+
+def incomplete(left: bool, right: bool) -> int:  # E: one or more paths are missing an explicit
+    match left, right:
+        case True, True: return 0
+        case False, False: return 1
+"#,
+);
+
+// https://github.com/facebook/pyrefly/issues/3213
+// https://github.com/facebook/pyrefly/issues/5013
+testcase!(
     test_match_tuple_none_cases_narrow,
     r#"
+from typing import assert_type
+
 def example(a: list[int] | None, b: list[int] | None) -> list[int]:
     match (a, b):
         case (None, None):
             return []
         case (_, None):
-            return a  # E: Returned type `list[int] | None` is not assignable to declared return type `list[int]`
+            return a
         case (None, _):
-            return b  # E: Returned type `list[int] | None` is not assignable to declared return type `list[int]`
+            return b
         case _:
-            return a + b  # E: `+` is not supported between `list[int]` and `None` # E: `+` is not supported between `None` and `list[int]` # E: `+` is not supported between `None` and `None`
+            return a + b
+
+def narrowing_on_wildcard_cases(x: int | None, y: str | None) -> int | str:
+    match x, y:
+        case None, None:
+            raise ValueError
+        case _, None:
+            assert_type(x, int)
+            return x
+        case None, _:
+            assert_type(y, str)
+            return y
+        case _, _:
+            assert_type(x, int)
+            assert_type(y, str)
+            raise ValueError
+
+def guarded(x: int | None, y: str | None, flag: bool) -> None:
+    match x, y:
+        case None, None if flag:
+            pass
+        case _, None:
+            assert_type(x, int | None)
+        case None, _:
+            assert_type(y, str)
+
+def shadowed_subject(x: int | None, y: str | None) -> None:
+    match x, y:
+        case None, None:
+            pass
+        case _, x:
+            assert_type(x, str | None)
 "#,
 );
 
