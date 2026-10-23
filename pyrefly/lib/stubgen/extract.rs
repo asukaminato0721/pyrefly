@@ -37,6 +37,7 @@ use ruff_text_size::TextRange;
 use starlark_map::Hashed;
 
 use crate::alt::answers::Answers;
+use crate::alt::types::class_metadata::ClassMetadata;
 use crate::annotation::format_annotation;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
@@ -143,7 +144,7 @@ pub fn extract_module_stub(
         dunder_all: &dunder_all,
     };
 
-    let items = extract_stmts(&ast.body, &mut ctx, false, false);
+    let items = extract_stmts(&ast.body, &mut ctx, false, None);
 
     Some(ModuleStub {
         items,
@@ -174,7 +175,7 @@ fn extract_stmts(
     stmts: &[Stmt],
     ctx: &mut ExtractionContext,
     in_class: bool,
-    in_enum: bool,
+    class_metadata: Option<&ClassMetadata>,
 ) -> Vec<StubItem> {
     let mut items = Vec::new();
     let overloaded = collect_overloaded_names(stmts);
@@ -204,7 +205,7 @@ fn extract_stmts(
                 items.push(StubItem::Import(StubImport { text }));
             }
             Stmt::AnnAssign(ann_assign) => {
-                if let Some(item) = extract_ann_assign(ann_assign, ctx, in_class) {
+                if let Some(item) = extract_ann_assign(ann_assign, ctx, in_class, class_metadata) {
                     items.push(StubItem::Variable(item));
                 }
             }
@@ -220,7 +221,7 @@ fn extract_stmts(
                     let text = source_text(ctx.module_info, assign.range()).to_owned();
                     items.push(StubItem::TypeAlias(StubTypeAlias { text }));
                 } else {
-                    for item in extract_assign(assign, ctx, in_class, in_enum) {
+                    for item in extract_assign(assign, ctx, in_class, class_metadata) {
                         items.push(StubItem::Variable(item));
                     }
                 }
@@ -235,10 +236,10 @@ fn extract_stmts(
                 items.push(StubItem::TypeAlias(StubTypeAlias { text }));
             }
             Stmt::If(if_stmt) if is_type_checking_guard(&if_stmt.test) => {
-                items.extend(extract_stmts(&if_stmt.body, ctx, in_class, in_enum));
+                items.extend(extract_stmts(&if_stmt.body, ctx, in_class, class_metadata));
             }
             Stmt::Try(try_stmt) => {
-                items.extend(extract_stmts(&try_stmt.body, ctx, in_class, in_enum));
+                items.extend(extract_stmts(&try_stmt.body, ctx, in_class, class_metadata));
             }
             _ => {}
         }
@@ -595,44 +596,7 @@ fn merge_instance_field_stubs(
     }
 }
 
-/// Returns `true` when the class is a dataclass or pydantic model, using
-/// the resolved `ClassMetadata` from the type checker rather than fragile
-/// AST pattern matching on decorator/base-class names.
-fn is_dataclass_or_pydantic_model(class_def: &StmtClassDef, ctx: &ExtractionContext) -> bool {
-    let Some(def_index) = ctx.bindings().class_def_index(class_def) else {
-        return false;
-    };
-    let key = KeyClassMetadata(def_index);
-    let Some(idx) = ctx.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
-        return false;
-    };
-    let Some(metadata) = ctx.answers.get_idx(idx) else {
-        return false;
-    };
-    metadata.dataclass_metadata().is_some() || metadata.is_pydantic_model()
-}
-
-/// Returns `true` when the class is an `Enum` (or subclass such as `IntEnum`,
-/// `Flag`, etc.), using the resolved `ClassMetadata`. Bare assignments in an
-/// enum body are enum members, not class variables, so they must not have
-/// inferred annotations or be wrapped in `ClassVar[...]`.
-fn is_enum_class(class_def: &StmtClassDef, ctx: &ExtractionContext) -> bool {
-    let Some(def_index) = ctx.bindings().class_def_index(class_def) else {
-        return false;
-    };
-    let key = KeyClassMetadata(def_index);
-    let Some(idx) = ctx.bindings().key_to_idx_hashed_opt(Hashed::new(&key)) else {
-        return false;
-    };
-    let Some(metadata) = ctx.answers.get_idx(idx) else {
-        return false;
-    };
-    metadata.is_enum()
-}
-
-/// Extract a synthesized `__init__` stub for dataclass and pydantic model
-/// classes that generate `__init__` at type-check time rather than declaring
-/// it in source.
+/// Extract a synthesized `__init__` stub for a dataclass without an explicit constructor.
 fn extract_synthesized_init_stub(
     class_def: &StmtClassDef,
     ctx: &mut ExtractionContext,
@@ -803,13 +767,20 @@ fn extract_class(class_def: &StmtClassDef, ctx: &mut ExtractionContext) -> Optio
         .as_ref()
         .map(|tp| source_text(ctx.module_info, tp.range()).to_owned());
 
-    let in_enum = is_enum_class(class_def, ctx);
-    let mut body = extract_stmts(&class_def.body, ctx, true, in_enum);
+    let bindings = ctx.answers.bindings();
+    let class_metadata = bindings
+        .class_def_index(class_def)
+        .and_then(|index| bindings.key_to_idx_hashed_opt(Hashed::new(&KeyClassMetadata(index))))
+        .and_then(|idx| ctx.answers.get_idx(idx));
+    let mut body = extract_stmts(&class_def.body, ctx, true, class_metadata);
     let has_explicit_init = body
         .iter()
         .any(|item| matches!(item, StubItem::Function(f) if f.name == "__init__"));
+    // Pydantic constructors contain internal lax types. Consumers derive the
+    // constructor from the preserved fields and model configuration instead.
     if !has_explicit_init
-        && is_dataclass_or_pydantic_model(class_def, ctx)
+        && class_metadata
+            .is_some_and(|m| m.dataclass_metadata().is_some() && !m.is_pydantic_model())
         && let Some(init_stub) = extract_synthesized_init_stub(class_def, ctx)
     {
         body.push(StubItem::Function(init_stub));
@@ -831,6 +802,7 @@ fn extract_ann_assign(
     ann_assign: &ruff_python_ast::StmtAnnAssign,
     ctx: &mut ExtractionContext,
     in_class: bool,
+    class_metadata: Option<&ClassMetadata>,
 ) -> Option<StubVariable> {
     let name_expr = match ann_assign.target.as_ref() {
         Expr::Name(name_expr) => name_expr,
@@ -849,7 +821,8 @@ fn extract_ann_assign(
         .key_to_idx_hashed_opt(Hashed::new(&def_key))
         .is_some_and(|idx| matches!(ctx.bindings().get(idx), Binding::TypeAlias(_)));
     let value = ann_assign.value.as_deref().and_then(|value| {
-        if is_type_alias {
+        // Pydantic uses field values to determine defaults, aliases, and strictness.
+        if is_type_alias || class_metadata.is_some_and(ClassMetadata::is_pydantic_model) {
             Some(expr_source_text(ctx.module_info, value.range()))
         } else {
             simple_value_text(value, ctx.module_info)
@@ -867,7 +840,7 @@ fn extract_assign(
     assign: &ruff_python_ast::StmtAssign,
     ctx: &mut ExtractionContext,
     in_class: bool,
-    in_enum: bool,
+    class_metadata: Option<&ClassMetadata>,
 ) -> Vec<StubVariable> {
     let mut result = Vec::new();
 
@@ -879,7 +852,7 @@ fn extract_assign(
                     Some(assign.value.as_ref()),
                     ctx,
                     in_class,
-                    in_enum,
+                    class_metadata,
                 ) =>
             {
                 result.push(variable);
@@ -887,7 +860,7 @@ fn extract_assign(
             Expr::Tuple(_) | Expr::List(_) => {
                 Ast::expr_lvalue(target, &mut |name_expr| {
                     if let Some(variable) =
-                        extract_assign_name(name_expr, None, ctx, in_class, in_enum)
+                        extract_assign_name(name_expr, None, ctx, in_class, class_metadata)
                     {
                         result.push(variable);
                     }
@@ -905,7 +878,7 @@ fn extract_assign_name(
     assigned_value: Option<&Expr>,
     ctx: &mut ExtractionContext,
     in_class: bool,
-    in_enum: bool,
+    class_metadata: Option<&ClassMetadata>,
 ) -> Option<StubVariable> {
     let name = name_expr.id.as_str();
 
@@ -928,7 +901,20 @@ fn extract_assign_name(
         return None;
     }
 
-    if in_enum {
+    // Model configuration controls the constructor that consumers synthesize.
+    if name == "model_config"
+        && class_metadata.is_some_and(ClassMetadata::is_pydantic_model)
+        && let Some(value) = assigned_value
+    {
+        return Some(StubVariable {
+            name: name.to_owned(),
+            annotation: None,
+            value: Some(expr_source_text(ctx.module_info, value.range())),
+        });
+    }
+
+    // Enum members retain their values without inferred class variable annotations.
+    if class_metadata.is_some_and(ClassMetadata::is_enum) {
         let value = assigned_value.map_or_else(
             || "...".to_owned(),
             |value| format_default(value, ctx.module_info),

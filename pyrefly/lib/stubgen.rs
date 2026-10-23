@@ -10,10 +10,12 @@ pub mod extract;
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::path::PathBuf;
 
     use dupe::Dupe;
     use pyrefly_build::handle::Handle;
+    use pyrefly_python::ast::Ast;
     use pyrefly_util::forgetter::Forgetter;
     use pyrefly_util::fs_anyhow;
     use pyrefly_util::globs::FilteredGlobs;
@@ -21,6 +23,7 @@ mod tests {
     use pyrefly_util::globs::HiddenDirFilter;
     use pyrefly_util::includes::Includes;
     use pyrefly_util::thread_pool::TEST_THREAD_COUNT;
+    use ruff_python_ast::PySourceType;
 
     use super::emit::emit_stub;
     use super::extract::ExtractConfig;
@@ -29,6 +32,7 @@ mod tests {
     use crate::state::state::State;
     use crate::state::state::Transaction;
     use crate::test::util::TestEnv;
+    use crate::testcase;
 
     fn run_stubgen(input: &str) -> String {
         run_stubgen_with_config(
@@ -50,25 +54,7 @@ mod tests {
         run_stubgen_inner(&mut t, includes, config)
     }
 
-    /// Pydantic shim providing `@dataclass_transform` on `BaseModel` so the
-    /// type checker synthesizes `__init__` for pydantic model subclasses.
-    const PYDANTIC_SHIM: &str = r#"from typing import dataclass_transform
-
-def Field(**kwargs): ...
-
-def computed_field(fn=None, **_kw):
-    return fn
-
-@dataclass_transform(
-    kw_only_default=False,
-    field_specifiers=(Field,),
-)
-class BaseModel:
-    pass
-"#;
-
-    /// Like `run_stubgen`, but injects a minimal pydantic shim so that
-    /// `BaseModel` subclasses get synthesized `__init__` in the stub output.
+    /// Run stubgen with the bundled Pydantic package, including lax constructor types.
     fn run_stubgen_pydantic(input: &str) -> String {
         let config = ExtractConfig {
             include_private: false,
@@ -76,21 +62,13 @@ class BaseModel:
         };
         let tdir = tempfile::tempdir().unwrap();
 
-        // Write the pydantic shim as a real package on disk.
-        let pydantic_dir = tdir.path().join("pydantic");
-        fs_anyhow::create_dir_all(&pydantic_dir).unwrap();
-        let pydantic_init = pydantic_dir.join("__init__.py");
-        fs_anyhow::write(&pydantic_init, PYDANTIC_SHIM).unwrap();
-
-        // Write the test input alongside the shim.
         let path = tdir.path().join("input.py");
         fs_anyhow::write(&path, input).unwrap();
 
-        let mut t = TestEnv::new();
+        let pydantic_path = env::var("PYDANTIC_TEST_PATH").expect("PYDANTIC_TEST_PATH must be set");
+        let mut t = TestEnv::new_with_site_package_paths(&[&pydantic_path]);
         t.add(&path.display().to_string(), input);
-        t.add_real_path("pydantic", pydantic_init);
 
-        // Only process the input file — not the pydantic shim.
         let includes = Globs::new(vec![path.display().to_string()]).unwrap();
         run_stubgen_inner(&mut t, includes, &config)
     }
@@ -161,12 +139,6 @@ class BaseModel:
     /// Run a snapshot test for a specific test case directory.
     fn assert_stubgen_snapshot(test_name: &str) {
         assert_stubgen_snapshot_with(test_name, run_stubgen);
-    }
-
-    /// Like `assert_stubgen_snapshot` but injects the pydantic shim so
-    /// `BaseModel` subclasses get synthesized `__init__` in the output.
-    fn assert_stubgen_pydantic_snapshot(test_name: &str) {
-        assert_stubgen_snapshot_with(test_name, run_stubgen_pydantic);
     }
 
     /// Shared snapshot runner: reads `input.py`, produces a stub via
@@ -547,8 +519,50 @@ class Agent:
 
     #[test]
     fn test_stubgen_pydantic() {
-        assert_stubgen_pydantic_snapshot("pydantic");
+        assert_stubgen_snapshot_with("pydantic", run_stubgen_pydantic);
     }
+
+    /// Check the generated stub as a dependency with Pydantic constructor synthesis.
+    fn pydantic_stub_env() -> TestEnv {
+        let input = fs_anyhow::read_to_string(&get_test_dir().join("pydantic/input.py")).unwrap();
+        let stub = run_stubgen_pydantic(&input);
+        let (_, errors, _) = Ast::parse(&stub, PySourceType::Stub);
+        assert!(
+            errors.is_empty(),
+            "Generated stub does not parse: {errors:?}"
+        );
+        let path = env::var("PYDANTIC_TEST_PATH").expect("PYDANTIC_TEST_PATH must be set");
+        let mut env = TestEnv::new_with_site_package_paths(&[&path]);
+        env.add_with_path("model", "model.pyi", &stub);
+        env
+    }
+
+    testcase!(
+        test_stubgen_pydantic_constructor_checking,
+        pydantic_stub_env(),
+        r#"
+from model import (
+    Color, Configured, CustomInit, InheritedModel, Mixed, Model,
+    WithInitFalse, WithValidationAlias,
+)
+
+Model(names=["red"], price=1.0, color=Color.red)
+Model(names=1, price=1.0, color=Color.red)  # E: is not assignable to parameter `names`
+Model(price=1.0, color=Color.red)  # E: Missing argument `names`
+InheritedModel(names=["red"], price=1.0, color=Color.red)
+InheritedModel(names=1, price=1.0, color=Color.red)  # E: is not assignable to parameter `names`
+Mixed(required=1, field_bare=1, field_ellipsis=1, field_ellipsis_only=1)
+WithInitFalse(id=1)
+WithInitFalse(id=1, digest=b"")
+WithValidationAlias(id=1)
+WithValidationAlias(internal_id=1)  # E: Missing argument `id`
+Configured(id=1)
+Configured(internal_id=1)
+Configured(id="1")  # E: is not assignable to parameter `id`
+CustomInit("red", eager=True)
+CustomInit(1)  # E: is not assignable to parameter `name`
+"#,
+    );
 
     /// Instance attrs from `__init__` are emitted in alphabetical order by name (not assignment
     /// order), so stubs stay deterministic and easy to scan.
