@@ -134,6 +134,7 @@ use crate::types::type_info::TypeInfo;
 use crate::types::type_var::PreInferenceVariance;
 use crate::types::type_var::Restriction;
 use crate::types::type_var::TypeVar;
+use crate::types::type_var::Variance;
 use crate::types::type_var_tuple::TypeVarTuple;
 use crate::types::types::AnyStyle;
 use crate::types::types::Type;
@@ -313,6 +314,8 @@ enum HintCoercion<'a> {
     /// Best-effort: coerce to the hint only when the inferred type already matches;
     /// otherwise keep the inferred type and report nothing.
     BestEffort,
+    /// Keep a narrower element type when the resulting list matches a covariant container hint.
+    ListElement(HintRef<'a, 'a>),
     /// Enforced: coerce to the hint even on mismatch, reporting it to `errors`
     /// with `tcc` as the check context.
     Enforced {
@@ -1182,6 +1185,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             &x.elts,
                             HintRef::with_ty_opt(hint, elem_hint.as_ref()),
                             errors,
+                            HintCoercion::BestEffort,
                         );
                         self.heap
                             .mk_class_type(self.stdlib.set(self.unions(elem_tys)))
@@ -1200,7 +1204,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         &x.elt,
                         HintRef::with_ty_opt(hint, elem_hint.as_ref()),
                         errors,
-                        HintCoercion::BestEffort,
+                        hint.map_or(HintCoercion::BestEffort, HintCoercion::ListElement),
                     );
                     let ty = self.heap.mk_class_type(self.stdlib.list(elem_ty));
                     if let Some(partial_fallback) = partial_fallback {
@@ -1529,6 +1533,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         coercion: HintCoercion,
     ) -> Type {
         let ty = self.expr_infer_with_hint(x, hint, errors);
+        if let HintCoercion::ListElement(container_hint) = coercion {
+            let promoted = ty.clone().promote_implicit_literals(self.stdlib);
+            let list_ty = self.heap.mk_class_type(self.stdlib.list(promoted.clone()));
+            if container_hint.types().iter().any(|want| {
+                let Type::ClassType(cls) = want else {
+                    return false;
+                };
+                let variances = self
+                    .type_order()
+                    .get_variance_from_class(cls.class_object());
+                cls.tparams().iter().all(|param| {
+                    matches!(
+                        variances.get(param.name()),
+                        Variance::Covariant | Variance::Bivariant
+                    )
+                }) && self.is_subset_eq(&list_ty, want)
+            }) {
+                return promoted;
+            }
+        }
         if let Some(hint) = hint {
             let use_hint = |want| match coercion {
                 HintCoercion::Enforced { errors, tcc } => {
@@ -1541,7 +1565,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     true
                 }
                 // Use a best-effort hint only if it is compatible.
-                HintCoercion::BestEffort => self.is_subset_eq(&ty, want),
+                HintCoercion::BestEffort | HintCoercion::ListElement(_) => {
+                    self.is_subset_eq(&ty, want)
+                }
             };
             // Optimization: delay Type cloning until absolutely necessary.
             if let &[want] = &hint.types() {
@@ -3659,6 +3685,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 &list.elts,
                 HintRef::with_ty_opt(hint, elt_hint.as_ref()),
                 errors,
+                hint.map_or(HintCoercion::BestEffort, HintCoercion::ListElement),
             );
             let ty = self
                 .heap
@@ -3678,6 +3705,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         elts: &[Expr],
         elt_hint: Option<HintRef>,
         errors: &ErrorCollector,
+        coercion: HintCoercion,
     ) -> Vec<Type> {
         let star_hint = LazyCell::new(|| {
             elt_hint.map(|hint| {
@@ -3709,7 +3737,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     )
                 }
             }
-            _ => self.expr_infer_with_hint_promote(x, elt_hint, errors, HintCoercion::BestEffort),
+            _ => self.expr_infer_with_hint_promote(x, elt_hint, errors, coercion),
         })
     }
 
