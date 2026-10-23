@@ -151,6 +151,21 @@ l4: list[Base] = xs + [B()]  # E: `list[A | B]` is not assignable to `list[Base]
 );
 
 testcase!(
+    test_assign_nested_sequence_comprehension,
+    r#"
+from collections.abc import Sequence
+from typing import assert_type
+
+def rename_first(fields: Sequence[Sequence[str]]) -> None:
+    fields = [list(field) for field in fields]
+    assert_type(fields, list[list[str]])
+    for field in fields:
+        assert_type(field, list[str])
+        field[0] = "renamed"
+"#,
+);
+
+testcase!(
     test_assign_at_types,
     r#"
 a: int = 3

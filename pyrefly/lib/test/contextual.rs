@@ -290,6 +290,44 @@ xs: list[A] = [B() for _ in [0]]
 );
 
 testcase!(
+    test_context_list_preserves_compatible_element_types,
+    r#"
+from collections.abc import Iterable, Sequence
+from typing import Any, Literal, assert_type
+
+def literals(field: Sequence[str]) -> None:
+    fields: Sequence[Sequence[str]]
+    fields = [list(field)]
+    assert_type(fields, list[list[str]])
+    fields[0][0] = "renamed"
+
+def comprehensions(fields: Sequence[Sequence[str]]) -> None:
+    result: Iterable[Sequence[str]]
+    result = [list(field) for field in fields]
+    assert_type(result, list[list[str]])
+
+def invariant(fields: Sequence[Sequence[str]]) -> None:
+    result: list[Sequence[str]] = [list(field) for field in fields]
+    assert_type(result, list[Sequence[str]])
+    result.append(("name",))
+
+def invariant_any() -> None:
+    result: list[Any] = [1]
+    assert_type(result, list[Any])
+
+def nested_invariant() -> None:
+    result: Sequence[list[float]]
+    result = [[1]]
+    assert_type(result, list[list[float]])
+
+def literal_hint() -> None:
+    result: Sequence[Literal["name"]]
+    result = ["name"]
+    assert_type(result, list[Literal["name"]])
+"#,
+);
+
+testcase!(
     test_context_set_comprehension,
     r#"
 class A: ...
