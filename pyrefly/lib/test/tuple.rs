@@ -197,6 +197,71 @@ def test(t: tuple[int, *tuple[bool, ...], str]) -> None:
 );
 
 testcase!(
+    test_unpack_variadic_tuple_subclass,
+    r#"
+from typing import Any, assert_type
+
+class Variadic[*Ts](tuple[*Ts]): ...
+
+def prefix(t: Variadic[str, int | None, *tuple[Any, ...]]) -> None:
+    a, b, c = t
+    assert_type(a, str)
+    assert_type(b, int | None)
+    assert_type(c, Any)
+    d, e, *rest = t
+    assert_type(d, str)
+    assert_type(e, int | None)
+    assert_type(rest, list[Any])
+
+def both_ends(t: Variadic[int, *tuple[bool, ...], str]) -> None:
+    a, b = t
+    assert_type(a, int)
+    assert_type(b, str)
+    c, d, e = t
+    assert_type(c, int)
+    assert_type(d, bool)
+    assert_type(e, str)
+    f, *rest, g = t
+    assert_type(f, int)
+    assert_type(rest, list[bool])
+    assert_type(g, str)
+    for x in t:
+        assert_type(x, int | bool | str)
+    (h,) = t  # E: Cannot unpack Variadic[int, *tuple[bool, ...], str] (of size 2+) into 1 value
+
+class Child(tuple[int, *tuple[bool, ...], str]):
+    def unpack(self) -> None:
+        a, *rest, b = self
+        assert_type(a, int)
+        assert_type(rest, list[bool])
+        assert_type(b, str)
+"#,
+);
+
+testcase!(
+    test_tuple_subclass_iter_override,
+    r#"
+from typing import Iterator, assert_type
+
+class Fixed(tuple[int, str]):
+    def __iter__(self) -> Iterator[str]: ...
+
+class Variadic(tuple[int, *tuple[str, ...]]):
+    def __iter__(self) -> Iterator[str]: ...
+
+class Unbounded(tuple[int | str, ...]):
+    def __iter__(self) -> Iterator[str]: ...
+
+def f(t: Fixed | Variadic | Unbounded) -> None:
+    a, b = t
+    assert_type(a, str)
+    assert_type(b, str)
+    for x in t:
+        assert_type(x, str)
+"#,
+);
+
+testcase!(
     test_unpack_variadic_tuple_empty_middle,
     r#"
 from typing import assert_type
