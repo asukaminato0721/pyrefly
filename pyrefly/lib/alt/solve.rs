@@ -1074,14 +1074,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn has_named_tuple_iter_override(&self, cls: &ClassType) -> bool {
-        if self
-            .get_metadata_for_class(cls.class_object())
-            .named_tuple_metadata()
-            .is_none()
-        {
-            return false;
-        }
+    fn has_tuple_iter_override(&self, cls: &ClassType) -> bool {
         let Some(iter_method) = self
             .get_non_synthesized_class_member_and_defining_class(cls.class_object(), &dunder::ITER)
         else {
@@ -1116,9 +1109,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             )
         };
         match iterable {
-            Type::ClassType(cls) | Type::SelfType(cls)
-                if self.has_named_tuple_iter_override(cls) =>
-            {
+            Type::ClassType(cls) | Type::SelfType(cls) if let Some(tuple) = self.as_tuple(cls) => {
+                if !self.has_tuple_iter_override(cls) {
+                    return self.iterate(&self.heap.mk_tuple(tuple), range, errors, orig_context);
+                }
                 let ty = self
                     .call_magic_dunder_method(
                         iterable,
@@ -1134,11 +1128,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         self.error(errors, range, ErrorKind::NotIterable, context().format())
                     });
                 vec![Iterable::OfType(ty)]
-            }
-            Type::ClassType(cls) | Type::SelfType(cls)
-                if let Some(Tuple::Concrete(elts)) = self.as_tuple(cls) =>
-            {
-                vec![Iterable::FixedLen(elts.clone())]
             }
             Type::IntTuple(int_tuple) => self.iterate_int_tuple(int_tuple),
             Type::Tuple(Tuple::Concrete(elts)) => vec![Iterable::FixedLen(elts.clone())],
