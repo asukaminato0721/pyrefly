@@ -1,40 +1,52 @@
 # @generated
 import functools
-from pydantic import BaseModel, computed_field, Field
+from enum import StrEnum
+from pydantic import BaseModel, computed_field, ConfigDict, Field
+
+
+class Color(StrEnum):
+    red = "red"
+
+
+class Model(BaseModel):
+    names: list[str]
+    price: float
+    color: Color
+
+
+class InheritedModel(Model):
+    count: int = 0
+
+
+class Configured(BaseModel):
+    model_config = ConfigDict(strict=True, validate_by_name=True)
+    internal_id: int = Field(alias="id")
 
 
 class Mixed(BaseModel):
     required: int
     literal_default: int = 7
-    field_with_default: int
-    field_with_none: str | None
-    items: list[str]
-    complex_factory: list[int]
-    field_bare: int
-    field_ellipsis: int
-    field_ellipsis_only: int
-
-    def __init__(self, required: int, literal_default: int = ..., field_with_default: int = ..., field_with_none: str | None = ..., items: list[str] = ..., complex_factory: list[int] = ..., field_bare: int, field_ellipsis: int, field_ellipsis_only: int) -> None: ...
+    field_with_default: int = Field(default=0)
+    field_with_none: str | None = Field(default=None)
+    items: list[str] = Field(default_factory=list, min_length=0)
+    complex_factory: list[int] = Field(default_factory=functools.partial(list, [0]))
+    field_bare: int = Field()
+    field_ellipsis: int = Field(..., description="req")
+    field_ellipsis_only: int = Field(...)
 
 
 class WithInitFalse(BaseModel):
     id: int
-    digest: bytes
-
-    def __init__(self, id: int) -> None: ...
+    digest: bytes = Field(default=b"", init=False)
 
 
 class WithValidationAlias(BaseModel):
-    internal_id: int
-
-    def __init__(self, internal_id: int) -> None: ...
+    internal_id: int = Field(validation_alias="id")
 
 
 class WithKwOnly(BaseModel):
-    req: int
-    opt: str
-
-    def __init__(self, req: int, *, opt: str = ...) -> None: ...
+    req: int = Field(kw_only=False)
+    opt: str = Field(default="z", kw_only=True)
 
 
 class WithComputed(BaseModel):
@@ -44,8 +56,6 @@ class WithComputed(BaseModel):
     @computed_field
     @property
     def area(self) -> int: ...
-
-    def __init__(self, width: int, height: int) -> None: ...
 
 
 class CustomInit(BaseModel):

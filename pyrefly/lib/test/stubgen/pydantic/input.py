@@ -4,8 +4,29 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+from enum import StrEnum
 
-from pydantic import BaseModel, computed_field, Field
+from pydantic import BaseModel, computed_field, ConfigDict, Field
+
+
+class Color(StrEnum):
+    red = "red"
+
+
+# Constructor types must not expose internal lax-mode types.
+class Model(BaseModel):
+    names: list[str]
+    price: float
+    color: Color
+
+
+class InheritedModel(Model):
+    count: int = 0
+
+
+class Configured(BaseModel):
+    model_config = ConfigDict(strict=True, validate_by_name=True)
+    internal_id: int = Field(alias="id")
 
 
 # Mixed Pydantic `Field` defaults: literal, `default=`, `default_factory=` (simple + complex),
@@ -22,8 +43,7 @@ class Mixed(BaseModel):
     field_ellipsis_only: int = Field(...)
 
 
-# `init=False` keeps the attribute on the model but drops it from `__init__`, matching the
-# runtime constructor surface.
+# Pydantic models accept fields with `init=False` as constructor arguments.
 class WithInitFalse(BaseModel):
     id: int
     digest: bytes = Field(default=b"", init=False)
@@ -35,7 +55,7 @@ class WithValidationAlias(BaseModel):
     internal_id: int = Field(validation_alias="id")
 
 
-# `Field(kw_only=True)` forces a field (and any later fields) to be keyword-only.
+# Field options remain available when a checker synthesizes the constructor.
 class WithKwOnly(BaseModel):
     req: int = Field(kw_only=False)
     opt: str = Field(default="z", kw_only=True)
