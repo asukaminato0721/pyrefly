@@ -1378,6 +1378,11 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     ) -> Type {
         match op {
             AtomicNarrowOp::Placeholder => ty.clone(),
+            AtomicNarrowOp::MatchSubjectElement(subject, index) => {
+                let chain = FacetChain::new(Vec1::new(FacetKind::Index(*index as i64)));
+                let element = self.get_facet_chain_type(self.get_idx(*subject), &chain, range);
+                self.narrow_typeis(ty, &element, range, errors)
+            }
             AtomicNarrowOp::ClassCoverageGate(_) => ty.clone(),
             AtomicNarrowOp::ClassCoverageGateNeg(keys) => {
                 // Subtract the class only when every positional slot's sub-pattern exhausts its

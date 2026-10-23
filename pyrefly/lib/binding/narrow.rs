@@ -113,6 +113,8 @@ pub enum AtomicNarrowOp {
     /// when that name evaluates to a truthy or falsy value.
     IsTruthy,
     IsFalsy,
+    /// Narrow an original subject to its element type in the evaluated match tuple.
+    MatchSubjectElement(Idx<Key>, usize),
     /// An unconditional in-place DataFrame schema mutation.
     PolarsColumnMutation(PolarsMutationKind),
     /// An operation that might be true or false, but does not narrow the name
@@ -226,6 +228,9 @@ impl DisplayWith<ModuleInfo> for AtomicNarrowOp {
             ),
             AtomicNarrowOp::IsTruthy => write!(f, "IsTruthy"),
             AtomicNarrowOp::IsFalsy => write!(f, "IsFalsy"),
+            AtomicNarrowOp::MatchSubjectElement(subject, index) => {
+                write!(f, "MatchSubjectElement({subject:?}, {index})")
+            }
             AtomicNarrowOp::PolarsColumnMutation(kind) => {
                 write!(f, "PolarsColumnMutation({kind:?})")
             }
@@ -336,6 +341,7 @@ impl AtomicNarrowOp {
             }
             Self::IsTruthy => Some(subject.to_owned()),
             Self::IsFalsy => Some(format!("not {subject}")),
+            Self::MatchSubjectElement(..) => None,
             Self::PolarsColumnMutation(_) => None,
             Self::TypeGuard(_, arguments) => Some(format!(
                 "TypeGuard{}",
@@ -396,6 +402,7 @@ impl AtomicNarrowOp {
             Self::NotCall(f, args) => Self::Call(f.clone(), args.clone()),
             Self::IsTruthy => Self::IsFalsy,
             Self::IsFalsy => Self::IsTruthy,
+            Self::MatchSubjectElement(..) => Self::Placeholder,
             Self::PolarsColumnMutation(kind) => Self::PolarsColumnMutation(kind.clone()),
             Self::Placeholder => Self::Placeholder,
             Self::ClassCoverageGate(ks) => Self::ClassCoverageGateNeg(ks.clone()),

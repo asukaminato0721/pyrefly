@@ -965,8 +965,54 @@ impl<'a> BindingsBuilder<'a> {
             } else {
                 subject_idx
             };
+            let tuple_subject_bindings = if let MatchSubject::Tuple(subjects) = &match_subject {
+                subjects
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, subject)| {
+                        let subject = subject.as_ref()?;
+                        let (idx, _) = self.scopes.binding_idx_for_name(subject.name())?;
+                        Some((index, subject, idx))
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             let mut new_narrow_ops =
                 self.bind_pattern(match_subject.clone(), pattern, case_subject_idx);
+            if !tuple_subject_bindings.is_empty() {
+                let narrowed_subject_idx = if let Some((op, range)) = &new_narrow_ops.subject {
+                    self.insert_binding(
+                        Key::Anon(case_range),
+                        Binding::Narrow(
+                            case_subject_idx,
+                            Box::new(op.clone()),
+                            NarrowUseLocation::Span(*range),
+                        ),
+                    )
+                } else {
+                    case_subject_idx
+                };
+                // Project the correlated tuple type onto the original subjects. A pattern
+                // capture can replace a subject's name, so preserve that new binding.
+                for (index, subject, initial_idx) in tuple_subject_bindings {
+                    if self
+                        .scopes
+                        .binding_idx_for_name(subject.name())
+                        .is_some_and(|(idx, _)| idx == initial_idx)
+                    {
+                        let op = NarrowOp::Atomic(
+                            None,
+                            AtomicNarrowOp::MatchSubjectElement(narrowed_subject_idx, index),
+                        );
+                        new_narrow_ops.body_only.and_for_subject(
+                            subject,
+                            op.for_subject(subject),
+                            case_range,
+                        );
+                    }
+                }
+            }
             self.bind_narrow_ops(
                 &new_narrow_ops.scope,
                 NarrowUseLocation::Span(case_range),
@@ -1063,7 +1109,7 @@ impl<'a> BindingsBuilder<'a> {
         if exhaustive {
             self.finish_exhaustive_fork();
         } else {
-            let narrow_entries = if match_subject.is_synthetic()
+            let narrow_entries = if match_subject.has_local_subject()
                 && let Some((op, range)) = &negated_prev_subject
             {
                 vec![(subject_idx, Box::new(op.clone()), *range)]
