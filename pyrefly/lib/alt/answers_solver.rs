@@ -755,6 +755,15 @@ impl CalcStack {
             .is_some_and(|top_scc| top_scc.node_state.contains_key(current))
     }
 
+    /// Check whether the current calculation belongs to the active SCC.
+    pub(crate) fn current_is_scc_participant(&self) -> bool {
+        let stack = self.stack.borrow();
+        let current = stack
+            .last()
+            .expect("Checking current SCC membership requires an active calculation");
+        self.is_scc_participant(current)
+    }
+
     /// Push a CalcId onto the stack without computing the binding action, for tests
     #[cfg(test)]
     fn push_for_test(&self, current: CalcId) {
