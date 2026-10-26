@@ -63,6 +63,62 @@ assert_type(f(True), Literal['test', 1])
 "#,
 );
 
+// Regression test for https://github.com/facebook/pyrefly/issues/5377.
+testcase!(
+    test_inferred_return_preserves_nesting,
+    r#"
+from typing import assert_type
+
+def make2() -> list[list[str]]: ...
+def make3() -> list[list[list[str]]]: ...
+def make4() -> list[list[list[list[str]]]]: ...
+
+def depth2(): return make2()
+def depth3(): return make3()
+def depth4(): return make4()
+
+assert_type(depth2(), list[list[str]])
+assert_type(depth3(), list[list[list[str]]])
+assert_type(depth4(), list[list[list[list[str]]]])
+assert_type(depth3()[0][0][0], str)
+assert_type(depth4()[0][0][0][0], str)
+
+def nested_literals(value: str):
+    return [[[[[value]]]]]
+
+def mixed_containers(value: str):
+    return ({value: [[value]]},)
+
+assert_type(nested_literals("x"), list[list[list[list[list[str]]]]])
+assert_type(mixed_containers("x"), tuple[dict[str, list[list[str]]]])
+
+async def async_depth4():
+    return make4()
+
+async def check_async() -> None:
+    assert_type(await async_depth4(), list[list[list[list[str]]]])
+"#,
+);
+
+testcase!(
+    test_inferred_return_preserves_nesting_in_recursive_caller,
+    r#"
+from typing import assert_type
+
+def f():
+    return g(), nested("x")
+
+def g():
+    return [f()]
+
+def nested(value: str):
+    return [[[[value]]]]
+
+f()
+assert_type(nested("x"), list[list[list[list[str]]]])
+"#,
+);
+
 testcase!(
     test_recursive_return_truncation,
     r#"
