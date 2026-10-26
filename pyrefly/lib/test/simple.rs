@@ -3009,6 +3009,39 @@ def f(x: float):
 );
 
 testcase!(
+    test_min_max_any_with_key,
+    r#"
+from typing import Any, assert_type, reveal_type
+
+def f(found: list[Any]) -> None:
+    prefix = min(found, key=len)
+    reveal_type(prefix)  # E: revealed type: Sized & Any
+    print(prefix + "!")
+    assert_type(len(prefix), int)
+    assert_type(prefix.__len__(), int)
+    reveal_type(max(found, key=len))  # E: revealed type: Sized & Any
+
+def unparameterized(found: list) -> None:
+    prefix = min(found, key=len)
+    reveal_type(prefix)  # E: revealed type: Sized & Unknown
+    print(prefix + "!")
+    assert_type(len(prefix), int)
+    assert_type(prefix.__len__(), int)
+    reveal_type(max(found, key=len))  # E: revealed type: Sized & Unknown
+
+def dynamic(found: Any) -> None:
+    reveal_type(min(found, key=len))  # E: revealed type: Sized & Any
+    reveal_type(min(found.attr, key=len))  # E: revealed type: Sized & Any
+    reveal_type(max(found, key=len))  # E: revealed type: Sized & Any
+    reveal_type(max(found.attr, key=len))  # E: revealed type: Sized & Any
+
+def g(found: list[str]) -> None:
+    assert_type(min(found, key=len), str)
+    assert_type(max(found, key=len), str)
+    "#,
+);
+
+testcase!(
     test_open_return_type,
     r#"
 from io import BufferedReader, TextIOWrapper

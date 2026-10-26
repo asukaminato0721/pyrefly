@@ -1005,6 +1005,79 @@ def g(x: Any):
 );
 
 testcase!(
+    test_any_lower_bound_with_callable_upper_bound,
+    r#"
+from typing import Any, Callable, assert_type, reveal_type
+
+def apply[T](value: T, callback: Callable[[T], object]) -> T: ...
+def apply_reversed[T](callback: Callable[[T], object], value: T) -> T: ...
+def consume(value: str) -> None: ...
+def consume_union(value: str | bytes) -> None: ...
+def consume_any(value: Any) -> None: ...
+def infer_upper[T](callback: Callable[[T], object]) -> T: ...
+def merge[T](x: T, y: T, callback: Callable[[T], object]) -> T: ...
+
+def test(value: Any, text: str) -> None:
+    reveal_type(apply(value, consume))  # E: revealed type: str & Any
+    reveal_type(apply_reversed(consume, value))  # E: revealed type: str & Any
+    assert_type(apply(text, consume), str)
+    assert_type(infer_upper(consume), str)
+    assert_type(merge(value, text, consume), str)
+    assert_type(merge(text, value, consume), str)
+    assert_type(apply(value, consume_any), Any)
+    result = apply(value, consume)
+    assert_type(result.upper(), str)
+    result.upper(1)  # E: No matching overload found for function `str.upper`
+    result.unknown_method()
+    union_result = apply(value, consume_union)
+    reveal_type(union_result)  # E: revealed type: (bytes & Any) | (str & Any)
+    assert_type(len(union_result), int)
+    union_result.unknown_method()
+    "#,
+);
+
+testcase!(
+    test_implicit_any_lower_bound_with_upper_bound,
+    r#"
+from typing import Callable, reveal_type
+
+def apply[T](value: T, callback: Callable[[T], object]) -> T: ...
+def apply_reversed[T](callback: Callable[[T], object], value: T) -> T: ...
+def consume(value: str) -> None: ...
+
+def test(value) -> None:
+    reveal_type(apply(value, consume))  # E: revealed type: str & Unknown
+    reveal_type(apply_reversed(consume, value))  # E: revealed type: str & Unknown
+    "#,
+);
+
+// Unknown inputs still produce diagnostics, but contextual return types remain useful.
+testcase!(
+    test_implicit_any_lower_bound_with_context,
+    TestEnv::new()
+        .enable_unknown_argument_type_error()
+        .enable_no_any_return_implicit_error(),
+    r#"
+import os.path
+import re
+
+def escape(value) -> str:
+    return re.escape(value)  # E: The type of this argument is unknown
+
+def expanduser(value) -> str:
+    return os.path.expanduser(value)  # E: The type of this argument is unknown
+
+def dirname(value) -> str:
+    return os.path.dirname(os.path.abspath(value))  # E: The type of this argument is unknown # E: The type of this argument is unknown
+
+def append(value) -> None:
+    parts: list[str] = []
+    parts.append(re.escape(value))  # E: The type of this argument is unknown
+    parts.append(os.path.expanduser(value))  # E: The type of this argument is unknown
+    "#,
+);
+
+testcase!(
     test_lists_of_different_element_types,
     r#"
 from typing import assert_type
