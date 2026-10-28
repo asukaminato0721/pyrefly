@@ -445,6 +445,11 @@ impl Transaction<'_> {
         };
 
         let label = display_type.as_lsp_string(LspDisplayMode::SignatureHelp);
+        let label = if label.chars().count() > 88 {
+            display_type.as_lsp_string(LspDisplayMode::SignatureHelpMultiline)
+        } else {
+            label
+        };
         let (parameters, active_parameter) = if let Some(params) =
             Self::normalize_singleton_function_type_into_params(display_type)
         {

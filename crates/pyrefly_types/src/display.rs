@@ -146,8 +146,10 @@ pub enum LspDisplayMode {
     Standard,
     /// Hover mode: Multi-line for readability
     Hover,
-    /// Signature help mode: Single-line for LSP compatibility
+    /// Single-line signatures for diagnostics and source edits.
     SignatureHelp,
+    /// Signature help labels: Display each parameter on a separate line.
+    SignatureHelpMultiline,
     /// Query mode: Used by programmatic consumers (e.g. type query endpoints).
     /// Formats types with explicit wrappers (e.g. BoundMethod[...]) so that
     /// consumers can unambiguously parse the type without relying on parameter
@@ -676,6 +678,22 @@ impl<'a> TypeDisplayContext<'a> {
         }
     }
 
+    /// Format a top-level callable for an LSP display.
+    fn fmt_callable_lsp(&self, callable: &Callable, output: &mut impl TypeOutput) -> fmt::Result {
+        if self.lsp_display_mode == LspDisplayMode::Hover {
+            return self.fmt_callable_hover(callable, output, 0);
+        }
+        if self.lsp_display_mode == LspDisplayMode::SignatureHelpMultiline {
+            // Keep nested types on one line so parameter labels remain substrings of the signature.
+            return callable.fmt_with_type_with_newlines(
+                output,
+                &|t, o, _| self.fmt_helper_generic(t, false, o),
+                0,
+            );
+        }
+        callable.fmt_with_type(output, &|t, o| self.fmt_helper_generic(t, false, o))
+    }
+
     fn fmt_callable_hover(
         &self,
         callable: &Callable,
@@ -774,6 +792,8 @@ impl<'a> TypeDisplayContext<'a> {
         } else {
             0
         };
+        // Long types make column alignment too wide for hover popups.
+        let align = align && default_type_width <= 40;
 
         for (i, row) in rows.iter().enumerate() {
             if i > 0 {
@@ -1094,8 +1114,11 @@ impl<'a> TypeDisplayContext<'a> {
             Type::Callable(c) => {
                 // Hover output should be readable even when callables appear inside unions
                 // (e.g. constructor display that unions __new__ and __init__).
-                if self.lsp_display_mode == LspDisplayMode::Hover {
-                    self.fmt_callable_hover(c, output, 0)
+                if self.lsp_display_mode == LspDisplayMode::Hover
+                    || (is_toplevel
+                        && self.lsp_display_mode == LspDisplayMode::SignatureHelpMultiline)
+                {
+                    self.fmt_callable_lsp(c, output)
                 } else {
                     c.fmt_with_type(output, &|t, o| self.fmt_helper_generic(t, false, o))
                 }
@@ -1146,22 +1169,14 @@ impl<'a> TypeDisplayContext<'a> {
                 match self.lsp_display_mode {
                     LspDisplayMode::Hover
                     | LspDisplayMode::SignatureHelp
+                    | LspDisplayMode::SignatureHelpMultiline
                     | LspDisplayMode::ProvideType
                         if is_toplevel =>
                     {
                         let func_name = metadata.kind.function_name();
                         output.write_str("def ")?;
                         self.write_func_fqn(output, &func_name, &metadata.kind)?;
-                        match self.lsp_display_mode {
-                            LspDisplayMode::Hover => {
-                                self.fmt_callable_hover(signature, output, 0)?;
-                            }
-                            _ => {
-                                signature.fmt_with_type(output, &|t, o| {
-                                    self.fmt_helper_generic(t, false, o)
-                                })?;
-                            }
-                        }
+                        self.fmt_callable_lsp(signature, output)?;
                         if self.lsp_display_mode == LspDisplayMode::ProvideType {
                             Ok(())
                         } else {
@@ -1249,6 +1264,7 @@ impl<'a> TypeDisplayContext<'a> {
                     }
                     LspDisplayMode::Hover
                     | LspDisplayMode::SignatureHelp
+                    | LspDisplayMode::SignatureHelpMultiline
                     | LspDisplayMode::ProvideType
                         if is_toplevel =>
                     {
@@ -1270,16 +1286,7 @@ impl<'a> TypeDisplayContext<'a> {
                                 } else {
                                     signature.clone()
                                 };
-                                match self.lsp_display_mode {
-                                    LspDisplayMode::Hover => {
-                                        self.fmt_callable_hover(&effective_sig, output, 0)?;
-                                    }
-                                    _ => {
-                                        effective_sig.fmt_with_type(output, &|t, o| {
-                                            self.fmt_helper_generic(t, false, o)
-                                        })?;
-                                    }
-                                }
+                                self.fmt_callable_lsp(&effective_sig, output)?;
                                 if self.always_display_module_name {
                                     Ok(())
                                 } else {
@@ -1315,15 +1322,7 @@ impl<'a> TypeDisplayContext<'a> {
                                     signature.clone()
                                 };
                                 let _scope = self.push_forall_scope(tparams.iter());
-                                let result = match self.lsp_display_mode {
-                                    LspDisplayMode::Hover => {
-                                        self.fmt_callable_hover(&effective_sig, output, 0)
-                                    }
-                                    _ => effective_sig.fmt_with_type(output, &|t, o| {
-                                        self.fmt_helper_generic(t, false, o)
-                                    }),
-                                };
-                                result?;
+                                self.fmt_callable_lsp(&effective_sig, output)?;
                                 if self.always_display_module_name {
                                     Ok(())
                                 } else {
@@ -1336,7 +1335,9 @@ impl<'a> TypeDisplayContext<'a> {
                             }
                         }
                     }
-                    LspDisplayMode::Hover | LspDisplayMode::SignatureHelp => {
+                    LspDisplayMode::Hover
+                    | LspDisplayMode::SignatureHelp
+                    | LspDisplayMode::SignatureHelpMultiline => {
                         self.fmt_helper_generic(&func.clone().as_type(), false, output)
                     }
                     // Binding has already consumed the receiver, so showing it would
@@ -1481,7 +1482,12 @@ impl<'a> TypeDisplayContext<'a> {
                 let Forall { tparams, body } = &**forall;
                 match body {
                     Forallable::Callable(c) => {
-                        if self.lsp_display_mode == LspDisplayMode::Hover && is_toplevel {
+                        if is_toplevel
+                            && matches!(
+                                self.lsp_display_mode,
+                                LspDisplayMode::Hover | LspDisplayMode::SignatureHelpMultiline
+                            )
+                        {
                             output.write_str("[")?;
                             write!(
                                 output,
@@ -1489,7 +1495,7 @@ impl<'a> TypeDisplayContext<'a> {
                                 commas_iter(|| tparams.iter().map(|q| q.display_with_bounds()))
                             )?;
                             output.write_str("]")?;
-                            self.fmt_callable_hover(c, output, 0)
+                            self.fmt_callable_lsp(c, output)
                         } else {
                             output.write_str("[")?;
                             write!(
@@ -1507,6 +1513,7 @@ impl<'a> TypeDisplayContext<'a> {
                     }) => match self.lsp_display_mode {
                         LspDisplayMode::Hover
                         | LspDisplayMode::SignatureHelp
+                        | LspDisplayMode::SignatureHelpMultiline
                         | LspDisplayMode::ProvideType
                             if is_toplevel =>
                         {
@@ -1523,14 +1530,7 @@ impl<'a> TypeDisplayContext<'a> {
                             )?;
                             output.write_str("]")?;
                             let _scope = self.push_forall_scope(tparams.iter());
-                            match self.lsp_display_mode {
-                                LspDisplayMode::Hover => {
-                                    self.fmt_callable_hover(signature, output, 0)
-                                }
-                                _ => signature.fmt_with_type(output, &|t, o| {
-                                    self.fmt_helper_generic(t, false, o)
-                                }),
-                            }?;
+                            self.fmt_callable_lsp(signature, output)?;
                             if self.always_display_module_name {
                                 Ok(())
                             } else {
