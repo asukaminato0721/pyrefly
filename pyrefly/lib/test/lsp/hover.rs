@@ -3163,6 +3163,27 @@ f()
 }
 
 #[test]
+fn hover_does_not_align_long_signature_types() {
+    let code = r#"
+def f(data: list[dict[str, tuple[str, int, bool]]] | None = None, flag: bool = False) -> None:
+    pass
+
+f()
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    assert!(
+        report.contains(
+            r#"def f(
+    data: list[dict[str, tuple[str, int, bool]]] | None = None,
+    flag: bool = False
+) -> None: ..."#
+        ),
+        "Expected hover without column alignment for long types, got: {report}",
+    );
+}
+
+#[test]
 fn hover_preserves_int_default_literal_spelling() {
     let code = r#"
 def f(mode: int = 0o777) -> None:

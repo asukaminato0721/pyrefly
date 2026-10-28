@@ -8,6 +8,8 @@
 use itertools::Itertools;
 use lsp_types::ActiveParameter;
 use lsp_types::Documentation;
+use lsp_types::MarkupContent;
+use lsp_types::MarkupKind;
 use lsp_types::ParameterInformationLabel;
 use lsp_types::SignatureHelp;
 use lsp_types::SignatureInformation;
@@ -119,6 +121,143 @@ Signature Help Result: active=0
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn long_signature_uses_multiple_lines() {
+    let code = r#"
+from typing import Callable
+
+def read_data(path: str, /, callback: Callable[[str, int], bool], count: int = 0, *, encoding: str = "utf-8", skip_blank_lines: bool = True, **kwargs: object) -> None:
+    """Read data.
+
+    Args:
+        encoding: The text encoding.
+    """
+    pass
+
+read_data("", lambda a, b: True, encoding="")
+#                                 ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, true);
+    let handle = handles.get("main").unwrap();
+    let signature_help = state
+        .transaction()
+        .get_signature_help_at(handle, extract_cursors_for_test(code)[0])
+        .expect("Expected signature help");
+    let signature = &signature_help.signatures[0];
+    assert_eq!(
+        signature.label,
+        r#"def read_data(
+    path: str,
+    /,
+    callback: (str, int) -> bool,
+    count: int = 0,
+    *,
+    encoding: str = 'utf-8',
+    skip_blank_lines: bool = True,
+    **kwargs: object
+) -> None: ..."#
+    );
+    assert_eq!(signature.active_parameter, Some(ActiveParameter::Int(3)));
+    let params = signature.parameters.as_ref().unwrap();
+    assert_eq!(params.len(), 6);
+    for param in params {
+        let ParameterInformationLabel::String(label) = &param.label else {
+            panic!("Expected a string parameter label");
+        };
+        assert!(
+            signature.label.contains(label),
+            "Missing parameter: {label}"
+        );
+        assert!(!label.contains('\n'), "Expected a single-line parameter");
+    }
+    assert_eq!(
+        params[3].documentation,
+        Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: "The text encoding.".to_owned(),
+        }))
+    );
+}
+
+#[test]
+fn signature_help_line_length_limit() {
+    for (name_length, multiline) in [(53, false), (54, true)] {
+        let name = "p".repeat(name_length);
+        let code = format!("def f({name}: None, y: None) -> None: ...\nf(None, None)\n# ^\n");
+        let (handles, state) = mk_multi_file_state(&[("main", &code)], Require::Exports, true);
+        let signature_help = state
+            .transaction()
+            .get_signature_help_at(
+                handles.get("main").unwrap(),
+                extract_cursors_for_test(&code)[0],
+            )
+            .expect("Expected signature help");
+        let label = &signature_help.signatures[0].label;
+        assert_eq!(
+            label.contains('\n'),
+            multiline,
+            "Unexpected signature: {label}"
+        );
+        if !multiline {
+            assert_eq!(label.chars().count(), 88);
+        }
+    }
+}
+
+#[test]
+fn long_signatures_for_methods_generics_and_overloads() {
+    let code = r#"
+from typing import overload
+
+def generic[T](first_argument: T, second_argument: T, third_argument: T, fourth_argument: T) -> T: ...
+
+class C:
+    def __init__(self, first_argument: int, second_argument: int, third_argument: int, fourth_argument: int) -> None: ...
+    def method(self, first_argument: int, second_argument: int, third_argument: int, fourth_argument: int) -> None: ...
+    def generic[T](self, first_argument: T, second_argument: T, third_argument: T, fourth_argument: T) -> T: ...
+
+@overload
+def overloaded(first_argument: int, second_argument: int, third_argument: int, fourth_argument: int) -> int: ...
+@overload
+def overloaded(value: str) -> str: ...
+def overloaded(*args): ...
+
+c: C
+generic()
+#       ^
+C()
+# ^
+c.method()
+#        ^
+c.generic()
+#         ^
+overloaded()
+#          ^
+"#;
+    let (handles, state) = mk_multi_file_state(&[("main", code)], Require::Exports, false);
+    let handle = handles.get("main").unwrap();
+    let cursors = extract_cursors_for_test(code);
+    let expected_prefixes = [
+        "def generic[T](\n",
+        "(\n    self: C,\n",
+        "def method(\n    self: C,\n",
+        "def generic[T](\n    self: C,\n",
+        "(\n    first_argument: int,\n",
+    ];
+    assert_eq!(cursors.len(), expected_prefixes.len());
+    for (cursor, prefix) in cursors.into_iter().zip(expected_prefixes) {
+        let signature_help = state
+            .transaction()
+            .get_signature_help_at(handle, cursor)
+            .expect("Expected signature help");
+        let label = &signature_help.signatures[0].label;
+        assert!(label.starts_with(prefix), "Unexpected signature: {label}");
+        if signature_help.signatures.len() == 2 {
+            assert_eq!(signature_help.signatures[1].label, "(value: str) -> str");
+        }
+    }
 }
 
 #[test]
