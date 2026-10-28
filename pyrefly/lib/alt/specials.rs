@@ -607,6 +607,25 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 "`Annotated` needs at least one piece of metadata in addition to the type"
                     .to_owned(),
             ),
+            SpecialForm::NotRequired | SpecialForm::Required | SpecialForm::ReadOnly
+                if type_form_context == TypeFormContext::TypeExpression =>
+            {
+                if let [arg] = arguments {
+                    self.expr_infer(arg, errors);
+                    // Runtime annotation objects use the return type of `_SpecialForm.__getitem__`.
+                    self.heap.mk_class_type(self.stdlib.object().clone())
+                } else {
+                    self.error(
+                        errors,
+                        range,
+                        ErrorKind::BadSpecialization,
+                        format!(
+                            "Expected 1 type argument for `{special_form}`, got {}",
+                            arguments.len()
+                        ),
+                    )
+                }
+            }
             // Keep this in sync with `SpecialForm::can_be_subscripted``
             SpecialForm::SelfType
             | SpecialForm::LiteralString
