@@ -101,6 +101,70 @@ class MyDict(TypedDict):
 );
 
 testcase!(
+    test_typed_dict_qualifiers_at_runtime,
+    r#"
+from typing import Any, NotRequired, ReadOnly, Required, assert_type, get_args, get_origin
+from typing_extensions import NotRequired as NotRequiredExt, ReadOnly as ReadOnlyExt, Required as RequiredExt
+
+def mark_optional(hints: dict[str, Any]) -> dict[str, Any]:
+    return {key: NotRequiredExt[hint] for key, hint in hints.items()}
+
+assert get_origin(mark_optional({"a": int})["a"]) is NotRequiredExt
+
+def wrap(hint: type[int]) -> None:
+    assert_type(NotRequired[hint], object)
+    assert_type(Required[hint], object)
+    assert_type(ReadOnly[hint], object)
+    assert_type(NotRequiredExt[hint], object)
+    assert_type(RequiredExt[hint], object)
+    assert_type(ReadOnlyExt[hint], object)
+    assert get_origin(NotRequired[hint]) is NotRequired
+    assert get_args(NotRequired[hint]) == (hint,)
+    assert get_origin(NotRequired[ReadOnly[hint]]) is NotRequired
+
+wrap(int)
+"#,
+);
+
+testcase!(
+    test_typed_dict_qualifiers_runtime_errors,
+    r#"
+from typing import NotRequired, ReadOnly, Required
+
+NotRequired[()]  # E: Expected 1 type argument for `NotRequired`, got 0
+Required[int, str]  # E: Expected 1 type argument for `Required`, got 2
+ReadOnly[int, str]  # E: Expected 1 type argument for `ReadOnly`, got 2
+NotRequired[undefined]  # E: Could not find name `undefined`
+"#,
+);
+
+testcase!(
+    test_typed_dict_qualifiers_invalid_type_expressions,
+    r#"
+from typing import NotRequired, ReadOnly, Required, TypeAlias
+from typing_extensions import TypeForm
+
+def f(
+    x: NotRequired[int],  # E: `NotRequired` is only allowed inside a class body # E: `NotRequired` is not allowed in this context
+    y: Required[int],  # E: `Required` is only allowed inside a class body # E: `Required` is not allowed in this context
+    z: ReadOnly[int],  # E: `ReadOnly` is only allowed inside a class body or class keyword # E: `ReadOnly` is not allowed in this context
+) -> None: ...
+
+x: list[NotRequired[int]]  # E: `NotRequired` is not allowed in this context
+y: list[Required[int]]  # E: `Required` is not allowed in this context
+z: list[ReadOnly[int]]  # E: `ReadOnly` is not allowed in this context
+
+A: TypeAlias = NotRequired[int]  # E: `NotRequired` is not allowed in this context
+B: TypeAlias = Required[int]  # E: `Required` is not allowed in this context
+C: TypeAlias = ReadOnly[int]  # E: `ReadOnly` is not allowed in this context
+
+a: TypeForm = NotRequired[int]  # E: `object` is not assignable to `TypeForm[Any]`
+b: TypeForm = Required[int]  # E: `object` is not assignable to `TypeForm[Any]`
+c: TypeForm = ReadOnly[int]  # E: `object` is not assignable to `TypeForm[Any]`
+"#,
+);
+
+testcase!(
     test_typed_dict_invalid_inheritance,
     r#"
 from typing import TypedDict
@@ -1356,9 +1420,9 @@ testcase!(
     test_extra_items_requiredness,
     r#"
 from typing import NotRequired, Required, TypedDict
-class TD1(TypedDict, extra_items=NotRequired[int]):  # E: not allowed in this context
+class TD1(TypedDict, extra_items=NotRequired[int]):  # E: Expected `extra_items` to be a type form, got instance of `object`
     pass
-class TD2(TypedDict, extra_items=Required[int]):  # E: not allowed in this context
+class TD2(TypedDict, extra_items=Required[int]):  # E: Expected `extra_items` to be a type form, got instance of `object`
     pass
     "#,
 );
