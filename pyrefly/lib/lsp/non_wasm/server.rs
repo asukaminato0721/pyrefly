@@ -42,6 +42,7 @@ use lsp_types::CallHierarchyOutgoingCallsRequest;
 use lsp_types::CallHierarchyPrepareRequest;
 use lsp_types::CallHierarchyProvider;
 use lsp_types::CancelNotification;
+use lsp_types::ChangeAnnotation;
 use lsp_types::ChangeNotifications;
 use lsp_types::Code;
 use lsp_types::CodeAction;
@@ -90,6 +91,7 @@ use lsp_types::DidChangeWorkspaceFoldersParams;
 use lsp_types::DidCloseTextDocumentNotification;
 use lsp_types::DidOpenTextDocumentNotification;
 use lsp_types::DidSaveTextDocumentNotification;
+use lsp_types::DocumentChange;
 use lsp_types::DocumentDiagnosticParams;
 use lsp_types::DocumentDiagnosticReport;
 use lsp_types::DocumentDiagnosticRequest;
@@ -102,6 +104,7 @@ use lsp_types::DocumentSymbolParams;
 use lsp_types::DocumentSymbolProvider;
 use lsp_types::DocumentSymbolRequest;
 use lsp_types::DocumentSymbolResponse;
+use lsp_types::Edit;
 use lsp_types::ExitNotification;
 use lsp_types::FileEvent;
 use lsp_types::FileSystemWatcher;
@@ -140,6 +143,7 @@ use lsp_types::NotebookDocumentSync;
 use lsp_types::NotebookDocumentSyncOptions;
 use lsp_types::NotebookSelector;
 use lsp_types::Notification as _;
+use lsp_types::OptionalVersionedTextDocumentIdentifier;
 use lsp_types::Position;
 use lsp_types::PositionEncodingKind;
 use lsp_types::PrepareRenameRequest;
@@ -190,6 +194,7 @@ use lsp_types::SignatureHelpRequest;
 use lsp_types::SymbolInformation;
 use lsp_types::SymbolKind;
 use lsp_types::TextDocumentContentChangeEvent;
+use lsp_types::TextDocumentEdit;
 use lsp_types::TextDocumentIdentifier;
 use lsp_types::TextDocumentPositionParams;
 use lsp_types::TextDocumentSync;
@@ -323,8 +328,9 @@ use crate::lsp::non_wasm::queue::HeavyTaskQueue;
 use crate::lsp::non_wasm::queue::LspEvent;
 use crate::lsp::non_wasm::queue::LspQueue;
 use crate::lsp::non_wasm::queue::QueuedEvent;
-use crate::lsp::non_wasm::rename::append_comment_and_string_occurrences;
-use crate::lsp::non_wasm::rename::text_occurrence_edits_in_workspace;
+use crate::lsp::non_wasm::rename::COMMENT_ANNOTATION;
+use crate::lsp::non_wasm::rename::CommentRename;
+use crate::lsp::non_wasm::rename::MAX_SOURCE_BYTES;
 use crate::lsp::non_wasm::safe_delete_file::safe_delete_file_code_action;
 use crate::lsp::non_wasm::stdlib::should_show_stdlib_error;
 use crate::lsp::non_wasm::transaction_manager::TransactionManager;
@@ -5117,7 +5123,7 @@ impl Server {
                 }
                 Ok(grouped)
             },
-            move |results: Vec<(ModuleInfo, Vec<TextRange>)>| {
+            move |results: Vec<(ModuleInfo, Vec<TextRange>)>, _, _| {
                 let mut lsp_targets = Vec::new();
                 for (info, ranges) in results {
                     if let Some(mut uri) = module_info_to_uri(&info, path_remapper.as_ref()) {
@@ -5548,7 +5554,7 @@ impl Server {
         + Send
         + Sync
         + 'static,
-        transform_result: impl FnOnce(T) -> V + Send + Sync + 'static,
+        transform_result: impl FnOnce(T, &Server, &CancellationHandle) -> V + Send + Sync + 'static,
     ) -> Result<(), EmptyResponseReason> {
         let Some(info) = transaction.get_module_info(&handle) else {
             return Err(EmptyResponseReason::ModuleInfoNotFound);
@@ -5570,27 +5576,38 @@ impl Server {
                 server.set_file_stats(uri_for_telemetry, telemetry_event);
                 telemetry_event.set_activity_key(activity_key);
                 let mut transaction = server.state.cancellable_transaction();
+                let cancellation = transaction.get_cancellation_handle();
                 server
                     .cancellation_handles
                     .lock()
-                    .insert(request_id.clone(), transaction.get_cancellation_handle());
+                    .insert(request_id.clone(), cancellation.dupe());
                 server.validate_in_memory_for_transaction(
                     transaction.as_mut(),
                     telemetry_event,
                     None,
                 );
-                match find_fn(
+                let result = find_fn(
                     &mut transaction,
                     &handle,
                     definition,
                     telemetry,
                     telemetry_event,
-                ) {
-                    Ok(results) => {
-                        server.cancellation_handles.lock().remove(&request_id);
+                );
+                drop(transaction);
+                let result = result.and_then(|results| {
+                    let response = transform_result(results, server, &cancellation);
+                    if cancellation.is_cancelled() {
+                        Err(RequestError::Cancelled)
+                    } else {
+                        Ok(response)
+                    }
+                });
+                server.cancellation_handles.lock().remove(&request_id);
+                match result {
+                    Ok(response) => {
                         server.connection.send(Message::Response(new_response(
                             request_id,
-                            Ok(Some(transform_result(results))),
+                            Ok(Some(response)),
                         )));
                     }
                     Err(RequestError::Cancelled) => {
@@ -5624,13 +5641,10 @@ impl Server {
         &'a self,
         transaction: &Transaction<'a>,
         request: FindReferencesRequest,
-        extend_local_results: impl FnOnce(
-            &CancellableTransaction<'_>,
-            &mut Vec<(ModuleInfo, Vec<TextRange>)>,
-        ) + Send
+        map_result: impl FnOnce(Vec<(Uri, Vec<Range>)>, &Server, &CancellationHandle) -> V
+        + Send
         + Sync
         + 'static,
-        map_result: impl FnOnce(Vec<(Uri, Vec<Range>)>) -> V + Send + Sync + 'static,
     ) -> Result<(), EmptyResponseReason> {
         let FindReferencesRequest {
             request_id,
@@ -5697,11 +5711,11 @@ impl Server {
                     .transpose()
                     .map_err(|e| RequestError::Internal(e.to_string()))?
                     .unwrap_or_default();
-                let mut local_results = local_results?;
-                extend_local_results(transaction, &mut local_results);
-                Ok((local_results, external_results))
+                Ok((local_results?, external_results))
             },
-            move |results: (Vec<(ModuleInfo, Vec<TextRange>)>, Vec<(Uri, Vec<Range>)>)| {
+            move |results: (Vec<(ModuleInfo, Vec<TextRange>)>, Vec<(Uri, Vec<Range>)>),
+                  server,
+                  cancellation| {
                 let (local_results, external_results) = results;
 
                 let mut locations: SmallMap<Uri, Vec<Range>> = SmallMap::new();
@@ -5733,7 +5747,7 @@ impl Server {
                     }
                 }
 
-                map_result(locations.into_iter().collect())
+                map_result(locations.into_iter().collect(), server, cancellation)
             },
         )
     }
@@ -5761,8 +5775,7 @@ impl Server {
                 options: ReferenceOptions::all(params.context.include_declaration),
                 activity_key,
             },
-            |_, _| {},
-            move |results| {
+            move |results, _, _| {
                 let mut locations = Vec::new();
                 for (uri, ranges) in results {
                     for range in ranges {
@@ -5786,26 +5799,69 @@ impl Server {
     ) -> Result<(), EmptyResponseReason> {
         let uri = &params.text_document_position_params.text_document.uri;
         let handle = self.make_handle_if_enabled(uri, Some(RenameRequest::METHOD.as_str()))?;
-        let info = transaction
-            .get_module_info(&handle)
-            .ok_or(EmptyResponseReason::ModuleInfoNotFound)?;
-        let position =
-            self.from_lsp_position(uri, &info, params.text_document_position_params.position);
-        let old_name = transaction
-            .identifier_at(&handle, position)
-            .map(|id| id.identifier.id.as_str().to_owned())
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| EmptyResponseReason::NotAnIdentifier {
-                found: "none".to_owned(),
-            })?;
-        let rename_config = self.workspaces.rename_config(handle.path().as_path());
-        let workspace_root = self
+        let comments = if self
             .workspaces
-            .get_with(handle.path().as_path().to_path_buf(), |(root, _)| {
-                root.cloned()
-            });
+            .rename_comments_and_strings(handle.path().as_path())
+            && self
+                .initialize_params
+                .capabilities
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.workspace_edit.as_ref())
+                .is_some_and(|edit| {
+                    edit.document_changes == Some(true) && edit.change_annotation_support.is_some()
+                })
+            && self
+                .initialize_params
+                .capabilities
+                .text_document
+                .as_ref()
+                .and_then(|text| text.rename.as_ref())
+                .is_some_and(|rename| rename.honors_change_annotations == Some(true))
+        {
+            (|| {
+                let module = transaction.get_module_info(&handle)?;
+                if module.is_notebook()
+                    || module.is_generated()
+                    || module.contents().len() > MAX_SOURCE_BYTES
+                {
+                    return None;
+                }
+                let config = transaction.get_config(&handle)?;
+                if config.project_excludes.covers(handle.path().as_path()) {
+                    return None;
+                }
+                let document = self
+                    .open_files
+                    .read()
+                    .get(handle.path().as_path())
+                    .cloned()?;
+                if document.get_string() != module.contents().as_str() {
+                    return None;
+                }
+                let version = *self.version_info.lock().get(handle.path().as_path())?;
+                let position = self.from_lsp_position(
+                    uri,
+                    &module,
+                    params.text_document_position_params.position,
+                );
+                let identifier = transaction
+                    .identifier_at(&handle, position)?
+                    .identifier
+                    .range;
+                Some(CommentRename {
+                    ast: transaction.get_ast(&handle)?,
+                    module,
+                    identifier,
+                    uri: uri.clone(),
+                    version,
+                    document,
+                })
+            })()
+        } else {
+            None
+        };
         let new_name = params.new_name.clone();
-        let old_name_for_comments = old_name.clone();
         self.async_find_references_helper(
             transaction,
             FindReferencesRequest {
@@ -5821,45 +5877,65 @@ impl Server {
                 options: ReferenceOptions::textual_only(true),
                 activity_key,
             },
-            move |transaction, references| {
-                if rename_config.comments_and_strings {
-                    append_comment_and_string_occurrences(
-                        transaction,
-                        &old_name_for_comments,
-                        references,
-                    );
-                }
-            },
-            move |results| {
-                let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+            move |results, server, cancellation| {
+                let mut changes = HashMap::new();
                 for (uri, ranges) in results {
-                    changes
-                        .entry(uri)
-                        .or_default()
-                        .extend(ranges.into_map(|range| TextEdit {
+                    changes.insert(
+                        uri,
+                        ranges.into_map(|range| TextEdit {
                             range,
                             new_text: new_name.clone(),
-                        }));
+                        }),
+                    );
                 }
-                if rename_config.text_occurrences {
-                    for (uri, edits) in text_occurrence_edits_in_workspace(
-                        workspace_root.as_deref(),
-                        &old_name,
-                        &new_name,
-                    ) {
-                        changes.entry(uri).or_default().extend(edits);
+                let comments = comments.filter(|comments| {
+                    server
+                        .open_files
+                        .read()
+                        .get(comments.module.path().as_path())
+                        .is_some_and(|current| Arc::ptr_eq(current, &comments.document))
+                        && server
+                            .version_info
+                            .lock()
+                            .get(comments.module.path().as_path())
+                            == Some(&comments.version)
+                });
+                if let Some(comments) = comments {
+                    let semantic = changes.get(&comments.uri).map(Vec::as_slice).unwrap_or(&[]);
+                    let mut heuristic =
+                        comments.edits(&new_name, semantic, &|| cancellation.is_cancelled());
+                    if !heuristic.is_empty() && changes.contains_key(&comments.uri) {
+                        let mut documents = Vec::new();
+                        for (uri, edits) in changes {
+                            let version = (uri == comments.uri).then_some(comments.version);
+                            let mut edits: Vec<_> = edits.into_iter().map(Edit::TextEdit).collect();
+                            if uri == comments.uri {
+                                edits.append(&mut heuristic);
+                            }
+                            documents.push(DocumentChange::TextDocumentEdit(TextDocumentEdit {
+                                text_document: OptionalVersionedTextDocumentIdentifier {
+                                    text_document_identifier: TextDocumentIdentifier { uri },
+                                    version,
+                                },
+                                edits,
+                            }));
+                        }
+                        return WorkspaceEdit {
+                            document_changes: Some(documents),
+                            change_annotations: Some(HashMap::from([(
+                                COMMENT_ANNOTATION.to_owned(),
+                                ChangeAnnotation {
+                                    label: "Review comment and string matches".to_owned(),
+                                    needs_confirmation: Some(true),
+                                    description: Some(
+                                        "These text matches may refer to a different symbol."
+                                            .to_owned(),
+                                    ),
+                                },
+                            )])),
+                            ..Default::default()
+                        };
                     }
-                }
-                for edits in changes.values_mut() {
-                    edits.sort_by_key(|edit| {
-                        (
-                            edit.range.start.line,
-                            edit.range.start.character,
-                            edit.range.end.line,
-                            edit.range.end.character,
-                        )
-                    });
-                    edits.dedup_by(|a, b| a.range == b.range);
                 }
                 WorkspaceEdit {
                     changes: Some(changes),
@@ -6882,7 +6958,9 @@ impl Server {
             move |(local_callers, external_calls): (
                 _,
                 Vec<lsp_types::CallHierarchyIncomingCall>,
-            )| {
+            ),
+                  _,
+                  _| {
                 let mut incoming_calls =
                     transform_incoming_calls(local_callers, path_remapper.as_ref());
 
@@ -6941,7 +7019,7 @@ impl Server {
                 // Return both the callees and the module we need for LSP range conversion
                 Ok((callees, definition.module))
             },
-            move |(callees, source_module)| {
+            move |(callees, source_module), _, _| {
                 transform_outgoing_calls(callees, &source_module, &uri_for_transform)
             },
         )
@@ -7218,7 +7296,7 @@ impl Server {
                 }
                 Ok(items)
             },
-            |items| items,
+            |items, _, _| items,
         )
     }
 
@@ -7263,7 +7341,7 @@ impl Server {
                     path_remapper.as_ref(),
                 ))
             },
-            |items| items,
+            |items, _, _| items,
         )
     }
 

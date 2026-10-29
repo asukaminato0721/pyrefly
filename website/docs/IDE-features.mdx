@@ -201,6 +201,35 @@ Autocomplete suggestions for project-specific symbols and imports.
 ### [Rename](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_rename)
 
 Safely rename symbols project-wide.
+
+Set `python.pyrefly.rename.commentsAndStrings` to `true` to offer additional
+comment and string matches. The default is `false`. These are heuristic text
+matches. A matching dictionary key or string does not establish a semantic
+reference. Pyrefly marks these edits for separate confirmation. Clients must
+support versioned document changes, change annotations, and rename confirmation.
+Other clients receive the ordinary semantic rename result.
+
+The optional search uses the synchronized contents of the initiating open Python
+document. It searches only the lexical scope containing the rename position and
+excludes nested functions, classes, lambdas, and comprehensions. A declaration's
+name belongs to the surrounding scope. Other documents receive semantic edits
+only. Configured Python source extensions receive the same treatment as `.py`
+files. Project exclusions and generated files exclude heuristic matches.
+
+The search reads no files from disk and does not enumerate workspace folders.
+This scope also applies with multiple workspace folders or no workspace root.
+Non-Python documents, including unsaved text documents, receive no heuristic
+edits. Optional matches are omitted for notebooks, documents larger than 1 MiB,
+or searches with more than 1,000 matches. Cancellation remains active during
+matching, which runs after the state transaction has been released.
+
+Matching uses exact source spellings and Python identifier boundaries, including
+combining marks. Bytes literals and string segments containing backslashes are
+excluded. Escaped spellings are not decoded. Literal portions of f-strings and
+template strings are eligible. Interpolation expressions retain semantic rename
+behavior. Document changes with heuristic edits carry the synchronized version. If that
+snapshot changes during reference collection, Pyrefly omits the heuristic edits.
+
 <video
   src="/videos/rename.mp4"
   width="720"

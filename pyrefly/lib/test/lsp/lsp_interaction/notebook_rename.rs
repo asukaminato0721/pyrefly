@@ -68,12 +68,19 @@ fn test_notebook_rename() {
     interaction.set_root(root.path().to_path_buf());
     interaction
         .initialize(InitializeSettings {
-            configuration: Some(None),
+            configuration: Some(Some(json!([{"pyrefly": {"rename": {"commentsAndStrings": true}}}]))),
+            capabilities: Some(json!({
+                "workspace": {"workspaceEdit": {"documentChanges": true, "changeAnnotationSupport": {}}},
+                "textDocument": {"rename": {"honorsChangeAnnotations": true}}
+            })),
             ..Default::default()
         })
         .unwrap();
     // Cell 1: "x = 1", Cell 2: "y = x"
-    interaction.open_notebook("notebook.ipynb", vec!["x = 1", "y = x"]);
+    interaction.open_notebook(
+        "notebook.ipynb",
+        vec!["x = 1", "y = x", "%matplotlib inline\n# x\ns = 'x'"],
+    );
 
     let cell1_uri = interaction.cell_uri("notebook.ipynb", "cell1");
     let cell2_uri = interaction.cell_uri("notebook.ipynb", "cell2");

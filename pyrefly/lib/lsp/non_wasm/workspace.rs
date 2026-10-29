@@ -61,6 +61,7 @@ pub struct Workspace {
     pub disable_language_services: bool,
     pub disabled_language_services: Option<DisabledLanguageServices>,
     pub runnable_code_lens: bool,
+    rename_comments_and_strings: bool,
     pub display_type_errors: Option<DisplayTypeErrors>,
     pub type_checking_mode: Option<TypeCheckingMode>,
     /// Workspace-scoped IDE-only kill switch. When `true`, all type-error
@@ -71,7 +72,6 @@ pub struct Workspace {
     /// mapped onto this in `apply_client_configuration`.
     pub disable_type_errors: bool,
     pub lsp_analysis_config: Option<LspAnalysisConfig>,
-    pub rename_config: Option<RenameConfig>,
     pub stream_diagnostics: Option<bool>,
     pub diagnostic_mode: Option<DiagnosticMode>,
     pub workspace_config: Option<PathBuf>,
@@ -257,10 +257,11 @@ struct PyreflyClientConfig {
     /// `pyrefly.toml`.
     extra_project_excludes: Option<Globs>,
     runnable_code_lens: Option<bool>,
+    #[serde(default)]
+    rename: Value,
     diagnostic_mode: Option<DiagnosticMode>,
     #[serde(default, deserialize_with = "deserialize_analysis")]
     analysis: Option<LspAnalysisConfig>,
-    rename: Option<RenameConfig>,
     #[serde(default)]
     disabled_language_services: Option<DisabledLanguageServices>,
     stream_diagnostics: Option<bool>,
@@ -312,15 +313,6 @@ pub struct DisabledLanguageServices {
     pub semantic_tokens: bool,
     #[serde(default)]
     pub implementation: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameConfig {
-    #[serde(default)]
-    pub comments_and_strings: bool,
-    #[serde(default)]
-    pub text_occurrences: bool,
 }
 
 impl DisabledLanguageServices {
@@ -580,6 +572,27 @@ impl Workspaces {
             Ok(x) => x,
         };
 
+        if mode == ServerMode::LanguageServer {
+            // Each response is a complete settings snapshot. Missing or invalid rename settings
+            // reset this option without preventing unrelated settings from being applied.
+            let enabled = config
+                .pyrefly
+                .as_ref()
+                .and_then(|pyrefly| pyrefly.rename.get("commentsAndStrings"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match scope_uri {
+                Some(uri) => {
+                    if let Ok(path) = uri.to_file_path()
+                        && let Some(workspace) = self.workspaces.write().get_mut(&path)
+                    {
+                        workspace.rename_comments_and_strings = enabled;
+                    }
+                }
+                None => self.default.write().rename_comments_and_strings = enabled,
+            }
+        }
+
         if let Some(python_path) = config.python_path {
             self.update_pythonpath(modified, scope_uri, &python_path);
         }
@@ -602,9 +615,6 @@ impl Workspaces {
             }
             if let Some(runnable_code_lens) = pyrefly.runnable_code_lens {
                 self.update_runnable_code_lens(scope_uri, runnable_code_lens);
-            }
-            if let Some(rename) = pyrefly.rename {
-                self.update_rename_config(scope_uri, rename);
             }
             if let Some(stream_diagnostics) = pyrefly.stream_diagnostics {
                 self.update_stream_diagnostics(scope_uri, stream_diagnostics);
@@ -698,20 +708,6 @@ impl Workspaces {
                 }
             }
             None => self.default.write().runnable_code_lens = runnable_code_lens,
-        }
-    }
-    /// Update rename options for scope_uri, None if default workspace
-    fn update_rename_config(&self, scope_uri: &Option<Uri>, rename: RenameConfig) {
-        let mut workspaces = self.workspaces.write();
-        match scope_uri {
-            Some(scope_uri) => {
-                if let Ok(path) = scope_uri.to_file_path()
-                    && let Some(workspace) = workspaces.get_mut(&path)
-                {
-                    workspace.rename_config = Some(rename);
-                }
-            }
-            None => self.default.write().rename_config = Some(rename),
         }
     }
 
@@ -1042,10 +1038,10 @@ impl Workspaces {
         })
     }
 
-    /// Get the rename configuration for a file at the given path.
-    pub fn rename_config(&self, path: &Path) -> RenameConfig {
+    /// Whether heuristic rename matches are enabled for the initiating document.
+    pub fn rename_comments_and_strings(&self, path: &Path) -> bool {
         self.get_with(path.to_path_buf(), |(_, workspace)| {
-            workspace.rename_config.unwrap_or_default()
+            workspace.rename_comments_and_strings
         })
     }
 
@@ -1076,6 +1072,93 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn rename_comments_configuration_resets_and_isolates_invalid_values() {
+        let root = TempDir::new().unwrap();
+        let workspaces = Workspaces::new(Workspace::new(), &[root.path().to_path_buf()]);
+        let scope = Some(Uri::from_directory_path(root.path()).unwrap());
+        let path = root.path().join("main.py");
+        for (config, enabled) in [
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+                true,
+            ),
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": false}}}),
+                false,
+            ),
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+                true,
+            ),
+            (json!({"pyrefly": {}}), false),
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+                true,
+            ),
+            (json!({}), false),
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+                true,
+            ),
+            (
+                json!({"pyrefly": {"rename": {"commentsAndStrings": "invalid"}, "disableLanguageServices": true}}),
+                false,
+            ),
+        ] {
+            workspaces.apply_client_configuration(
+                &mut false,
+                &scope,
+                config,
+                ServerMode::LanguageServer,
+            );
+            assert_eq!(workspaces.rename_comments_and_strings(&path), enabled);
+        }
+        assert!(workspaces.get_with(path, |(_, workspace)| workspace.disable_language_services));
+        // A workspace-scoped setting does not enable rename heuristics in a rootless workspace.
+        assert!(!workspaces.default.read().rename_comments_and_strings);
+    }
+
+    #[test]
+    fn rename_comments_invalid_objects_preserve_unrelated_settings() {
+        for rename in [json!(false), json!("invalid"), json!([true]), Value::Null] {
+            let workspaces = Workspaces::new(Workspace::new(), &[]);
+            workspaces.apply_client_configuration(
+                &mut false,
+                &None,
+                json!({"pyrefly": {"rename": rename, "disableLanguageServices": true}}),
+                ServerMode::LanguageServer,
+            );
+            assert!(!workspaces.default.read().rename_comments_and_strings);
+            assert!(workspaces.default.read().disable_language_services);
+        }
+    }
+
+    #[test]
+    fn rename_comments_settings_stay_in_their_workspace() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let workspaces = Workspaces::new(
+            Workspace::new(),
+            &[first.path().to_path_buf(), second.path().to_path_buf()],
+        );
+        workspaces.apply_client_configuration(
+            &mut false,
+            &Some(Uri::from_directory_path(first.path()).unwrap()),
+            json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+            ServerMode::LanguageServer,
+        );
+        assert!(workspaces.rename_comments_and_strings(&first.path().join("main.py")));
+        assert!(!workspaces.rename_comments_and_strings(&second.path().join("main.py")));
+        workspaces.apply_client_configuration(
+            &mut false,
+            &Some(Uri::parse("untitled:invalid-workspace").unwrap()),
+            json!({"pyrefly": {"rename": {"commentsAndStrings": true}}}),
+            ServerMode::LanguageServer,
+        );
+        assert!(!workspaces.default.read().rename_comments_and_strings);
+    }
 
     #[test]
     fn test_scoped_config_path_is_absolute_and_preserves_relative_suffix() {
