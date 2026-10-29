@@ -634,3 +634,56 @@ fn test_rename_in_comments_strings_and_text_occurrences() {
 
     interaction.shutdown().unwrap();
 }
+
+/// Rename must use the synchronized Python buffer and leave arbitrary text files alone.
+#[test]
+fn test_rename_comments_characterization() {
+    for rename in [
+        json!({}),
+        json!({"commentsAndStrings": false}),
+        json!({"commentsAndStrings": true}),
+    ] {
+        let root = TempDir::new().unwrap();
+        let main = root.path().join("main.py");
+        let notes = root.path().join("notes.txt");
+        std::fs::write(&main, "foo = 1\nprint(foo)\n").unwrap();
+        std::fs::write(&notes, "foo\n").unwrap();
+        let uri = Uri::from_file_path(&main).unwrap();
+        let mut interaction = LspInteraction::new();
+        interaction.set_root(root.path().to_path_buf());
+        interaction
+            .initialize(InitializeSettings {
+                capabilities: Some(json!({
+                    "workspace": {"workspaceEdit": {
+                        "documentChanges": true,
+                        "changeAnnotationSupport": {"groupsOnLabel": true}
+                    }},
+                    "textDocument": {"rename": {"honorsChangeAnnotations": true}}
+                })),
+                configuration: Some(Some(json!([{"pyrefly": {"rename": rename}}]))),
+                ..Default::default()
+            })
+            .unwrap();
+        interaction.client.did_open("main.py");
+        interaction.client.did_change(
+            "main.py",
+            "prefix = 0\nfoo = 1\nprint(foo)\n# foo\ntext = 'foo'\n",
+        );
+        interaction.client.did_open_uri(
+            &Uri::from_file_path(&notes).unwrap(),
+            "plaintext",
+            "prefix\nfoo\n",
+        );
+        interaction.client.send_request::<RenameRequest>(json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": 1, "character": 0},
+            "newName": "bar"
+        })).expect_response(json!({
+            "changes": {uri.to_string(): [
+                {"newText": "bar", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}},
+                {"newText": "bar", "range": {"start": {"line": 2, "character": 6}, "end": {"line": 2, "character": 9}}}
+            ]}
+        })).unwrap();
+        interaction.shutdown().unwrap();
+    }
+}
