@@ -954,6 +954,20 @@ def f(x: TA) -> TA:
     )
 }
 
+fn env_with_large_alias_union() -> TestEnv {
+    TestEnv::one(
+        "bar",
+        r#"
+type TA = int | str | bytes
+
+class C: pass
+
+type TB = TA | C
+type TC = TB
+"#,
+    )
+}
+
 testcase!(
     test_alias_union_name,
     env_with_alias(),
@@ -1041,6 +1055,34 @@ from b import need
 from c import make
 
 need(make())  # E: Argument `set[TA]` is not assignable to parameter `x` with type `list[TA]` in function `b.need`
+    "#,
+);
+
+testcase!(
+    test_union_display_name_with_pipe_reused,
+    env_with_large_alias_union(),
+    r#"
+from bar import TB
+from typing import Callable
+
+def f3(x: TB | float) -> TB | float:
+  return x
+
+c3: Callable[[int], int] = f3  # E: `(x: TB | float) -> TB | float` is not assignable to `(int) -> int`
+    "#,
+);
+
+testcase!(
+    test_outer_union_alias_display_name,
+    env_with_large_alias_union(),
+    r#"
+from bar import TC
+from typing import Callable
+
+def f(x: TC) -> TC:
+  return x
+
+c: Callable[[int], int] = f  # E: `(x: TC) -> TC` is not assignable to `(int) -> int`
     "#,
 );
 

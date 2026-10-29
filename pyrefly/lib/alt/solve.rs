@@ -19,7 +19,6 @@ use pyrefly_types::dimension::Int;
 use pyrefly_types::dimension::gradual_size;
 use pyrefly_types::facet::FacetKind;
 use pyrefly_types::function::BodyKind;
-use pyrefly_types::identity::IdentityIgnored;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::ShapedArrayType;
 use pyrefly_types::type_alias::TypeAliasData;
@@ -3198,6 +3197,35 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                             *range,
                             ErrorKind::UnboundName,
                             format!("`{name}` may be uninitialized"),
+                        )
+                        .emit();
+                }
+            }
+            BindingExpect::UninitializedAttributeCheck {
+                name,
+                range,
+                class,
+                termination_keys,
+            } => {
+                let initialized = termination_keys
+                    .as_ref()
+                    .is_some_and(|keys| keys.iter().all(|key| self.get_idx(*key).ty().is_never()));
+                let inherited = !initialized
+                    && self.get_idx(*class).0.as_ref().is_some_and(|cls| {
+                        self.get_mro_for_class(cls)
+                            .ancestors_no_object()
+                            .iter()
+                            .any(|base| {
+                                base.class_object() != cls
+                                    && self.get_class_member(base.class_object(), name).is_some()
+                            })
+                    });
+                if !initialized && !inherited {
+                    errors
+                        .error_builder(
+                            *range,
+                            ErrorKind::PossiblyUninitializedAttribute,
+                            format!("Attribute `{name}` may be uninitialized"),
                         )
                         .emit();
                 }
@@ -7722,8 +7750,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 let mut aliased_type =
                     self.untype_opt_with_context(ta.as_type(), range, errors, context)?;
                 if let Type::Union(f) = &mut aliased_type {
-                    f.display_name =
-                        IdentityIgnored(Some((self.module().name(), (*ta.name).clone())));
+                    f.set_display_name((self.module().name(), (*ta.name).clone()));
                 }
                 Some(aliased_type)
             }
