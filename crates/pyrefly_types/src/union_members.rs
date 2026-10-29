@@ -19,14 +19,35 @@ use crate::identity::IdentityIgnored;
 use crate::types::Type;
 use crate::types::UnionDisplay;
 
-/// Shares union members until mutation requires an owned copy.
+/// Shares one authoritative member list and keeps its display coverage valid.
+/// Raw mutable access invalidates coverage because it can reorder or remove members.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
 pub struct UnionMembers {
     types: Arc<Vec<Type>>,
-    pub(crate) display: IdentityIgnored<Option<UnionDisplay>>,
+    display: IdentityIgnored<Option<UnionDisplay>>,
 }
 
 impl UnionMembers {
+    pub(crate) fn display(&self) -> Option<&UnionDisplay> {
+        self.display.as_ref()
+    }
+
+    pub(crate) fn take_display(&mut self) -> Option<UnionDisplay> {
+        self.display.0.take()
+    }
+
+    pub(crate) fn set_display(&mut self, display: UnionDisplay) {
+        assert!(
+            display.matches_len(self.types.len()),
+            "coverage must match the members"
+        );
+        self.display.0 = Some(display);
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Type>, Option<UnionDisplay>) {
+        (Arc::unwrap_or_clone(self.types), self.display.0)
+    }
+
     /// Returns owned members, without copying when this is the only owner.
     pub fn into_vec(self) -> Vec<Type> {
         Arc::unwrap_or_clone(self.types)
@@ -58,6 +79,7 @@ impl Deref for UnionMembers {
 
 impl DerefMut for UnionMembers {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.display.0 = None;
         Arc::make_mut(&mut self.types)
     }
 }
@@ -92,17 +114,28 @@ impl<'a> IntoIterator for &'a mut UnionMembers {
 impl Visit<Type> for UnionMembers {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
         self.types.visit(f);
-        if let Some(display) = self.display.as_ref() {
-            display.extras.visit(f);
-        }
     }
 }
 
 impl VisitMut<Type> for UnionMembers {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
+        // Element-wise visits cannot reorder members. Partial coverage is valid only
+        // while every covered member stays equal. The snapshot shares storage,
+        // including nested unions, rather than owning another recursive display tree.
+        let before = self
+            .display()
+            .filter(|display| !display.is_full())
+            .map(|_| Arc::clone(&self.types));
         Arc::make_mut(&mut self.types).visit_mut(f);
-        if let Some(display) = &mut self.display.0 {
-            display.extras.visit_mut(f);
+        if let Some(before) = before
+            && let Some(display) = self.display()
+            && before
+                .iter()
+                .zip(self.types.iter())
+                .enumerate()
+                .any(|(index, (before, after))| display.covers(index) && before != after)
+        {
+            self.display.0 = None;
         }
     }
 }
@@ -111,7 +144,12 @@ impl VisitMut<Type> for UnionMembers {
 mod tests {
     use std::sync::Arc;
 
+    use pyrefly_python::module_name::ModuleName;
+    use pyrefly_util::visit::VisitMut;
+    use ruff_python_ast::name::Name;
+
     use crate::types::Type;
+    use crate::types::UnionDisplay;
     use crate::union_members::UnionMembers;
 
     #[test]
@@ -123,5 +161,47 @@ mod tests {
         assert!(!Arc::ptr_eq(&original.types, &changed.types));
         assert_eq!(original.as_slice(), &[Type::None]);
         assert_eq!(changed.into_vec(), vec![Type::None, Type::Ellipsis]);
+    }
+
+    #[test]
+    fn union_members_raw_mutation_invalidates_coverage() {
+        let mut members =
+            UnionMembers::from(vec![Type::None, Type::Ellipsis, Type::any_explicit()]);
+        members.set_display(UnionDisplay::new(
+            (ModuleName::unknown(), Name::new_static("Alias")),
+            vec![true, true, false].into_boxed_slice(),
+        ));
+        let mut changed = members.clone();
+        changed.reverse();
+        assert!(changed.display().is_none());
+        assert!(members.display().is_some());
+    }
+
+    #[test]
+    fn union_members_visits_validate_coverage() {
+        let mut members =
+            UnionMembers::from(vec![Type::None, Type::Ellipsis, Type::any_explicit()]);
+        members.set_display(UnionDisplay::new(
+            (ModuleName::unknown(), Name::new_static("Alias")),
+            vec![true, true, false].into_boxed_slice(),
+        ));
+        members.visit_mut(&mut |ty| {
+            if matches!(ty, Type::Any(_)) {
+                *ty = Type::any_implicit();
+            }
+        });
+        assert!(
+            members.display().is_some(),
+            "changing an extra preserves coverage"
+        );
+        members.visit_mut(&mut |ty| {
+            if matches!(ty, Type::None) {
+                *ty = Type::any_implicit();
+            }
+        });
+        assert!(
+            members.display().is_none(),
+            "changing an alias member drops coverage"
+        );
     }
 }

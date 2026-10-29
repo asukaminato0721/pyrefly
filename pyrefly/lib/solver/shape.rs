@@ -107,7 +107,7 @@ fn canonicalize_int_tuples_sequence(candidate: &Type, heap: &TypeHeap) -> Type {
             ))
         }
         Type::Union(union) => {
-            let display = union.display().cloned();
+            let display = union.display().filter(|display| display.is_full()).cloned();
             let mut normalized = unions(
                 union
                     .members

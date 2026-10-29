@@ -5,8 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-use pyrefly_python::module_name::ModuleName;
-use ruff_python_ast::name::Name;
 use starlark_map::small_map::SmallMap;
 use starlark_map::small_set::SmallSet;
 
@@ -21,8 +19,7 @@ use crate::type_var::Restriction;
 use crate::typed_dict::TypedDict;
 use crate::types::Type;
 use crate::types::UnionDisplay;
-
-const PRESERVE_LARGE_ALIAS_DISPLAY_MIN_MEMBERS: usize = 3;
+use crate::union_members::UnionMembers;
 
 /// Turn unions of unions into a flattened list for one union, and return the deduped list.
 ///
@@ -100,64 +97,107 @@ fn simplify_intersections(xs: &mut [Type], heap: &TypeHeap) {
     }
 }
 
-#[derive(Debug, Clone)]
-struct LargeAliasUnion {
-    name: (ModuleName, Name),
-    members: Vec<Type>,
-}
-
-fn large_alias_union_info(xs: &[Type]) -> Option<LargeAliasUnion> {
-    let mut info: Option<LargeAliasUnion> = None;
-    for x in xs {
-        match x {
-            Type::Union(u)
-                if u.display().is_some()
-                    && u.members.len() >= PRESERVE_LARGE_ALIAS_DISPLAY_MIN_MEMBERS =>
+/// Flatten a single alias together with its extras without storing duplicate type trees.
+/// Coverage travels with each member through sorting and deduplication. Other
+/// normalizations invalidate it through `UnionMembers` when they mutate the list.
+/// Only one alias with multiple covered alternatives is retained. Multiple aliases expand.
+fn flatten_with_display(
+    xs: Vec<Type>,
+    mut display: Option<UnionDisplay>,
+    heap: &TypeHeap,
+) -> UnionMembers {
+    let mut alias_index = None;
+    if display.is_none() {
+        for (index, x) in xs.iter().enumerate() {
+            if let Type::Union(union) = x
+                && let Some(candidate) = union.display()
+                && union
+                    .members
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| candidate.covers(*index))
+                    .take(2)
+                    .count()
+                    == 2
             {
-                if info.is_some() {
-                    return None;
+                if alias_index.is_some() {
+                    return flatten_and_dedup(xs, heap).into();
                 }
-                info = Some(LargeAliasUnion {
-                    name: u
-                        .display()
-                        .expect("guarded by display().is_some()")
-                        .name
-                        .clone(),
-                    members: u.members.to_vec(),
-                });
+                alias_index = Some(index);
             }
-            _ => {}
+        }
+        if alias_index.is_none() {
+            return flatten_and_dedup(xs, heap).into();
         }
     }
-    info
-}
 
-/// If the final union is a strict superset of a single large alias union, keep that
-/// alias name in the display output and append only the extra members.
-fn large_alias_union_display(
-    members: &[Type],
-    alias_union: &LargeAliasUnion,
-) -> Option<UnionDisplay> {
-    let alias_members: SmallSet<_> = alias_union.members.iter().collect();
-    if alias_members
+    fn flatten(ty: Type, covered: bool, members: &mut Vec<(Type, bool)>) {
+        match ty {
+            Type::Union(union) => {
+                for member in union.members {
+                    flatten(member, covered, members);
+                }
+            }
+            Type::Never(_) => {}
+            ty => members.push((ty, covered)),
+        }
+    }
+
+    let mut members = Vec::new();
+    for (index, ty) in xs.into_iter().enumerate() {
+        if alias_index == Some(index) {
+            let Type::Union(mut union) = ty else {
+                unreachable!("the selected alias is a union")
+            };
+            let candidate = union.take_display().expect("the selected union has a name");
+            for (index, member) in union.members.into_iter().enumerate() {
+                flatten(member, candidate.covers(index), &mut members);
+            }
+            display = Some(candidate);
+        } else {
+            let covered = alias_index.is_none()
+                && display
+                    .as_ref()
+                    .is_some_and(|display| display.covers(index));
+            flatten(ty, covered, &mut members);
+        }
+    }
+
+    // Intersection absorption can remove alias members. Expanded output is safe.
+    if members
         .iter()
-        .any(|alias_member| !members.contains(alias_member))
+        .any(|(ty, _)| matches!(ty, Type::Intersect(_)))
     {
-        return None;
+        return flatten_and_dedup(members.into_iter().map(|(ty, _)| ty).collect(), heap).into();
     }
-    if members.len() <= alias_members.len() {
-        return None;
-    }
-    let extras = members
+    members.sort_by(|(left, _), (right, _)| left.cmp(right));
+    members.dedup_by(|(right, right_covered), (left, left_covered)| {
+        if left == right {
+            *left_covered |= *right_covered;
+            true
+        } else {
+            false
+        }
+    });
+    let strongest = members
         .iter()
-        .filter(|member| !alias_members.contains(*member))
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
-    if extras.is_empty() {
-        return None;
+        .filter_map(|(ty, _)| match ty {
+            Type::Any(style) => Some(*style),
+            _ => None,
+        })
+        .max();
+    let mut valid = true;
+    members.retain(|(ty, covered)| {
+        let keep = !matches!(ty, Type::Any(style) if Some(*style) != strongest);
+        valid &= keep || !covered;
+        keep
+    });
+    let (types, covered): (Vec<_>, Vec<_>) = members.into_iter().unzip();
+    let mut result = UnionMembers::from(types);
+    if valid && let Some(display) = display {
+        result.set_display(UnionDisplay::new(display.name, covered.into_boxed_slice()));
     }
-    Some(UnionDisplay::new(alias_union.name.clone(), extras))
+    result
 }
 
 /// After literal/enum squashing, a union with more than this many members is widened to
@@ -166,43 +206,49 @@ static MAX_UNION_MEMBERS: usize = 4096;
 
 fn unions_internal(
     xs: Vec<Type>,
+    display: Option<UnionDisplay>,
     stdlib: Option<&Stdlib>,
     enum_members: Option<&dyn Fn(&Class) -> Option<usize>>,
     heap: &TypeHeap,
 ) -> Type {
-    let alias_union = large_alias_union_info(&xs);
-    try_collapse(xs, heap).unwrap_or_else(|xs| {
-        let mut res = flatten_and_dedup(xs, heap);
-        if let Some(stdlib) = stdlib {
-            collapse_literals(&mut res, stdlib, enum_members.unwrap_or(&|_| None), heap);
-            promote_anonymous_typed_dicts(&mut res, stdlib, heap);
-        }
-        collapse_tuple_unions_with_empty(&mut res, heap);
-        collapse_builtins_type(&mut res, heap);
-        collapse_wide_tuple_unions(&mut res, heap);
-        collapse_quantifieds(&mut res, stdlib, heap);
-        // Second pass: squashing can still leave a pathologically large union (e.g. thousands
-        // of distinct class types). Widen anything still over the cap to `Any`.
-        if res.len() > MAX_UNION_MEMBERS {
-            return heap.mk_any_implicit();
-        }
-        // `res` is collapsible again if `flatten_and_dedup` drops `xs` to 0 or 1 elements
-        try_collapse(res, heap).unwrap_or_else(|members| {
-            let display = alias_union
-                .as_ref()
-                .and_then(|alias_union| large_alias_union_display(&members, alias_union));
-            if let Some(display) = display {
-                heap.mk_union_with_display(members, display)
-            } else {
-                heap.mk_union(members)
-            }
-        })
-    })
+    if display.is_none() && xs.len() <= 1 {
+        return try_collapse(xs, heap).expect("at most one input is collapsible");
+    }
+    // A full name denotes the entire specialized alias, not a subset to reconcile.
+    let full_name = display
+        .as_ref()
+        .filter(|display| display.is_full())
+        .map(|display| display.name.clone());
+    let mut res = flatten_with_display(xs, display, heap);
+    if let Some(stdlib) = stdlib {
+        collapse_literals(&mut res, stdlib, enum_members.unwrap_or(&|_| None), heap);
+        promote_anonymous_typed_dicts(&mut res, stdlib, heap);
+    }
+    collapse_tuple_unions_with_empty(&mut res, heap);
+    collapse_builtins_type(&mut res, heap);
+    collapse_wide_tuple_unions(&mut res, heap);
+    collapse_quantifieds(&mut res, stdlib, heap);
+    if res.len() > MAX_UNION_MEMBERS {
+        return heap.mk_any_implicit();
+    }
+    if res.len() <= 1 {
+        return try_collapse(res.into_vec(), heap).expect("at most one member is collapsible");
+    }
+    if let Some(name) = full_name {
+        res.set_display(UnionDisplay::new(name, Box::new([])));
+    }
+    heap.mk_union_from_members(res)
+}
+
+/// Normalize transformed members, reconciling alias coverage with the final union.
+pub fn normalize_union(members: UnionMembers, heap: &TypeHeap) -> Type {
+    let (types, display) = members.into_parts();
+    unions_internal(types, display, None, None, heap)
 }
 
 /// Union a set of types together, simplifying as much as you can.
 pub fn unions(xs: Vec<Type>, heap: &TypeHeap) -> Type {
-    unions_internal(xs, None, None, heap)
+    unions_internal(xs, None, None, None, heap)
 }
 
 /// Like `unions`, but also simplify away things regarding literals if you can,
@@ -213,7 +259,7 @@ pub fn unions_with_literals(
     enum_members: &dyn Fn(&Class) -> Option<usize>,
     heap: &TypeHeap,
 ) -> Type {
-    unions_internal(xs, Some(stdlib), Some(enum_members), heap)
+    unions_internal(xs, None, Some(stdlib), Some(enum_members), heap)
 }
 
 pub fn intersect(ts: Vec<Type>, fallback: Type, heap: &TypeHeap) -> Type {
@@ -268,7 +314,7 @@ static MAX_ENUM_UNION_MEMBERS: usize = 4096;
 /// 4. LiteralString | Literal["x"] => LiteralString
 /// 5. Never | Never => Never (if the Never are different variants)
 fn collapse_literals(
-    types: &mut Vec<Type>,
+    types: &mut UnionMembers,
     stdlib: &Stdlib,
     enum_members: &dyn Fn(&Class) -> Option<usize>,
     heap: &TypeHeap,
@@ -421,7 +467,13 @@ fn collapse_literals(
 }
 
 /// Promote anonymous typed dicts to `dict[str, value_type]`
-fn promote_anonymous_typed_dicts(types: &mut [Type], stdlib: &Stdlib, heap: &TypeHeap) {
+fn promote_anonymous_typed_dicts(types: &mut UnionMembers, stdlib: &Stdlib, heap: &TypeHeap) {
+    if !types
+        .iter()
+        .any(|ty| matches!(ty, Type::TypedDict(TypedDict::Anonymous(_))))
+    {
+        return;
+    }
     for ty in types.iter_mut() {
         if let Type::TypedDict(TypedDict::Anonymous(inner)) = ty {
             let value_type = inner.compute_value_type(heap);
@@ -430,7 +482,7 @@ fn promote_anonymous_typed_dicts(types: &mut [Type], stdlib: &Stdlib, heap: &Typ
     }
 }
 
-fn collapse_tuple_unions_with_empty(types: &mut Vec<Type>, heap: &TypeHeap) {
+fn collapse_tuple_unions_with_empty(types: &mut UnionMembers, heap: &TypeHeap) {
     let Some(empty_idx) = types.iter().position(|t| match t {
         Type::Tuple(Tuple::Concrete(elts)) => elts.is_empty(),
         _ => false,
@@ -490,7 +542,16 @@ fn flatten_unpacked_concrete_tuples(elts: Vec<Type>) -> Vec<Type> {
 }
 
 /// `type[int] | type[str]` => `type[int | str]`
-fn collapse_builtins_type(types: &mut Vec<Type>, heap: &TypeHeap) {
+fn collapse_builtins_type(types: &mut UnionMembers, heap: &TypeHeap) {
+    if types
+        .iter()
+        .filter(|ty| matches!(ty, Type::Type(_)))
+        .take(2)
+        .count()
+        < 2
+    {
+        return;
+    }
     let mut idx = 0;
     let mut first_elt = None;
     let mut additional_elts = Vec::new();
@@ -524,7 +585,7 @@ fn collapse_builtins_type(types: &mut Vec<Type>, heap: &TypeHeap) {
 /// A restricted quantified `Q` whose restriction consists of the types `c_1, ..., c_n` is fully
 /// covered by the union `(Q & c_1) | ... | (Q & c_n)`: every value of `Q` satisfies one of its
 /// restrictions, so the union collapses to just `Q`.
-fn collapse_quantifieds(types: &mut Vec<Type>, stdlib: Option<&Stdlib>, heap: &TypeHeap) {
+fn collapse_quantifieds(types: &mut UnionMembers, stdlib: Option<&Stdlib>, heap: &TypeHeap) {
     // For each quantified appearing in a `Q & t` member, gather the `t`s.
     let mut quantified_intersects: SmallMap<&Quantified, Vec<(usize, &Type)>> = SmallMap::new();
     for (idx, ty) in types.iter().enumerate() {
@@ -653,7 +714,7 @@ const TUPLE_UNION_WIDENING_THRESHOLD: usize = 256;
 /// Collapses unions containing more than `TUPLE_UNION_WIDENING_THRESHOLD` tuple variants
 /// into a single tuple type, preventing combinatorial explosion of concrete tuple types at
 /// control-flow joins (keeping type complexity linear O(N) rather than exponential O(2^N)).
-fn collapse_wide_tuple_unions(res: &mut Vec<Type>, heap: &TypeHeap) {
+fn collapse_wide_tuple_unions(res: &mut UnionMembers, heap: &TypeHeap) {
     let tuples: Vec<&Tuple> = res
         .iter()
         .filter_map(|t| match t {
@@ -772,7 +833,60 @@ mod tests {
                 let mut visits = 0;
                 value.universe(&mut |_| visits += 1);
                 assert_eq!(visits, 5 * depth + 1, "named={named}, depth={depth}");
+                let mut mutable_visits = 0;
+                value.transform_mut(&mut |_| mutable_visits += 1);
+                assert_eq!(mutable_visits, visits, "named={named}, depth={depth}");
+                if named {
+                    let Type::Union(union) = &value else {
+                        panic!("the named union must remain a union")
+                    };
+                    assert!(union.display().is_some());
+                }
             }
+        }
+    }
+
+    #[test]
+    fn test_union_alias_preserves_previous_extras() {
+        let heap = TypeHeap::new();
+        let alias = heap.mk_union_with_name(
+            (0..3).map(|i| LitInt::new(i).to_implicit_type()).collect(),
+            (ModuleName::unknown(), Name::new_static("Alias")),
+        );
+        let first = unions(vec![alias, LitInt::new(3).to_implicit_type()], &heap);
+        let second = unions(vec![first, LitInt::new(4).to_implicit_type()], &heap);
+        assert_eq!(
+            second,
+            heap.mk_union((0..5).map(|i| LitInt::new(i).to_implicit_type()).collect()),
+        );
+        assert_eq!(
+            Type::type_of(second).to_string(),
+            "type[Alias | Literal[3] | Literal[4]]",
+        );
+    }
+
+    #[test]
+    fn test_union_alias_singleton_and_multiple_sources() {
+        let heap = TypeHeap::new();
+        for width in [2, 3, 1024] {
+            let alias = heap.mk_union_with_name(
+                (0..width)
+                    .map(|i| LitInt::new(i).to_implicit_type())
+                    .collect(),
+                (ModuleName::unknown(), Name::new_static("Alias")),
+            );
+            assert_eq!(
+                Type::type_of(unions(vec![alias.clone()], &heap)).to_string(),
+                "type[Alias]",
+            );
+            let merged = unions(vec![alias.clone(), Type::None], &heap);
+            assert_eq!(Type::type_of(merged).to_string(), "type[Alias | None]");
+            let multiple = unions(vec![alias.clone(), alias.clone()], &heap);
+            assert_eq!(multiple, alias);
+            let Type::Union(multiple) = multiple else {
+                panic!("multiple sources still contain a nontrivial union")
+            };
+            assert!(multiple.display().is_none());
         }
     }
 
@@ -943,8 +1057,6 @@ mod tests {
     fn test_collapse_wide_tuple_unions_corner_cases() {
         let heap = TypeHeap::new();
 
-        use pyrefly_python::module_name::ModuleName;
-        use ruff_python_ast::name::Name;
         use ruff_text_size::TextRange;
         use ruff_text_size::TextSize;
 

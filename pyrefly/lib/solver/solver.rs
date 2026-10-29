@@ -29,6 +29,7 @@ use pyrefly_types::quantified::Quantified;
 use pyrefly_types::quantified::QuantifiedKind;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::simplify::intersect;
+use pyrefly_types::simplify::normalize_union;
 use pyrefly_types::special_form::SpecialForm;
 use pyrefly_types::tuple::Tuple;
 use pyrefly_types::type_var::Restriction;
@@ -1263,15 +1264,7 @@ impl Solver {
     fn simplify_mut(&self, t: &mut Type) {
         t.transform_mut(&mut |x| {
             if let Type::Union(u) = x {
-                let original_display = u.take_display();
-                let mut merged = unions(mem::take(&mut u.members).into_vec(), &self.heap);
-                // Preserve pre-existing display metadata, but keep any newly inferred metadata.
-                if let Type::Union(merged_u) = &mut merged
-                    && let Some(original_display) = original_display
-                {
-                    merged_u.set_display(original_display);
-                }
-                *x = merged;
+                *x = normalize_union(mem::take(&mut u.members), &self.heap);
             }
             if let Type::Intersect(y) = x {
                 *x = intersect(mem::take(&mut y.0), y.1.clone(), &self.heap);

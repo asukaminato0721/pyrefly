@@ -58,6 +58,7 @@ use crate::types::Type;
 use crate::types::Union;
 use crate::types::UnionDisplay;
 use crate::types::Var;
+use crate::union_members::UnionMembers;
 
 /// Global factory for producing unique heap identifiers.
 static HEAP_UNIQUE_FACTORY: LazyLock<UniqueFactory> = LazyLock::new(UniqueFactory::new);
@@ -148,6 +149,11 @@ impl TypeHeap {
     /// Create a `Type::Union` from members.
     pub fn mk_union(&self, members: Vec<Type>) -> Type {
         Type::Union(Box::new(Union::new(members)))
+    }
+
+    /// Create a union from members whose display coverage is already valid.
+    pub(crate) fn mk_union_from_members(&self, members: UnionMembers) -> Type {
+        Type::Union(Box::new(Union { members }))
     }
 
     /// Create a `Type::Union` with a display name.

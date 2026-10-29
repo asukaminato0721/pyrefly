@@ -64,6 +64,7 @@ use crate::sentinel::Sentinel;
 use crate::series::SeriesSchema;
 use crate::shaped_array::IntTuple;
 use crate::shaped_array::ShapedArrayType;
+use crate::simplify::normalize_union;
 use crate::simplify::unions;
 use crate::special_form::SpecialForm;
 use crate::stdlib::Stdlib;
@@ -341,11 +342,7 @@ impl TArgs {
                 let mut ty = substitution.substitute_into(ty.clone());
                 ty.transform_mut(&mut |x| {
                     if let Type::Union(u) = x {
-                        let mut merged = unions(mem::take(&mut u.members).into_vec(), &heap);
-                        if let Type::Union(merged_u) = &mut merged {
-                            merged_u.members.display.0 = u.members.display.0.take();
-                        }
-                        *x = merged;
+                        *x = normalize_union(mem::take(&mut u.members), &heap);
                     }
                 });
                 ty
@@ -810,16 +807,38 @@ pub enum SuperObj {
     Class(ClassType),
 }
 
-/// Presentation metadata for a union that contains a named alias plus additional members.
+/// Names an alias-covered subset of the authoritative union members.
 #[derive(Debug, Clone)]
 pub struct UnionDisplay {
     pub name: (ModuleName, Name),
-    pub extras: Box<[Type]>,
+    // An empty mask names the entire union. Otherwise each bit describes one member.
+    covered: Box<[bool]>,
 }
 
 impl UnionDisplay {
-    pub fn new(name: (ModuleName, Name), extras: Box<[Type]>) -> Self {
-        Self { name, extras }
+    pub fn new(name: (ModuleName, Name), covered: Box<[bool]>) -> Self {
+        assert!(
+            covered.is_empty() || covered.iter().any(|covered| *covered),
+            "a partial alias must cover at least one member",
+        );
+        let covered = if covered.iter().all(|covered| *covered) {
+            Box::new([])
+        } else {
+            covered
+        };
+        Self { name, covered }
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.covered.is_empty()
+    }
+
+    pub fn covers(&self, index: usize) -> bool {
+        self.is_full() || self.covered[index]
+    }
+
+    pub(crate) fn matches_len(&self, len: usize) -> bool {
+        self.is_full() || self.covered.len() == len
     }
 }
 
@@ -844,19 +863,20 @@ impl Union {
     }
 
     pub fn display(&self) -> Option<&UnionDisplay> {
-        self.members.display.as_ref()
+        self.members.display()
     }
 
     pub fn set_display_name(&mut self, name: (ModuleName, Name)) {
-        self.members.display.0 = Some(UnionDisplay::new(name, Box::new([])));
+        self.members
+            .set_display(UnionDisplay::new(name, Box::new([])));
     }
 
     pub fn take_display(&mut self) -> Option<UnionDisplay> {
-        self.members.display.0.take()
+        self.members.take_display()
     }
 
     pub fn set_display(&mut self, display: UnionDisplay) {
-        self.members.display.0 = Some(display);
+        self.members.set_display(display);
     }
 }
 
@@ -2823,7 +2843,7 @@ mod tests {
             members.clone(),
             UnionDisplay::new(
                 (ModuleName::builtins(), Name::new_static("TA")),
-                vec![Type::LiteralString(LitStyle::Implicit)].into_boxed_slice(),
+                vec![true, false].into_boxed_slice(),
             ),
         );
         let anonymous = Union::new(members);

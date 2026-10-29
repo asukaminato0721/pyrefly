@@ -1002,12 +1002,11 @@ x4: TA | C = object()  # E: `object` is not assignable to `C | int | str`
 x5: TA | C = val1
 x6: TA | C = val2
 x7: TA | C = C()
-c2: Callable[[int], int] = f2  # E: `(x: C | int | str) -> C | int | str` is not assignable to `(int) -> int`
+c2: Callable[[int], int] = f2  # E: `(x: TA | C) -> TA | C` is not assignable to `(int) -> int`
     "#,
 );
 
 testcase!(
-    bug = "Union alias names are lost when additional members are merged",
     test_alias_display_repeated_composition,
     r#"
 from typing import assert_type, reveal_type
@@ -1017,8 +1016,8 @@ type Alias = int | str | bytes
 def grow(x: Alias | float, y: complex, flag: bool) -> None:
     value = [x if flag else y]
     assert_type(value, list[int | str | bytes | float | complex])
-    reveal_type(value)  # E: revealed type: list[bytes | complex | float | int | str]
-    result: list[None] = value  # E: `list[bytes | complex | float | int | str]` is not assignable to `list[None]`
+    reveal_type(value)  # E: revealed type: list[Alias | complex | float]
+    result: list[None] = value  # E: `list[Alias | complex | float]` is not assignable to `list[None]`
     "#,
 );
 
@@ -1035,7 +1034,7 @@ def pair[T](x: T) -> list[Alias | T]:
 def probe(x: Alias) -> None:
     value = pair(x)
     assert_type(value, list[Alias])
-    reveal_type(value)  # E: revealed type: list[bytes | int | str]
+    reveal_type(value)  # E: revealed type: list[Alias]
     "#,
 );
 

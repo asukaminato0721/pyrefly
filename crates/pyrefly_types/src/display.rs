@@ -1370,9 +1370,16 @@ impl<'a> TypeDisplayContext<'a> {
                 } else {
                     output.write_str(name.as_str())?;
                 }
-                if !display.extras.is_empty() {
+                if !display.is_full() {
                     output.write_str(" | ")?;
-                    self.fmt_type_sequence(display.extras.iter(), " | ", true, output)?;
+                    self.fmt_type_sequence(
+                        u.members.iter().enumerate().filter_map(|(index, member)| {
+                            (!display.covers(index)).then_some(member)
+                        }),
+                        " | ",
+                        true,
+                        output,
+                    )?;
                 }
                 Ok(())
             }
@@ -2870,7 +2877,7 @@ pub mod tests {
                 ],
                 UnionDisplay::new(
                     (ModuleName::from_str(module), Name::new_static("Alias")),
-                    vec![extra].into_boxed_slice(),
+                    vec![true, true, false].into_boxed_slice(),
                 ),
             ))))
         };
