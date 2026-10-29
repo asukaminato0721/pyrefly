@@ -1038,6 +1038,20 @@ def probe(x: Alias) -> None:
     "#,
 );
 
+testcase!(
+    test_alias_display_inferred_container,
+    r#"
+from typing import assert_type, reveal_type
+
+type Alias = int | str | bytes
+
+def infer(value: Alias | float) -> None:
+    result = [value]
+    assert_type(result, list[Alias | float])
+    reveal_type(result)  # E: revealed type: list[Alias | float]
+    "#,
+);
+
 fn env_with_shared_display_alias() -> TestEnv {
     let mut env = TestEnv::new();
     env.add("a", "type TA = int | str | bytes");

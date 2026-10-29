@@ -20,7 +20,7 @@ use crate::types::Type;
 use crate::types::UnionDisplay;
 
 /// Shares one authoritative member list and keeps its display coverage valid.
-/// Raw mutable access invalidates coverage because it can reorder or remove members.
+/// Raw mutable access invalidates partial coverage because it can reorder or remove members.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
 pub struct UnionMembers {
     types: Arc<Vec<Type>>,
@@ -79,7 +79,10 @@ impl Deref for UnionMembers {
 
 impl DerefMut for UnionMembers {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.display.0 = None;
+        // A full name labels the entire transformed alias, independent of member positions.
+        if self.display().is_some_and(|display| !display.is_full()) {
+            self.display.0 = None;
+        }
         Arc::make_mut(&mut self.types)
     }
 }
@@ -175,6 +178,12 @@ mod tests {
         changed.reverse();
         assert!(changed.display().is_none());
         assert!(members.display().is_some());
+        members.set_display(UnionDisplay::new(
+            (ModuleName::unknown(), Name::new_static("Alias")),
+            Box::new([]),
+        ));
+        members.reverse();
+        assert!(members.display().is_some_and(UnionDisplay::is_full));
     }
 
     #[test]

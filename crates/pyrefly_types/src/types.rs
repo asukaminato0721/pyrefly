@@ -2210,8 +2210,14 @@ impl Type {
     pub fn promote_shallow_implicit_literals(mut self, stdlib: &Stdlib) -> Type {
         match &mut self {
             Type::Union(union) => {
-                for member in &mut union.members {
-                    Self::promote_one_implicit_literal(member, stdlib);
+                if union.members.iter().any(|member| match member {
+                    Type::Literal(lit) => lit.style == LitStyle::Implicit,
+                    Type::LiteralString(style) => *style == LitStyle::Implicit,
+                    _ => false,
+                }) {
+                    for member in &mut union.members {
+                        Self::promote_one_implicit_literal(member, stdlib);
+                    }
                 }
             }
             _ => Self::promote_one_implicit_literal(&mut self, stdlib),
