@@ -9,6 +9,7 @@ use pyrefly_python::module_name::ModuleName;
 use pyrefly_python::module_name::is_python_identifier;
 use pyrefly_types::callable::Callable;
 use pyrefly_types::callable::ParamList;
+use pyrefly_types::callable::Params;
 use pyrefly_types::class::Class;
 use pyrefly_types::function::FuncMetadata;
 use pyrefly_types::function::Function;
@@ -361,6 +362,57 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             MANYRELATEDMANAGER,
             vec![target_model_type, model_instance_type],
         )
+    }
+
+    /// Use the related model's primary key type in many-to-many mutation methods.
+    pub(crate) fn specialize_django_many_related_manager_method(&self, mut ty: Type) -> Type {
+        let Some(symbol) = ty
+            .toplevel_func_metadata()
+            .and_then(|metadata| metadata.kind.to_func_symbol())
+        else {
+            return ty;
+        };
+        let Some(cls) = &symbol.cls else {
+            return ty;
+        };
+        if !cls.has_toplevel_qname(
+            ModuleName::django_models_fields_related_descriptors().as_str(),
+            MANYRELATEDMANAGER.as_str(),
+        ) || !matches!(
+            symbol.name.as_str(),
+            "add" | "aadd" | "remove" | "aremove" | "set" | "aset"
+        ) {
+            return ty;
+        }
+        let is_set = matches!(symbol.name.as_str(), "set" | "aset");
+        let Some(Type::ClassType(manager)) = ty.callable_first_param(self.heap) else {
+            return ty;
+        };
+        let Some(manager) = self.as_superclass(&manager, cls) else {
+            return ty;
+        };
+        let Some(Type::ClassType(model)) = manager.targs().as_slice().first() else {
+            return ty;
+        };
+        let Some((pk_type, _)) = self.get_pk_field_type(model.class_object()) else {
+            return ty;
+        };
+        let objects = self.union(self.heap.mk_class_type(model.clone()), pk_type);
+        let objects = if is_set {
+            self.heap.mk_class_type(self.stdlib.iterable(objects))
+        } else {
+            objects
+        };
+        ty.transform_toplevel_callable_signatures(|signature, _| {
+            if let Params::List(params) = &mut signature.params {
+                for param in params.items_mut() {
+                    if param.name().is_some_and(|name| name == "objs") {
+                        *param.as_type_mut() = objects.clone();
+                    }
+                }
+            }
+        });
+        ty
     }
 
     fn get_related_manager_type(&self, target_model_type: Type) -> Option<Type> {

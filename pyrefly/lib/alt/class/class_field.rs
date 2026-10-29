@@ -3750,6 +3750,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             } => {
                 // bind_instance matches on the type, so resolve it if we can
                 ty = self.normalize_attr_ty(ty);
+                ty = self.specialize_django_many_related_manager_method(ty);
                 // If the field is a dunder or ClassVar[Callable] & the assigned value is a callable, we replace it with a named function
                 // so that it gets treated as a bound method.
                 //
