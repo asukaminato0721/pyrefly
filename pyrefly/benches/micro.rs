@@ -8,16 +8,17 @@
 //! Microbenchmarks for Pyrefly type checking, run with the `criterion` benchmark
 //! harness.
 //!
-//! Each case builds a synthetic Python snippet that stresses one part of the
+//! Most cases build a synthetic Python snippet that stresses one part of the
 //! checker (enum member resolution, enum value access, exhaustiveness, protocol
 //! structural matching, narrowing, gradual-typing calls, type-variable joins,
 //! inferred typed dicts, overload resolution, nested generic construction, and the
 //! Polars/pandas schema-tracking dispatch chain run against non-DataFrame receivers)
-//! and times a single in-memory check of it. `SHARED_STATE`
+//! and time a single in-memory check of it. `SHARED_STATE`
 //! pre-initializes the stdlib once, so only the snippet's check is measured, and
 //! each case asserts its expected error count up front so a scenario that stops
 //! exercising the intended path fails loudly instead of silently measuring
 //! nothing.
+//! The union display and suggestion probes call Rust helpers directly.
 //!
 //! Build mode matters: must be optimized. Buck requires `@fbcode//mode/opt`
 //! (or `opt-clang-thinlto` for final numbers); Cargo `cargo bench` builds the
@@ -51,6 +52,10 @@ use pyrefly_python::module_path::ModulePath;
 use pyrefly_python::sys_info::PythonPlatform;
 use pyrefly_python::sys_info::PythonVersion;
 use pyrefly_python::sys_info::SysInfo;
+use pyrefly_types::heap::TypeHeap;
+use pyrefly_types::lit_int::LitInt;
+use pyrefly_types::simplify::unions;
+use pyrefly_types::types::Type;
 use pyrefly_util::arc_id::ArcId;
 use pyrefly_util::suggest::Candidate;
 use pyrefly_util::suggest::best_suggestion;
@@ -955,6 +960,60 @@ fn suggestion_nested(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compare alias construction with anonymous unions at the same semantic widths.
+fn union_display(c: &mut Criterion) {
+    let heap = TypeHeap::new();
+    let mut group = c.benchmark_group("union_display");
+    for named in [false, true] {
+        let label = if named { "named" } else { "anonymous" };
+        for width in [3, 1024] {
+            let members = (0..width)
+                .map(|i| LitInt::new(i).to_implicit_type())
+                .collect();
+            let alias = if named {
+                heap.mk_union_with_name(members, (ModuleName::unknown(), Name::new_static("Alias")))
+            } else {
+                heap.mk_union(members)
+            };
+            assert_eq!(unions(vec![alias.clone()], &heap), alias);
+            assert_eq!(unions(vec![alias.clone(), alias.clone()], &heap), alias);
+            assert_eq!(
+                unions(vec![alias.clone(), Type::None], &heap).union_width(),
+                alias.union_width() + 1,
+            );
+            group.bench_function(format!("merge/{label}/{width}"), |b| {
+                b.iter(|| black_box(unions(vec![alias.clone(), Type::None], &heap)))
+            });
+            group.bench_function(format!("singleton/{label}/{width}"), |b| {
+                b.iter(|| black_box(unions(vec![alias.clone()], &heap)))
+            });
+            group.bench_function(format!("multiple/{label}/{width}"), |b| {
+                b.iter(|| black_box(unions(vec![alias.clone(), alias.clone()], &heap)))
+            });
+            if width == 3 {
+                for depth in [10, 20] {
+                    group.bench_function(format!("nested/{label}/{depth}"), |b| {
+                        b.iter(|| {
+                            let mut value = Type::None;
+                            for _ in 0..depth {
+                                value = unions(
+                                    vec![alias.clone(), Type::unbounded_tuple(value)],
+                                    &heap,
+                                );
+                            }
+                            let mut visits = 0;
+                            value.transform_mut(&mut |_| visits += 1);
+                            assert_eq!(visits, 5 * depth + 1);
+                            black_box(value)
+                        })
+                    });
+                }
+            }
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     smoke,
@@ -981,5 +1040,6 @@ criterion_group!(
     suggestion_real,
     suggestion_nested,
     suggestion_discarded_errors,
+    union_display,
 );
 criterion_main!(benches);
