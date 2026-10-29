@@ -52,7 +52,6 @@ use crate::function::FunctionKind;
 use crate::function::PropertyMetadata;
 use crate::function::PropertyRole;
 use crate::heap::TypeHeap;
-use crate::identity::IdentityIgnored;
 use crate::keywords::KwCall;
 use crate::literal::Lit;
 use crate::literal::LitStyle;
@@ -344,7 +343,7 @@ impl TArgs {
                     if let Type::Union(u) = x {
                         let mut merged = unions(mem::take(&mut u.members).into_vec(), &heap);
                         if let Type::Union(merged_u) = &mut merged {
-                            merged_u.display.0 = u.display.0.take();
+                            merged_u.members.display.0 = u.members.display.0.take();
                         }
                         *x = merged;
                     }
@@ -824,67 +823,40 @@ impl UnionDisplay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq, Visit, VisitMut
+)]
 pub struct Union {
     pub members: UnionMembers,
-    display: IdentityIgnored<Option<UnionDisplay>>,
 }
 
 impl Union {
     pub fn new(members: Vec<Type>) -> Self {
         Self {
             members: members.into(),
-            display: IdentityIgnored(None),
         }
     }
 
     pub fn with_display(members: Vec<Type>, display: UnionDisplay) -> Self {
-        Self {
-            members: members.into(),
-            display: IdentityIgnored(Some(display)),
-        }
+        let mut union = Self::new(members);
+        union.set_display(display);
+        union
     }
 
     pub fn display(&self) -> Option<&UnionDisplay> {
-        self.display.as_ref()
+        self.members.display.as_ref()
     }
 
     pub fn set_display_name(&mut self, name: (ModuleName, Name)) {
-        self.display.0 = Some(UnionDisplay::new(name, Box::new([])));
+        self.members.display.0 = Some(UnionDisplay::new(name, Box::new([])));
     }
 
     pub fn take_display(&mut self) -> Option<UnionDisplay> {
-        self.display.0.take()
+        self.members.display.0.take()
     }
 
     pub fn set_display(&mut self, display: UnionDisplay) {
-        self.display.0 = Some(display);
-    }
-}
-
-impl Visit<Type> for Union {
-    fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
-        for member in &self.members {
-            member.visit(f);
-        }
-        if let Some(display) = self.display() {
-            for extra in &display.extras {
-                extra.visit(f);
-            }
-        }
-    }
-}
-
-impl VisitMut<Type> for Union {
-    fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
-        for member in &mut self.members {
-            member.visit_mut(f);
-        }
-        if let Some(display) = &mut self.display.0 {
-            for extra in &mut display.extras {
-                extra.visit_mut(f);
-            }
-        }
+        self.members.display.0 = Some(display);
     }
 }
 

@@ -15,22 +15,36 @@ use pyrefly_derive::TypeEq;
 use pyrefly_util::visit::Visit;
 use pyrefly_util::visit::VisitMut;
 
+use crate::identity::IdentityIgnored;
 use crate::types::Type;
+use crate::types::UnionDisplay;
 
 /// Shares union members until mutation requires an owned copy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
-pub struct UnionMembers(Arc<Vec<Type>>);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
+pub struct UnionMembers {
+    types: Arc<Vec<Type>>,
+    pub(crate) display: IdentityIgnored<Option<UnionDisplay>>,
+}
 
 impl UnionMembers {
     /// Returns owned members, without copying when this is the only owner.
     pub fn into_vec(self) -> Vec<Type> {
-        Arc::unwrap_or_clone(self.0)
+        Arc::unwrap_or_clone(self.types)
+    }
+}
+
+impl Default for UnionMembers {
+    fn default() -> Self {
+        Vec::new().into()
     }
 }
 
 impl From<Vec<Type>> for UnionMembers {
     fn from(members: Vec<Type>) -> Self {
-        Self(Arc::new(members))
+        Self {
+            types: Arc::new(members),
+            display: IdentityIgnored(None),
+        }
     }
 }
 
@@ -38,13 +52,13 @@ impl Deref for UnionMembers {
     type Target = Vec<Type>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.types
     }
 }
 
 impl DerefMut for UnionMembers {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        Arc::make_mut(&mut self.0)
+        Arc::make_mut(&mut self.types)
     }
 }
 
@@ -77,13 +91,19 @@ impl<'a> IntoIterator for &'a mut UnionMembers {
 
 impl Visit<Type> for UnionMembers {
     fn recurse<'a>(&'a self, f: &mut dyn FnMut(&'a Type)) {
-        self.0.visit(f);
+        self.types.visit(f);
+        if let Some(display) = self.display.as_ref() {
+            display.extras.visit(f);
+        }
     }
 }
 
 impl VisitMut<Type> for UnionMembers {
     fn recurse_mut(&mut self, f: &mut dyn FnMut(&mut Type)) {
-        Arc::make_mut(&mut self.0).visit_mut(f);
+        Arc::make_mut(&mut self.types).visit_mut(f);
+        if let Some(display) = &mut self.display.0 {
+            display.extras.visit_mut(f);
+        }
     }
 }
 
@@ -98,9 +118,9 @@ mod tests {
     fn union_members_copy_on_write() {
         let original = UnionMembers::from(vec![Type::None]);
         let mut changed = original.clone();
-        assert!(Arc::ptr_eq(&original.0, &changed.0));
+        assert!(Arc::ptr_eq(&original.types, &changed.types));
         changed.push(Type::Ellipsis);
-        assert!(!Arc::ptr_eq(&original.0, &changed.0));
+        assert!(!Arc::ptr_eq(&original.types, &changed.types));
         assert_eq!(original.as_slice(), &[Type::None]);
         assert_eq!(changed.into_vec(), vec![Type::None, Type::Ellipsis]);
     }
