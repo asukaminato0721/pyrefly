@@ -5,6 +5,9 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::io;
+use std::io::Write;
+
 use clap::Parser;
 use pyrefly_config::args::EnvironmentArgs;
 use pyrefly_util::thread_pool::ThreadCount;
@@ -15,6 +18,7 @@ use crate::commands::coverage::collect::collect_module_reports;
 use crate::commands::coverage::types::FullReport;
 use crate::commands::files::FilesArgs;
 use crate::commands::util::CommandExitStatus;
+use crate::config::config::ConfigScope;
 
 /// `(major, minor)` version for the report JSON schema.
 const REPORT_SCHEMA_VERSION: (u32, u32) = (0, 2);
@@ -59,8 +63,11 @@ impl ReportArgs {
             anyhow::bail!("--module and --public-only cannot be combined");
         }
 
-        let (files_to_check, config_finder, _) =
-            self.files.resolve(self.config_override.into(), wrapper)?;
+        let (files_to_check, config_finder, _) = self.files.resolve_scoped(
+            self.config_override.into(),
+            wrapper,
+            ConfigScope::Coverage,
+        )?;
         let (module_reports, _) = collect_module_reports(
             files_to_check,
             config_finder,
@@ -75,7 +82,13 @@ impl ReportArgs {
             summary: calculate_summary(&module_reports),
             module_reports,
         };
-        println!("{}", serde_json::to_string_pretty(&full_report)?);
+        let json = serde_json::to_string_pretty(&full_report)?;
+        if let Err(error) = writeln!(io::stdout().lock(), "{json}") {
+            // A pager can close the pipe before it reads the complete report.
+            if error.kind() != io::ErrorKind::BrokenPipe {
+                return Err(error.into());
+            }
+        }
 
         Ok(CommandExitStatus::Success)
     }

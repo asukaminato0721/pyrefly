@@ -6,7 +6,7 @@ machine architecture issues.
 Not all Python object types are supported; in general, only objects
 whose value is independent from a particular invocation of Python can be
 written and read by this module. The following types are supported:
-None, integers, floating point numbers, strings, bytes, bytearrays,
+None, integers, floating-point numbers, strings, bytes, bytearrays,
 tuples, lists, sets, dictionaries, and code objects, where it
 should be understood that tuples, lists and dictionaries are only
 supported as long as the values contained therein are themselves
@@ -17,7 +17,7 @@ Variables:
 
 version -- indicates the format that the module uses. Version 0 is the
     historical format, version 1 shares interned strings and version 2
-    uses a binary format for floating point numbers.
+    uses a binary format for floating-point numbers.
     Version 3 shares common object references (New in version 3.4).
 
 Functions:
@@ -28,7 +28,6 @@ dumps() -- marshal value as a bytes object
 loads() -- read value from a bytes-like object
 """
 
-import builtins
 import sys
 import types
 from _typeshed import ReadableBuffer, SupportsRead, SupportsWrite
@@ -37,13 +36,8 @@ from typing import Any, Final, TypeAlias
 version: Final[int]
 
 _Marshallable: TypeAlias = (
-    # handled in w_object() in marshal.c
-    None
-    | type[StopIteration]
-    | builtins.ellipsis
-    | bool
     # handled in w_complex_object() in marshal.c
-    | int
+    int
     | float
     | complex
     | bytes
@@ -55,6 +49,11 @@ _Marshallable: TypeAlias = (
     | frozenset[_Marshallable]
     | types.CodeType
     | ReadableBuffer
+    # handled in w_object() in marshal.c
+    | type[StopIteration]
+    | types.EllipsisType
+    | bool
+    | None
 )
 
 if sys.version_info >= (3, 15):
