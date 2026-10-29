@@ -1265,7 +1265,7 @@ fn strip_none_from_union(type_: &Type) -> Type {
                 match new_types.len() {
                     0 => panic!("Unexpected union type `{:#?}`", type_),
                     1 => new_types.into_iter().next().unwrap(),
-                    _ => Type::union(new_types),
+                    _ => Type::union(new_types.into_vec()),
                 }
             } else {
                 type_.clone()

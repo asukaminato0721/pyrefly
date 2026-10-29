@@ -1679,7 +1679,7 @@ impl<'a> Transaction<'a> {
         match ty {
             Type::ClassType(class_type) => solver.type_order().instance_as_dunder_call(&class_type),
             Type::SelfType(class_type) => solver.type_order().instance_as_dunder_call(&class_type),
-            Type::Union(u) => Self::callable_from_types(solver, u.members),
+            Type::Union(u) => Self::callable_from_types(solver, u.members.into_vec()),
             Type::TypeAlias(data) if matches!(*data, TypeAliasData::Value(_)) => {
                 // Repeated match because pattern guards cannot move out of bindings.
                 if let TypeAliasData::Value(alias) = *data {

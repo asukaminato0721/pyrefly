@@ -1264,7 +1264,7 @@ impl Solver {
         t.transform_mut(&mut |x| {
             if let Type::Union(u) = x {
                 let original_display = u.take_display();
-                let mut merged = unions(mem::take(&mut u.members), &self.heap);
+                let mut merged = unions(mem::take(&mut u.members).into_vec(), &self.heap);
                 // Preserve pre-existing display metadata, but keep any newly inferred metadata.
                 if let Type::Union(merged_u) = &mut merged
                     && let Some(original_display) = original_display

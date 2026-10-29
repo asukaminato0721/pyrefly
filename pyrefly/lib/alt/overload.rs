@@ -190,7 +190,7 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
     /// Expands a type according to https://typing.python.org/en/latest/spec/overload.html#argument-type-expansion.
     fn expand_type(&self, ty: Type) -> Vec<Type> {
         match ty {
-            Type::Union(f) => f.members,
+            Type::Union(f) => f.members.into_vec(),
             Type::ClassType(cls) if cls.is_builtin("bool") => {
                 vec![
                     Lit::Bool(true).to_implicit_type(),
@@ -214,7 +214,9 @@ impl<'a, Ans: LookupAnswer> ArgsExpander<'a, Ans> {
                 let Type::Union(u) = *f else {
                     unreachable!("guarded by matches! above")
                 };
-                u.members.into_map(|t| self.solver.heap.mk_type_of(t))
+                u.members
+                    .into_vec()
+                    .into_map(|t| self.solver.heap.mk_type_of(t))
             }
             Type::Tuple(Tuple::Concrete(elements)) => {
                 let mut count: usize = 1;

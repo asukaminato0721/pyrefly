@@ -955,7 +955,7 @@ impl GleanState<'_> {
                     };
 
                     let tys = match base_type.clone() {
-                        Type::Union(u) => u.members,
+                        Type::Union(u) => u.members.into_vec(),
                         Type::Intersect(i) => i.0,
                         ty => vec![ty],
                     };

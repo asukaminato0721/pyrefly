@@ -35,7 +35,7 @@ fn flatten_and_dedup(xs: Vec<Type>, heap: &TypeHeap) -> Vec<Type> {
     fn flatten(xs: Vec<Type>, res: &mut Vec<Type>) {
         for x in xs {
             match x {
-                Type::Union(u) => flatten(u.members, res),
+                Type::Union(u) => flatten(u.members.into_vec(), res),
                 Type::Never(_) => {}
                 _ => res.push(x),
             }
@@ -123,7 +123,7 @@ fn large_alias_union_info(xs: &[Type]) -> Option<LargeAliasUnion> {
                         .expect("guarded by display().is_some()")
                         .name
                         .clone(),
-                    members: u.members.clone(),
+                    members: u.members.to_vec(),
                 });
             }
             _ => {}

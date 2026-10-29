@@ -298,7 +298,7 @@ fn hint_to_string(
     let hint = hint.promote_implicit_literals(stdlib);
     let hint = hint.explicit_any().clean_var();
     let hint = match hint {
-        Type::Union(u) => unions_with_literals(u.members, stdlib, enum_members, heap),
+        Type::Union(u) => unions_with_literals(u.members.into_vec(), stdlib, enum_members, heap),
         _ => hint,
     };
     format_annotation(&hint, typing_imports, uses_incomplete)

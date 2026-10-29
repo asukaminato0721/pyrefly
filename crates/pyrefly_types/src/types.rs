@@ -75,6 +75,7 @@ use crate::type_var::Restriction;
 use crate::type_var::TypeVar;
 use crate::type_var_tuple::TypeVarTuple;
 use crate::typed_dict::TypedDict;
+use crate::union_members::UnionMembers;
 
 /// An introduced synthetic variable to range over as yet unknown types.
 #[derive(Debug, Copy, Clone, Dupe, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -341,7 +342,7 @@ impl TArgs {
                 let mut ty = substitution.substitute_into(ty.clone());
                 ty.transform_mut(&mut |x| {
                     if let Type::Union(u) = x {
-                        let mut merged = unions(mem::take(&mut u.members), &heap);
+                        let mut merged = unions(mem::take(&mut u.members).into_vec(), &heap);
                         if let Type::Union(merged_u) = &mut merged {
                             merged_u.display.0 = u.display.0.take();
                         }
@@ -825,21 +826,21 @@ impl UnionDisplay {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeEq)]
 pub struct Union {
-    pub members: Vec<Type>,
+    pub members: UnionMembers,
     display: IdentityIgnored<Option<UnionDisplay>>,
 }
 
 impl Union {
     pub fn new(members: Vec<Type>) -> Self {
         Self {
-            members,
+            members: members.into(),
             display: IdentityIgnored(None),
         }
     }
 
     pub fn with_display(members: Vec<Type>, display: UnionDisplay) -> Self {
         Self {
-            members,
+            members: members.into(),
             display: IdentityIgnored(Some(display)),
         }
     }
@@ -2375,7 +2376,7 @@ impl Type {
 
     pub fn into_unions(self) -> Vec<Type> {
         match self {
-            Type::Union(u) => u.members,
+            Type::Union(u) => u.members.into_vec(),
             _ => vec![self],
         }
     }
@@ -2385,10 +2386,10 @@ impl Type {
         // We would like the resulting type not nested, and well sorted.
         if let Type::Union(mut u) = x {
             match u.members.binary_search(&Type::None) {
-                Ok(_) => Type::union(u.members),
+                Ok(_) => Type::union(u.members.into_vec()),
                 Err(i) => {
                     u.members.insert(i, Type::None);
-                    Type::union(u.members)
+                    Type::union(u.members.into_vec())
                 }
             }
         } else {
@@ -2659,7 +2660,6 @@ mod tests {
     use crate::function::FuncMetadata;
     use crate::function::Function;
     use crate::function::FunctionKind;
-    use crate::identity::IdentityIgnored;
     use crate::lit_int::LitInt;
     use crate::literal::Lit;
     use crate::literal::LitStyle;
