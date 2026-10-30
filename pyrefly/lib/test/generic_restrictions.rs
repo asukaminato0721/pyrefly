@@ -1521,6 +1521,84 @@ assert_type(f(b"hi"), bytes)
 );
 
 testcase!(
+    test_anystr_startswith,
+    r#"
+from typing import AnyStr, assert_type
+
+def startswith(a: AnyStr, b: AnyStr) -> bool:
+    assert_type(a.startswith((b,)), bool)
+    assert_type(a.endswith(b), bool)
+    assert_type(a.removeprefix(b), AnyStr)
+    return a.startswith(b)
+
+def startswith_pep695[T: (str, bytes)](a: T, b: T) -> bool:
+    return a.startswith(b)
+
+assert_type(startswith("abc", "a"), bool)
+assert_type(startswith(b"abc", b"a"), bool)
+startswith("abc", b"a")  # E: `Literal[b'a']` is not assignable to parameter `b` with type `str`
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_arguments,
+    r#"
+from typing import Self, assert_type
+
+class A:
+    def match(self, values: list[A]) -> bool: ...
+    def same(self, value: Self) -> Self: ...
+
+class B:
+    def match(self, values: list[B]) -> bool: ...
+    def same(self, value: Self) -> Self: ...
+
+def f[T: (A, B)](a: T, b: T, values: list[T]) -> None:
+    assert_type(a.match(values), bool)
+    assert_type(a.match(values=values), bool)
+    assert_type(a.match([b]), bool)
+    assert_type(a.same(b), T)
+    assert_type(a.match(*[values]), bool)
+    assert_type(a.match(**{"values": values}), bool)
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_independent_arguments,
+    r#"
+def independent[T: (str, bytes), U: (str, bytes)](a: T, b: U) -> bool:
+    return a.startswith(b)  # E: is not assignable to parameter `prefix` # E: is not assignable to parameter `prefix`
+
+def union_bound[T: str | bytes](a: T, b: T) -> bool:
+    return a.startswith(b)  # E: is not assignable to parameter `prefix` # E: is not assignable to parameter `prefix`
+
+def concrete_prefix[T: (str, bytes)](a: T) -> None:
+    a.startswith("a")  # E: is not assignable to parameter `prefix`
+    a.startswith(b"a")  # E: is not assignable to parameter `prefix`
+    "#,
+);
+
+testcase!(
+    test_constrained_typevar_method_protocol_arguments,
+    r#"
+from typing import Protocol
+
+class P(Protocol):
+    x: int
+
+class A:
+    x: int
+    def match(self, value: P) -> bool: ...
+
+class B:
+    def match(self, value: P) -> bool: ...
+
+def f[T: (A, B)](a: T, b: T) -> bool:
+    return a.match(b)  # E: is not assignable to parameter `value`
+    "#,
+);
+
+testcase!(
     test_anystr_none_passthrough_classmethod,
     r#"
 from typing import AnyStr
