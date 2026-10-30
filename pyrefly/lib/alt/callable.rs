@@ -1126,7 +1126,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             .enumerate()
         {
             let argument = ArgumentKey::Positional(argument_index);
-            let call_context = &call_context.clone().with_argument(argument);
+            let mut argument_context = call_context.clone().with_argument(argument);
+            if is_self_arg {
+                // Preserve the TypeVar when inferring a generic Self parameter.
+                argument_context = argument_context.with_type_var_constraint(None);
+            }
+            let call_context = &argument_context;
             let mut arg_pre = arg.pre_eval(self, arg_errors);
             while arg_pre.step() {
                 let param = if let Some(p) = rparams.last() {
@@ -2497,7 +2502,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
             call_boundary.defer_quantified(qs);
         }
-        let call_context = call_context.with_shape_extension_vars(shape_extension_vars);
+        let call_context = call_context
+            .with_shape_extension_vars(shape_extension_vars)
+            .with_type_var_constraint(self_obj.as_ref());
         self.constrain_forwarded_overload_return(ForwardedOverloadCall {
             params: &callable.params,
             has_self: self_obj.is_some(),

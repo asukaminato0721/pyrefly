@@ -3194,6 +3194,7 @@ impl CallBoundary {
             boundary: Some(self),
             shape_extension_vars: None,
             shape_extension_binding_source: None,
+            type_var_constraint: None,
         }
     }
 
@@ -3273,6 +3274,8 @@ pub struct CallContext<'subset> {
     boundary: Option<&'subset CallBoundary>,
     shape_extension_vars: Option<Arc<SmallSet<Var>>>,
     shape_extension_binding_source: Option<Var>,
+    /// The constraint selected by the receiver of a bound method.
+    type_var_constraint: Option<(&'subset Quantified, &'subset Type)>,
 }
 
 impl<'subset> CallContext<'subset> {
@@ -3282,6 +3285,21 @@ impl<'subset> CallContext<'subset> {
 
     pub fn with_argument(mut self, argument: ArgumentKey) -> Self {
         self.argument = Some(argument);
+        self
+    }
+
+    pub(crate) fn with_type_var_constraint(mut self, receiver: Option<&'subset Type>) -> Self {
+        self.type_var_constraint =
+            receiver
+                .and_then(Type::as_quantified)
+                .and_then(|(q, narrowed)| match (q.restriction(), narrowed) {
+                    (Restriction::Constraints(constraints), Some(constraint))
+                        if constraints.contains(constraint) =>
+                    {
+                        Some((q, constraint))
+                    }
+                    _ => None,
+                });
         self
     }
 
@@ -3349,6 +3367,7 @@ impl<'subset> CallContext<'subset> {
         self.argument_side = Default::default();
         self.shape_extension_vars = Default::default();
         self.shape_extension_binding_source = None;
+        self.type_var_constraint = None;
         self
     }
 
@@ -3600,7 +3619,18 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
             self.gas.restore();
             return res;
         }
-        let res = self.is_subset_eq_var(got, want);
+        let res = if let Some((q, constraint)) = self.active_call_context.type_var_constraint {
+            // All occurrences of a constrained TypeVar share the receiver's constraint choice.
+            // Substitute before inference and caching, including inside invariant containers.
+            let mut got = got.clone();
+            let mut want = want.clone();
+            let mut substitute = |param: &Quantified| (param == q).then(|| constraint.clone());
+            got.subst_mut_fn(&mut substitute);
+            want.subst_mut_fn(&mut substitute);
+            self.is_subset_eq_var(&got, &want)
+        } else {
+            self.is_subset_eq_var(got, want)
+        };
         self.gas.restore();
         res
     }
