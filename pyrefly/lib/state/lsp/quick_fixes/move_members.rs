@@ -13,6 +13,7 @@ use ruff_python_ast::ModModule;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::helpers::is_docstring_stmt;
+use ruff_python_ast::token::Tokens;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
@@ -41,7 +42,7 @@ pub(crate) fn pull_members_up_code_actions(
         transaction,
         handle,
         selection,
-        |module_info, ast, class_def, member_stmt, member_name, member_indent| {
+        |module_info, ast, tokens, class_def, member_stmt, member_name, member_indent| {
             let base_classes = base_classes_in_module(ast, class_def);
             let mut actions = Vec::new();
             for base_class in base_classes {
@@ -50,6 +51,7 @@ pub(crate) fn pull_members_up_code_actions(
                 }
                 if let Some(action) = build_move_action(
                     module_info,
+                    tokens,
                     member_stmt,
                     member_indent,
                     class_def,
@@ -79,7 +81,7 @@ pub(crate) fn push_members_down_code_actions(
         transaction,
         handle,
         selection,
-        |module_info, ast, class_def, member_stmt, member_name, member_indent| {
+        |module_info, ast, tokens, class_def, member_stmt, member_name, member_indent| {
             let subclasses = subclasses_in_module(ast, class_def);
             let mut eligible_subclasses: Vec<&StmtClassDef> = Vec::new();
             let mut actions = Vec::new();
@@ -90,6 +92,7 @@ pub(crate) fn push_members_down_code_actions(
                 eligible_subclasses.push(subclass);
                 if let Some(action) = build_move_action(
                     module_info,
+                    tokens,
                     member_stmt,
                     member_indent,
                     class_def,
@@ -102,6 +105,7 @@ pub(crate) fn push_members_down_code_actions(
             if eligible_subclasses.len() > 1
                 && let Some(action) = build_move_action_multi_target(
                     module_info,
+                    tokens,
                     member_stmt,
                     member_indent,
                     class_def,
@@ -128,6 +132,7 @@ fn with_move_context(
     build: impl FnOnce(
         &pyrefly_python::module::Module,
         &ModModule,
+        &Tokens,
         &StmtClassDef,
         &Stmt,
         &str,
@@ -135,7 +140,9 @@ fn with_move_context(
     ) -> Option<Vec<LocalRefactorCodeAction>>,
 ) -> Option<Vec<LocalRefactorCodeAction>> {
     let module_info = transaction.get_module_info(handle)?;
-    let ast = transaction.get_ast(handle)?;
+    let parsed = transaction.get_parsed_module(handle)?;
+    let ast = parsed.module();
+    let tokens = parsed.tokens()?;
     let source = module_info.contents();
     let selection_point = selection_anchor(source, selection);
     let (class_def, member_stmt) = find_member_context(ast.as_ref(), selection_point)?;
@@ -144,6 +151,7 @@ fn with_move_context(
     build(
         &module_info,
         ast.as_ref(),
+        &tokens,
         class_def,
         member_stmt,
         &member_name,
@@ -251,13 +259,20 @@ fn collect_class_defs<'a>(body: &'a [Stmt], out: &mut Vec<&'a StmtClassDef>) {
 
 fn build_move_action(
     module_info: &pyrefly_python::module::Module,
+    tokens: &Tokens,
     member_stmt: &Stmt,
     member_indent: &str,
     origin_class: &StmtClassDef,
     target_class: &StmtClassDef,
     title: String,
 ) -> Option<LocalRefactorCodeAction> {
-    let insert_edit = build_insertion_edit(module_info, member_stmt, member_indent, target_class)?;
+    let insert_edit = build_insertion_edit(
+        module_info,
+        tokens,
+        member_stmt,
+        member_indent,
+        target_class,
+    )?;
     let removal_edit = build_removal_edit(module_info, member_stmt, member_indent, origin_class)?;
 
     Some(LocalRefactorCodeAction {
@@ -269,6 +284,7 @@ fn build_move_action(
 
 fn build_move_action_multi_target(
     module_info: &pyrefly_python::module::Module,
+    tokens: &Tokens,
     member_stmt: &Stmt,
     member_indent: &str,
     origin_class: &StmtClassDef,
@@ -277,8 +293,13 @@ fn build_move_action_multi_target(
 ) -> Option<LocalRefactorCodeAction> {
     let mut edits = Vec::new();
     for target_class in target_classes {
-        let insert_edit =
-            build_insertion_edit(module_info, member_stmt, member_indent, target_class)?;
+        let insert_edit = build_insertion_edit(
+            module_info,
+            tokens,
+            member_stmt,
+            member_indent,
+            target_class,
+        )?;
         edits.push(insert_edit);
     }
     let removal_edit = build_removal_edit(module_info, member_stmt, member_indent, origin_class)?;
@@ -293,6 +314,7 @@ fn build_move_action_multi_target(
 /// Build an insertion edit for placing the member into the target class.
 fn build_insertion_edit(
     module_info: &pyrefly_python::module::Module,
+    tokens: &Tokens,
     member_stmt: &Stmt,
     member_indent: &str,
     target_class: &StmtClassDef,
@@ -300,8 +322,13 @@ fn build_insertion_edit(
     let source = module_info.contents();
     let (target_indent, insert_range, replaces_pass) =
         target_insertion_point(target_class, source)?;
-    let member_text =
-        reindent_statement(source, member_stmt.range(), member_indent, &target_indent);
+    let member_text = reindent_statement(
+        source,
+        member_stmt.range(),
+        tokens,
+        member_indent,
+        &target_indent,
+    )?;
     let insert_text = if replaces_pass {
         member_text
     } else {

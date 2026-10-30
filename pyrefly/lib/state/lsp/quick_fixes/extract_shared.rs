@@ -17,6 +17,8 @@ use ruff_python_ast::Parameters;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::helpers::is_docstring_stmt;
+use ruff_python_ast::token::TokenKind;
+use ruff_python_ast::token::Tokens;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_expr;
 use ruff_python_ast::visitor::walk_stmt;
@@ -429,19 +431,40 @@ pub(crate) fn is_static_or_class_method(function_def: &StmtFunctionDef) -> bool 
         || function_has_decorator(function_def, "classmethod")
 }
 
-/// Reindent every non-blank line in `text` from `from_indent` to `to_indent`.
-pub(crate) fn reindent_block(text: &str, from_indent: &str, to_indent: &str) -> String {
+/// Reindents complete statements without changing text inside string literals.
+pub(crate) fn reindent_block(
+    source: &str,
+    range: TextRange,
+    tokens: &Tokens,
+    from_indent: &str,
+    to_indent: &str,
+) -> Option<String> {
+    let text = code_at_range(source, range)?;
+    let mut tokens = tokens.after(range.start()).iter().peekable();
+    let mut line_start = range.start();
+    let mut token_end = line_start;
+    let mut interpolated_depth = 0usize;
     let mut result = String::new();
     for line in text.split_inclusive('\n') {
+        while let Some(token) = tokens.next_if(|token| token.start() < line_start) {
+            match token.kind() {
+                TokenKind::FStringStart | TokenKind::TStringStart => interpolated_depth += 1,
+                TokenKind::FStringEnd | TokenKind::TStringEnd => interpolated_depth -= 1,
+                _ => {}
+            }
+            token_end = token.end();
+        }
+        let inside_string = token_end > line_start || interpolated_depth > 0;
+        line_start += TextSize::of(line);
+        // Debug expressions in f-strings also include their whitespace in the value.
+        if inside_string || line.trim().is_empty() {
+            result.push_str(line);
+            continue;
+        }
         let (line_body, line_end) = match line.strip_suffix('\n') {
             Some(body) => (body, "\n"),
             None => (line, ""),
         };
-        if line_body.trim().is_empty() {
-            result.push_str(line_body);
-            result.push_str(line_end);
-            continue;
-        }
         if !from_indent.is_empty() && line_body.starts_with(from_indent) {
             result.push_str(to_indent);
             result.push_str(&line_body[from_indent.len()..]);
@@ -455,7 +478,7 @@ pub(crate) fn reindent_block(text: &str, from_indent: &str, to_indent: &str) -> 
         }
         result.push_str(line_end);
     }
-    result
+    Some(result)
 }
 
 /// Prepares text for insertion at a given position, adding a newline prefix if needed.
@@ -532,17 +555,15 @@ pub(crate) fn needs_pass_after_removal(body: &[Stmt], removed_range: TextRange) 
 pub(crate) fn reindent_statement(
     source: &str,
     range: TextRange,
+    tokens: &Tokens,
     from_indent: &str,
     to_indent: &str,
-) -> String {
-    let start = range.start().to_usize().min(source.len());
-    let end = range.end().to_usize().min(source.len());
-    let raw = if start < end { &source[start..end] } else { "" };
-    let mut text = reindent_block(raw, from_indent, to_indent);
+) -> Option<String> {
+    let mut text = reindent_block(source, range, tokens, from_indent, to_indent)?;
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    text
+    Some(text)
 }
 
 /// Resolves the definition at `position` to the single matching local definition

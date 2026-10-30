@@ -21,6 +21,7 @@ use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtClassDef;
 use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::StmtImportFrom;
+use ruff_python_ast::token::Tokens;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::visitor::walk_stmt;
 use ruff_text_size::Ranged;
@@ -131,13 +132,15 @@ pub(crate) fn module_member_move_context(
     selection: TextRange,
 ) -> Option<MoveModuleMemberContext> {
     let module_info = transaction.get_module_info(handle)?;
-    let ast = transaction.get_ast(handle)?;
+    let parsed = transaction.get_parsed_module(handle)?;
+    let ast = parsed.module();
+    let tokens = parsed.tokens()?;
     let source = module_info.contents();
     let selection_point = selection_anchor(source, selection);
     let member_stmt = find_module_member(ast.as_ref(), selection_point)?;
     let member_name = member_name_from_stmt(member_stmt)?;
     let (from_indent, _) = line_indent_and_start(source, member_stmt.range().start())?;
-    let member_text = reindent_statement(source, member_stmt.range(), &from_indent, "");
+    let member_text = reindent_statement(source, member_stmt.range(), &tokens, &from_indent, "")?;
     let removal_range = statement_removal_range(source, member_stmt)?;
     Some(MoveModuleMemberContext {
         module_info,
@@ -305,7 +308,9 @@ pub(crate) fn make_local_function_top_level_code_actions(
     import_format: ImportFormat,
 ) -> Option<Vec<LocalRefactorCodeAction>> {
     let module_info = transaction.get_module_info(handle)?;
-    let ast = transaction.get_ast(handle)?;
+    let parsed = transaction.get_parsed_module(handle)?;
+    let ast = parsed.module();
+    let tokens = parsed.tokens()?;
     let source = module_info.contents();
     let selection_point = selection_anchor(source, selection);
     let context = find_local_function_context(ast.as_ref(), selection_point, ParentKind::Module)?;
@@ -333,7 +338,7 @@ pub(crate) fn make_local_function_top_level_code_actions(
         MethodWrapper::None
     };
     let (function_text, from_indent) =
-        function_text_for_top_level(source, context.function_def, wrapper_kind)?;
+        function_text_for_top_level(source, &tokens, context.function_def, wrapper_kind)?;
     let removal_range = statement_removal_range_from_range(source, context.function_def.range())?;
 
     let mut actions = Vec::new();
@@ -712,6 +717,7 @@ fn find_local_function_context_in_body<'a>(
 
 fn function_text_for_top_level(
     source: &str,
+    tokens: &Tokens,
     function_def: &StmtFunctionDef,
     wrapper_kind: MethodWrapper,
 ) -> Option<(String, String)> {
@@ -722,7 +728,7 @@ fn function_text_for_top_level(
         }
     };
     let (from_indent, _) = line_indent_and_start(source, range.start())?;
-    let text = reindent_statement(source, range, &from_indent, "");
+    let text = reindent_statement(source, range, tokens, &from_indent, "")?;
     Some((text, from_indent))
 }
 

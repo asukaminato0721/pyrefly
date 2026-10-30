@@ -8,13 +8,16 @@
 use dupe::Dupe;
 use lsp_types::CodeActionKind;
 use pyrefly_build::handle::Handle;
+use pyrefly_util::visit::Visit;
+use ruff_python_ast::ExceptHandler;
 use ruff_python_ast::Stmt;
 use ruff_python_ast::StmtIf;
+use ruff_python_ast::token::TokenKind;
+use ruff_python_ast::token::Tokens;
 use ruff_text_size::Ranged;
 use ruff_text_size::TextRange;
 use ruff_text_size::TextSize;
 
-use super::extract_shared::code_at_range;
 use super::extract_shared::line_end_position;
 use super::extract_shared::line_indent_and_start;
 use super::extract_shared::reindent_block;
@@ -30,12 +33,6 @@ struct UnwrapBlockTarget {
     to_indent: String,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct QuoteState {
-    delimiter: char,
-    triple: bool,
-}
-
 /// Builds unwrap-block refactor actions for the block under the cursor.
 pub(crate) fn unwrap_block_code_actions(
     transaction: &Transaction<'_>,
@@ -44,15 +41,18 @@ pub(crate) fn unwrap_block_code_actions(
 ) -> Option<Vec<LocalRefactorCodeAction>> {
     let module_info = transaction.get_module_info(handle)?;
     let source = module_info.contents();
-    let ast = transaction.get_ast(handle)?;
+    let parsed = transaction.get_parsed_module(handle)?;
+    let tokens = parsed.tokens()?;
     let position = selection_anchor(source, selection);
-    let target = find_unwrap_block_target_in_body(&ast.body, source, position)?;
+    let target = find_unwrap_block_target_in_body(&parsed.body, source, &tokens, position)?;
     let removal_range = statement_removal_range_from_range(source, target.outer_range)?;
     let replacement = reindent_block(
-        code_at_range(source, target.body_range)?,
+        source,
+        target.body_range,
+        &tokens,
         &target.from_indent,
         &target.to_indent,
-    );
+    )?;
     Some(vec![LocalRefactorCodeAction {
         title: "Unwrap block".to_owned(),
         edits: vec![(module_info.dupe(), removal_range, replacement)],
@@ -63,13 +63,14 @@ pub(crate) fn unwrap_block_code_actions(
 fn find_unwrap_block_target_in_body(
     body: &[Stmt],
     source: &str,
+    tokens: &Tokens,
     position: TextSize,
 ) -> Option<UnwrapBlockTarget> {
     for stmt in body {
         if !range_contains_position(stmt.range(), position) {
             continue;
         }
-        if let Some(target) = find_unwrap_block_target_in_stmt(stmt, source, position) {
+        if let Some(target) = find_unwrap_block_target_in_stmt(stmt, source, tokens, position) {
             return Some(target);
         }
     }
@@ -79,22 +80,29 @@ fn find_unwrap_block_target_in_body(
 fn find_unwrap_block_target_in_stmt(
     stmt: &Stmt,
     source: &str,
+    tokens: &Tokens,
     position: TextSize,
 ) -> Option<UnwrapBlockTarget> {
     match stmt {
         Stmt::FunctionDef(function_def) => {
-            find_unwrap_block_target_in_body(&function_def.body, source, position)
+            find_unwrap_block_target_in_body(&function_def.body, source, tokens, position)
         }
         Stmt::ClassDef(class_def) => {
-            find_unwrap_block_target_in_body(&class_def.body, source, position)
+            find_unwrap_block_target_in_body(&class_def.body, source, tokens, position)
         }
-        Stmt::If(if_stmt) => find_unwrap_if_target(if_stmt, source, position),
+        Stmt::If(if_stmt) => find_unwrap_if_target(if_stmt, source, tokens, position),
         Stmt::For(for_stmt) => {
-            if let Some(target) = find_unwrap_block_target_in_body(&for_stmt.body, source, position)
+            if let Some(target) =
+                find_unwrap_block_target_in_body(&for_stmt.body, source, tokens, position)
             {
                 return Some(target);
             }
-            if !for_stmt.orelse.is_empty() {
+            if let Some(target) =
+                find_unwrap_block_target_in_body(&for_stmt.orelse, source, tokens, position)
+            {
+                return Some(target);
+            }
+            if !for_stmt.orelse.is_empty() || for_stmt.body.iter().any(loop_control_escapes) {
                 return None;
             }
             build_unwrap_block_target(
@@ -103,21 +111,22 @@ fn find_unwrap_block_target_in_stmt(
                 &for_stmt.body,
                 None,
                 source,
+                tokens,
                 position,
             )
         }
         Stmt::While(while_stmt) => {
             if let Some(target) =
-                find_unwrap_block_target_in_body(&while_stmt.body, source, position)
+                find_unwrap_block_target_in_body(&while_stmt.body, source, tokens, position)
             {
                 return Some(target);
             }
             if let Some(target) =
-                find_unwrap_block_target_in_body(&while_stmt.orelse, source, position)
+                find_unwrap_block_target_in_body(&while_stmt.orelse, source, tokens, position)
             {
                 return Some(target);
             }
-            if !while_stmt.orelse.is_empty() {
+            if !while_stmt.orelse.is_empty() || while_stmt.body.iter().any(loop_control_escapes) {
                 return None;
             }
             build_unwrap_block_target(
@@ -126,12 +135,13 @@ fn find_unwrap_block_target_in_stmt(
                 &while_stmt.body,
                 None,
                 source,
+                tokens,
                 position,
             )
         }
         Stmt::With(with_stmt) => {
             if let Some(target) =
-                find_unwrap_block_target_in_body(&with_stmt.body, source, position)
+                find_unwrap_block_target_in_body(&with_stmt.body, source, tokens, position)
             {
                 return Some(target);
             }
@@ -141,99 +151,84 @@ fn find_unwrap_block_target_in_stmt(
                 &with_stmt.body,
                 None,
                 source,
+                tokens,
                 position,
             )
         }
         Stmt::Try(try_stmt) => {
-            let (to_indent, _) = line_indent_and_start(source, stmt.range().start())?;
-            if let Some(target) = find_unwrap_block_target_in_body(&try_stmt.body, source, position)
+            if let Some(target) =
+                find_unwrap_block_target_in_body(&try_stmt.body, source, tokens, position)
             {
                 return Some(target);
             }
             for handler in &try_stmt.handlers {
-                if let Some(handler) = handler.as_except_handler()
-                    && let Some(target) =
-                        find_unwrap_block_target_in_body(&handler.body, source, position)
+                let ExceptHandler::ExceptHandler(handler) = handler;
+                if let Some(target) =
+                    find_unwrap_block_target_in_body(&handler.body, source, tokens, position)
                 {
                     return Some(target);
                 }
             }
             if let Some(target) =
-                find_unwrap_block_target_in_body(&try_stmt.orelse, source, position)
+                find_unwrap_block_target_in_body(&try_stmt.orelse, source, tokens, position)
             {
                 return Some(target);
             }
             if let Some(target) =
-                find_unwrap_block_target_in_body(&try_stmt.finalbody, source, position)
+                find_unwrap_block_target_in_body(&try_stmt.finalbody, source, tokens, position)
             {
                 return Some(target);
             }
+            let else_start = find_try_clause_start(tokens, &try_stmt.orelse, TokenKind::Else);
+            let finally_start =
+                find_try_clause_start(tokens, &try_stmt.finalbody, TokenKind::Finally);
             for (index, handler) in try_stmt.handlers.iter().enumerate() {
-                let Some(handler) = handler.as_except_handler() else {
-                    continue;
-                };
+                let ExceptHandler::ExceptHandler(handler) = handler;
                 let next_clause_start = try_stmt
                     .handlers
                     .get(index + 1)
-                    .and_then(|next| next.as_except_handler())
                     .map(|next| next.range().start())
-                    .or_else(|| {
-                        try_stmt
-                            .orelse
-                            .first()
-                            .map(Ranged::range)
-                            .map(|range| range.start())
-                    })
-                    .or_else(|| {
-                        try_stmt
-                            .finalbody
-                            .first()
-                            .map(Ranged::range)
-                            .map(|range| range.start())
-                    });
+                    .or(else_start)
+                    .or(finally_start);
                 if let Some(target) = build_unwrap_block_target(
                     stmt.range(),
                     handler.range().start(),
                     &handler.body,
                     next_clause_start,
                     source,
+                    tokens,
                     position,
                 ) {
                     return Some(target);
                 }
             }
-            let else_start = try_stmt.orelse.first().and_then(|stmt| {
-                find_try_clause_start(source, stmt.range().start(), &to_indent, "else")
-            });
             if let Some(else_start) = else_start
                 && let Some(target) = build_unwrap_block_target(
                     stmt.range(),
                     else_start,
                     &try_stmt.orelse,
-                    try_stmt.finalbody.first().and_then(|stmt| {
-                        find_try_clause_start(source, stmt.range().start(), &to_indent, "finally")
-                    }),
+                    finally_start,
                     source,
+                    tokens,
                     position,
                 )
             {
                 return Some(target);
             }
-            let finally_start = try_stmt.finalbody.first().and_then(|stmt| {
-                find_try_clause_start(source, stmt.range().start(), &to_indent, "finally")
-            });
             build_unwrap_block_target(
                 stmt.range(),
                 finally_start?,
                 &try_stmt.finalbody,
                 None,
                 source,
+                tokens,
                 position,
             )
         }
         Stmt::Match(match_stmt) => {
             for case in &match_stmt.cases {
-                if let Some(target) = find_unwrap_block_target_in_body(&case.body, source, position)
+                if let Some(target) =
+                    find_unwrap_block_target_in_body(&case.body, source, tokens, position)
                 {
                     return Some(target);
                 }
@@ -247,13 +242,17 @@ fn find_unwrap_block_target_in_stmt(
 fn find_unwrap_if_target(
     if_stmt: &StmtIf,
     source: &str,
+    tokens: &Tokens,
     position: TextSize,
 ) -> Option<UnwrapBlockTarget> {
-    if let Some(target) = find_unwrap_block_target_in_body(&if_stmt.body, source, position) {
+    if let Some(target) = find_unwrap_block_target_in_body(&if_stmt.body, source, tokens, position)
+    {
         return Some(target);
     }
     for clause in &if_stmt.elif_else_clauses {
-        if let Some(target) = find_unwrap_block_target_in_body(&clause.body, source, position) {
+        if let Some(target) =
+            find_unwrap_block_target_in_body(&clause.body, source, tokens, position)
+        {
             return Some(target);
         }
     }
@@ -268,6 +267,7 @@ fn find_unwrap_if_target(
         &if_stmt.body,
         next_clause_start,
         source,
+        tokens,
         position,
     ) {
         return Some(target);
@@ -284,6 +284,7 @@ fn find_unwrap_if_target(
             &clause.body,
             next_clause_start,
             source,
+            tokens,
             position,
         ) {
             return Some(target);
@@ -299,14 +300,31 @@ fn build_unwrap_block_target(
     body: &[Stmt],
     next_clause_start: Option<TextSize>,
     source: &str,
+    tokens: &Tokens,
     position: TextSize,
 ) -> Option<UnwrapBlockTarget> {
     let first_stmt = body.first()?;
     let (to_indent, _) = line_indent_and_start(source, outer_range.start())?;
     let (_, header_line_start) = line_indent_and_start(source, header_start)?;
-    let (from_indent, first_stmt_line_start) =
-        line_indent_and_start(source, first_stmt.range().start())?;
-    let colon_position = find_suite_colon(source, header_line_start, first_stmt_line_start)?;
+    let (from_indent, _) = line_indent_and_start(source, first_stmt.range().start())?;
+    // The suite colon is the last significant token before its first statement.
+    let colon = tokens
+        .in_range(TextRange::new(header_start, first_stmt.range().start()))
+        .iter()
+        .rev()
+        .find(|token| {
+            !matches!(
+                token.kind(),
+                TokenKind::Comment
+                    | TokenKind::Newline
+                    | TokenKind::NonLogicalNewline
+                    | TokenKind::Indent
+            )
+        })?;
+    if colon.kind() != TokenKind::Colon {
+        return None;
+    }
+    let colon_position = colon.start();
     if position < header_line_start || position > colon_position + TextSize::new(1) {
         return None;
     }
@@ -330,104 +348,29 @@ fn build_unwrap_block_target(
     })
 }
 
-fn find_suite_colon(
-    source: &str,
-    header_line_start: TextSize,
-    body_line_start: TextSize,
-) -> Option<TextSize> {
-    let header_start = header_line_start.to_usize();
-    let header_end = body_line_start.to_usize().min(source.len());
-    if header_start >= header_end {
-        return None;
-    }
-    let header = &source[header_start..header_end];
-    let colon = find_suite_colon_in_header(header)?;
-    TextSize::try_from(header_start + colon).ok()
+fn find_try_clause_start(tokens: &Tokens, body: &[Stmt], keyword: TokenKind) -> Option<TextSize> {
+    tokens
+        .before(body.first()?.range().start())
+        .iter()
+        .rev()
+        .find(|token| token.kind() == keyword)
+        .map(Ranged::start)
 }
 
-fn find_suite_colon_in_header(header: &str) -> Option<usize> {
-    let mut quote = None::<QuoteState>;
-    let mut escaped = false;
-    let mut in_comment = false;
-    let mut last_colon = None;
-
-    for (index, ch) in header.char_indices() {
-        if in_comment {
-            if ch == '\n' {
-                in_comment = false;
-            }
-            continue;
-        }
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if let Some(state) = quote {
-            if state.triple {
-                if ch == state.delimiter
-                    && header[index..].starts_with(triple_quote_delimiter(state.delimiter))
-                {
-                    quote = None;
-                } else if ch == '\\' {
-                    escaped = true;
-                }
-            } else {
-                match ch {
-                    '\\' => escaped = true,
-                    current if current == state.delimiter => quote = None,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => {
-                quote = Some(QuoteState {
-                    delimiter: ch,
-                    triple: header[index..].starts_with(triple_quote_delimiter(ch)),
-                });
-            }
-            '#' => in_comment = true,
-            ':' => last_colon = Some(index),
-            _ => {}
+/// Checks whether a control statement targets the loop being removed.
+fn loop_control_escapes(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break(_) | Stmt::Continue(_) => true,
+        Stmt::FunctionDef(_) | Stmt::ClassDef(_) => false,
+        // A nested loop's else suite still belongs to the enclosing loop.
+        Stmt::For(stmt) => stmt.orelse.iter().any(loop_control_escapes),
+        Stmt::While(stmt) => stmt.orelse.iter().any(loop_control_escapes),
+        _ => {
+            let mut escapes = false;
+            stmt.recurse(&mut |child| escapes |= loop_control_escapes(child));
+            escapes
         }
     }
-
-    last_colon
-}
-
-fn triple_quote_delimiter(ch: char) -> &'static str {
-    match ch {
-        '\'' => "'''",
-        '"' => "\"\"\"",
-        _ => unreachable!("only quote delimiters are supported"),
-    }
-}
-
-fn find_try_clause_start(
-    source: &str,
-    body_start: TextSize,
-    outer_indent: &str,
-    keyword: &str,
-) -> Option<TextSize> {
-    let mut line_end = body_start.to_usize().min(source.len());
-    let expected_prefix = format!("{outer_indent}{keyword}");
-    while line_end > 0 {
-        let search_end = line_end.saturating_sub(1);
-        let line_start = source[..search_end]
-            .rfind('\n')
-            .map(|index| index + 1)
-            .unwrap_or(0);
-        let line = source[line_start..line_end].trim_end_matches('\n');
-        if line.starts_with(&expected_prefix) && find_suite_colon_in_header(line).is_some() {
-            return TextSize::try_from(line_start).ok();
-        }
-        if line_start == 0 {
-            break;
-        }
-        line_end = line_start;
-    }
-    None
 }
 
 fn range_contains_position(range: TextRange, position: TextSize) -> bool {
