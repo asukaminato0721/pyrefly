@@ -377,7 +377,13 @@ fn apply_first_unwrap_block_action(code: &str, selection: TextRange) -> Option<S
         .unwrap_block_code_actions(handle, selection)
         .unwrap_or_default();
     let edits = actions.first()?.edits.clone();
-    Some(apply_refactor_edits_for_module(&module_info, &edits))
+    let updated = apply_refactor_edits_for_module(&module_info, &edits);
+    let (_, errors, _) = Ast::parse(&updated, PySourceType::Python);
+    assert!(
+        errors.is_empty(),
+        "invalid Python after unwrapping: {errors:?}"
+    );
+    Some(updated)
 }
 
 fn apply_first_safe_delete_action(code: &str) -> Option<String> {
@@ -6033,8 +6039,8 @@ def f():
 #[test]
 fn unwrap_block_if_else_branch_after_colon() {
     let code = r#"
-def f():
-    if True:
+def f(condition):
+    if condition:
         print("then")
     else:
         # keep this comment
@@ -6045,7 +6051,7 @@ def f():
     let updated =
         apply_first_unwrap_block_action(code, selection).expect("expected unwrap-block action");
     let expected = r#"
-def f():
+def f(condition):
     # keep this comment
     print("else")
 "#;
@@ -6303,6 +6309,201 @@ def f():
 "#;
     let selection = find_nth_range(code, ":", 2);
     assert_no_unwrap_block_action(code, selection);
+}
+
+#[test]
+fn unwrap_block_except_before_else_or_finally() {
+    for following_clauses in [
+        "    else:\n        print(\"else\")\n",
+        "    finally:\n        print(\"finally\")\n",
+        "    else:\n        print(\"else\")\n    finally:\n        print(\"finally\")\n",
+    ] {
+        let code = format!(
+            "def f():\n    try:\n        print(\"try\")\n    except ValueError:\n        print(\"value\")\n{following_clauses}"
+        );
+        let selection = find_nth_range(&code, "except ValueError", 1);
+        let updated = apply_first_unwrap_block_action(&code, selection).unwrap();
+        assert_eq!("def f():\n    print(\"value\")\n", updated);
+    }
+}
+
+#[test]
+fn unwrap_block_try_else_before_finally() {
+    let code = r#"
+def f():
+    try:
+        print("try")
+    except ValueError:
+        print("value")
+    else:
+        print("else")
+    finally:
+        print("finally")
+"#;
+    let selection = find_nth_range(code, "else:", 1);
+    let updated = apply_first_unwrap_block_action(code, selection).unwrap();
+    assert_eq!("def f():\n    print(\"else\")", updated.trim());
+}
+
+#[test]
+fn unwrap_block_preserves_multiline_literals() {
+    for literal in [
+        "\"\"\"\n        hello\n        \"\"\"",
+        "r'''\n        hello\\n\n        '''",
+        "b\"\"\"\n        hello\n        \"\"\"",
+        "f\"\"\"\n        hello {1 + 2}\n        \"\"\"",
+        "f\"\"\"{\n        1 + 2 =\n        }\"\"\"",
+        "\"first\\\n        second\"",
+    ] {
+        let code =
+            format!("def f():\n    if True:\n        value = {literal}\n        print(value)\n");
+        let expected = format!("def f():\n    value = {literal}\n    print(value)\n");
+        for crlf in [false, true] {
+            let (code, expected) = if crlf {
+                (code.replace('\n', "\r\n"), expected.replace('\n', "\r\n"))
+            } else {
+                (code.clone(), expected.clone())
+            };
+            let selection = find_nth_range(&code, "if True", 1);
+            let updated = apply_first_unwrap_block_action(&code, selection).unwrap();
+            assert_eq!(expected, updated);
+        }
+    }
+}
+
+#[test]
+fn unwrap_block_preserves_nested_docstrings_and_concatenation() {
+    let code = r#"
+if True:
+    class C:
+        """Class.
+        Keep this indentation.
+        """
+        def method(self):
+            """Method.
+            Keep this indentation too.
+            """
+            return (
+                """first
+                second"""
+                "third"
+            )
+"#;
+    let expected = r#"
+class C:
+    """Class.
+        Keep this indentation.
+        """
+    def method(self):
+        """Method.
+            Keep this indentation too.
+            """
+        return (
+            """first
+                second"""
+            "third"
+        )
+"#;
+    let selection = find_nth_range(code, "if True", 1);
+    let updated = apply_first_unwrap_block_action(code, selection).unwrap();
+    assert_eq!(expected, updated);
+}
+
+#[test]
+fn unwrap_block_rejects_multiline_header_with_inline_suite() {
+    let code = r#"
+def g(*args):
+    return True
+
+def f():
+    if g(lambda: 1,
+         2): print("x")
+"#;
+    for anchor in ["if g", "lambda:", "2):"] {
+        let selection = find_nth_range(code, anchor, 1);
+        assert_no_unwrap_block_action(code, selection);
+    }
+}
+
+#[test]
+fn unwrap_block_multiline_header_with_lambda() {
+    let code = r#"
+def g(*args):
+    return True
+
+def f():
+    if g(lambda: 1,
+         2):
+        print("x")
+"#;
+    let selection = find_nth_range(code, "lambda:", 1);
+    let updated = apply_first_unwrap_block_action(code, selection).unwrap();
+    let expected = r#"
+def g(*args):
+    return True
+
+def f():
+    print("x")
+"#;
+    assert_eq!(expected, updated);
+}
+
+#[test]
+fn unwrap_block_header_with_nested_f_strings() {
+    let code = r#"
+def f():
+    if f"{f"{':'}"}":  # comment:
+        print("x")
+"#;
+    let selection = find_nth_range(code, "if f", 1);
+    let updated = apply_first_unwrap_block_action(code, selection).unwrap();
+    assert_eq!("def f():\n    print(\"x\")", updated.trim());
+}
+
+#[test]
+fn unwrap_block_rejects_escaping_loop_control() {
+    for header in ["while True", "for item in [1]"] {
+        for control in ["break", "continue"] {
+            for nested in [false, true] {
+                let code = if nested {
+                    format!(
+                        "def f():\n    for outer in [1]:\n        {header}:\n            if True:\n                {control}\n"
+                    )
+                } else {
+                    format!("def f():\n    {header}:\n        if True:\n            {control}\n")
+                };
+                let selection = find_nth_range(&code, header, 1);
+                assert_no_unwrap_block_action(&code, selection);
+            }
+        }
+    }
+}
+
+#[test]
+fn unwrap_block_preserves_control_in_nested_loop() {
+    for control in ["break", "continue"] {
+        let code =
+            format!("def f():\n    while True:\n        for item in [1]:\n            {control}\n");
+        let selection = find_nth_range(&code, "while True", 1);
+        let updated = apply_first_unwrap_block_action(&code, selection).unwrap();
+        assert_eq!(
+            format!("def f():\n    for item in [1]:\n        {control}\n"),
+            updated
+        );
+    }
+}
+
+#[test]
+fn unwrap_block_rejects_control_in_nested_loop_else() {
+    for nested_header in ["while flag", "for item in [1]"] {
+        for control in ["break", "continue"] {
+            let code = format!(
+                "def f(flag):\n    while True:\n        {nested_header}:\n            pass\n        else:\n            {control}\n"
+            );
+            let selection = find_nth_range(&code, "while True", 1);
+            assert_no_unwrap_block_action(&code, selection);
+        }
+    }
 }
 
 #[test]
