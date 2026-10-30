@@ -4304,6 +4304,38 @@ def inner():
 }
 
 #[test]
+fn make_local_function_top_level_preserves_multiline_strings() {
+    let code = r#"
+def outer():
+    # MOVE-START
+    def inner():
+        """Documentation.
+        Keep this indentation.
+        """
+        return """first
+        second"""
+    # MOVE-END
+    return inner()
+"#;
+    let expected = r#"
+def outer():
+    # MOVE-START
+    # MOVE-END
+    return inner()
+def inner():
+    """Documentation.
+        Keep this indentation.
+        """
+    return """first
+        second"""
+"#;
+    let selection = find_marked_range_with(code, "# MOVE-START", "# MOVE-END");
+    let (module_info, actions, _) = compute_make_top_level_actions(code, selection);
+    let updated = apply_refactor_edits_for_module(&module_info, &actions[0]);
+    assert_eq!(expected, updated);
+}
+
+#[test]
 fn make_method_top_level_with_wrapper() {
     let code = r#"
 class C:
@@ -6491,6 +6523,26 @@ fn unwrap_block_preserves_control_in_nested_loop() {
             updated
         );
     }
+}
+
+#[test]
+fn unwrap_block_preserves_control_in_nested_function() {
+    let code = r#"
+def f():
+    while True:
+        def inner():
+            for item in [1]:
+                break
+"#;
+    let expected = r#"
+def f():
+    def inner():
+        for item in [1]:
+            break
+"#;
+    let selection = find_nth_range(code, "while True", 1);
+    let updated = apply_first_unwrap_block_action(code, selection).unwrap();
+    assert_eq!(expected, updated);
 }
 
 #[test]
