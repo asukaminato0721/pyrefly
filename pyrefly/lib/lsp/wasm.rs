@@ -9,6 +9,7 @@ pub mod completion;
 pub mod hover;
 pub mod inlay_hints;
 pub mod notebook;
+mod override_completion;
 pub mod provide_type;
 pub mod semantic_tokens;
 pub mod signature_help;

@@ -32,6 +32,7 @@ use ruff_python_ast::AnyNodeRef;
 use ruff_python_ast::ExprContext;
 use ruff_python_ast::Identifier;
 use ruff_python_ast::ModModule;
+use ruff_python_ast::StmtFunctionDef;
 use ruff_python_ast::StmtImportFrom;
 use ruff_python_ast::name::Name;
 use ruff_text_size::Ranged;
@@ -990,8 +991,13 @@ impl Transaction<'_> {
         handle: &Handle,
         base_type: Type,
         expected_type: Option<&Type>,
+        method: Option<&StmtFunctionDef>,
         completions: &mut Vec<RankedCompletion>,
     ) {
+        let class = match &base_type {
+            Type::ClassDef(class) => Some(class.dupe()),
+            _ => None,
+        };
         self.ad_hoc_solve(handle, "completion_attributes", |solver| {
             solver
                 .completions(base_type, None, true, true)
@@ -1023,11 +1029,20 @@ impl Transaction<'_> {
                     } else {
                         CompletionSource::Local
                     };
+                    let edits = method.zip(class.as_ref()).and_then(|(method, class)| {
+                        self.method_override_edits(handle, class, method, attr, solver.stdlib)
+                    });
                     completions.push(RankedCompletion {
                         item: CompletionItem {
                             label: attr.name.as_str().to_owned(),
                             detail,
-                            kind,
+                            kind: if edits.is_some() {
+                                Some(CompletionItemKind::Method)
+                            } else {
+                                kind
+                            },
+                            text_edit: edits.as_ref().map(|(edit, _)| edit.clone().into()),
+                            additional_text_edits: edits.map(|(_, edits)| edits),
                             documentation,
                             tags: if attr.is_deprecated {
                                 Some(vec![CompletionItemTag::Deprecated])
@@ -1220,6 +1235,7 @@ impl Transaction<'_> {
                         handle,
                         base_type,
                         expected_type.as_ref(),
+                        None,
                         &mut result,
                     );
                 }
@@ -1249,11 +1265,13 @@ impl Transaction<'_> {
                 if (is_method_def || matches!(context, IdentifierContext::Expr(ExprContext::Store)))
                     && let Some(covering_nodes) = covering_nodes.as_deref()
                 {
-                    let mut saw_function = false;
+                    let mut enclosing_function = None;
                     let mut enclosing_class = None;
                     for node in covering_nodes.iter() {
                         match node {
-                            AnyNodeRef::StmtFunctionDef(_) => saw_function = true,
+                            AnyNodeRef::StmtFunctionDef(function) => {
+                                enclosing_function = Some(*function);
+                            }
                             AnyNodeRef::StmtClassDef(class_def) => {
                                 enclosing_class = Some(class_def);
                                 break;
@@ -1262,7 +1280,7 @@ impl Transaction<'_> {
                         }
                     }
                     if let Some(class_def) = enclosing_class
-                        && (!saw_function || is_method_def)
+                        && (enclosing_function.is_none() || is_method_def)
                     {
                         let key = Key::Definition(ShortIdentifier::new(&class_def.name));
                         if let Some(class_type) = self.get_type(handle, &key) {
@@ -1270,6 +1288,11 @@ impl Transaction<'_> {
                                 handle,
                                 class_type,
                                 None,
+                                if is_method_def {
+                                    enclosing_function
+                                } else {
+                                    None
+                                },
                                 &mut result,
                             );
                         }
