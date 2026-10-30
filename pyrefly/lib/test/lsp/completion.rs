@@ -24,6 +24,8 @@ use crate::test::util::get_batched_lsp_operations_report;
 use crate::test::util::get_batched_lsp_operations_report_allow_error;
 use crate::test::util::mk_multi_file_state;
 
+mod method_override;
+
 // Some assertions compare literal completion dumps. pretty_assertions decorates
 // diffs with ANSI escapes, so we strip them to keep the expected strings stable.
 fn strip_ansi(input: &str) -> String {
