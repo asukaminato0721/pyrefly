@@ -370,6 +370,8 @@ impl HeavyTask {
 pub struct HeavyTaskQueue {
     task_sender: Sender<(HeavyTask, TelemetryEventKind, Instant)>,
     task_receiver: Receiver<(HeavyTask, TelemetryEventKind, Instant)>,
+    low_priority_sender: Sender<(HeavyTask, TelemetryEventKind, Instant)>,
+    low_priority_receiver: Receiver<(HeavyTask, TelemetryEventKind, Instant)>,
     stop_sender: Sender<()>,
     stop_receiver: Receiver<()>,
     queue_name: QueueName,
@@ -379,10 +381,13 @@ pub struct HeavyTaskQueue {
 impl HeavyTaskQueue {
     pub fn new(queue_name: QueueName) -> Self {
         let (task_sender, task_receiver) = crossbeam_channel::unbounded();
+        let (low_priority_sender, low_priority_receiver) = crossbeam_channel::unbounded();
         let (stop_sender, stop_receiver) = crossbeam_channel::unbounded();
         Self {
             task_sender,
             task_receiver,
+            low_priority_sender,
+            low_priority_receiver,
             stop_sender,
             stop_receiver,
             queue_name,
@@ -407,6 +412,7 @@ impl HeavyTaskQueue {
         // so we register priority_events_receiver first.
         let stop_receiver_index = receiver_selector.recv(&self.stop_receiver);
         let task_receiver_index = receiver_selector.recv(&self.task_receiver);
+        let low_priority_index = receiver_selector.recv(&self.low_priority_receiver);
         loop {
             let selected = receiver_selector.select();
             match selected.index() {
@@ -416,9 +422,14 @@ impl HeavyTaskQueue {
                         .expect("Failed to receive stop signal");
                     return;
                 }
-                i if i == task_receiver_index => {
+                i if i == task_receiver_index || i == low_priority_index => {
+                    let receiver = if i == task_receiver_index {
+                        &self.task_receiver
+                    } else {
+                        &self.low_priority_receiver
+                    };
                     let (task, kind, enqueued) = selected
-                        .recv(&self.task_receiver)
+                        .recv(receiver)
                         .expect("Failed to receive heavy task");
                     debug!("Dequeued task on {} heavy task queue", self.queue_name);
                     let task_id = self.next_task_id.fetch_add(1, Ordering::Relaxed);
@@ -446,6 +457,17 @@ impl HeavyTaskQueue {
     /// Make `run_until_stopped` exit after finishing the current task.
     pub fn stop(&self) {
         self.stop_sender.send(()).expect("Failed to stop the queue");
+    }
+
+    /// Run this task after all queued interactive tasks.
+    pub fn queue_low_priority_task(
+        &self,
+        kind: TelemetryEventKind,
+        f: Box<dyn FnOnce(&Server, &dyn Telemetry, &mut TelemetryEvent) + Send + Sync + 'static>,
+    ) {
+        self.low_priority_sender
+            .send((HeavyTask(f), kind, Instant::now()))
+            .expect("Failed to queue low priority task");
     }
 }
 

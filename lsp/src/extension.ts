@@ -286,6 +286,7 @@ export async function activate(
       typeErrorDisplayStatusVersion: TYPE_ERROR_DISPLAY_STATUS_VERSION,
       customHoverProvider: supportsHoverVerbosity,
       pushTypeErrorDisplayStatus: true,
+      supportsReferencesCodeLens: true,
     },
   };
 
