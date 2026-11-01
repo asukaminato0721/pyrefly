@@ -250,6 +250,282 @@ print("not reported for parity") if False else None
 );
 
 testcase!(
+    test_guarded_initialization_preserves_narrowing,
+    r#"
+from typing import assert_type
+
+def f(b: str):
+    x: int | None = None
+    if b == "bar":
+        x = 3
+    if b == "bar":
+        assert_type(x, int | None)
+
+def narrowed(a: bool, z: int | None) -> None:
+    x: int | None = None
+    if a:
+        x = z
+    assert x is not None
+    if a:
+        assert_type(x, int)
+        x + 1
+
+def invalidated_predicate(b: str):
+    x: int | None = None
+    if b == "bar":
+        x = 3
+    b = "baz"
+    if b == "bar":
+        assert_type(x, int | None)
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_attribute_mutation,
+    r#"
+class A:
+    v: int
+
+def f(o: A) -> int:
+    if o.v == 1:
+        y = 3
+    o.v = 1
+    if o.v == 1:
+        return y  # E: `y` may be uninitialized
+    return 0
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_literals,
+    r#"
+from typing import Literal, assert_type
+
+def strings(a: str):
+    if a == "ready":
+        x = 1
+    if a == "ready":
+        print(x)
+
+def integers(a: int):
+    if a != 1:
+        x = 1
+    if a != 1:
+        print(x)
+    if a == 1:
+        print(x)  # E: `x` may be uninitialized
+
+def bytes_(a: bytes):
+    if a == b"ready":
+        x = 1
+    if a == b"ready":
+        print(x)
+
+def booleans(a: bool):
+    if a is False:
+        x = 1
+    if a is False:
+        print(x)
+
+def none_(a: int | None):
+    if a is None:
+        x = 1
+    if a is None:
+        print(x)
+
+def false_branch(a: bool):
+    if a:
+        pass
+    else:
+        x = 1
+    if not a:
+        print(x)
+
+def no_type_narrowing(a: bool):
+    if a:
+        x = 1
+    else:
+        x = "other"
+    if a:
+        assert_type(x, Literal[1, "other"])
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_short_circuit,
+    r#"
+def disjunction(enabled: bool, other: bool) -> bool:
+    if enabled:
+        value = 3
+    return not other or not enabled or value > 0
+
+def conjunction(enabled: bool) -> bool:
+    if enabled:
+        value = 3
+    return enabled and value > 0
+
+def compared(state: str) -> bool:
+    if state == "ready":
+        value = 3
+    return state == "ready" and value > 0
+
+def asserted(enabled: bool) -> int:
+    if enabled:
+        value = 3
+    assert enabled
+    return value
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_unsupported_conditions,
+    r#"
+def compound(a: bool, b: bool):
+    if a and b:
+        x = 1
+    if a:
+        print(x)  # E: `x` may be uninitialized
+def subscript(a: list[int]):
+    if a[0] == 1:
+        x = 1
+    a[0] = 1
+    if a[0] == 1:
+        print(x)  # E: `x` may be uninitialized
+
+def comparison_to_name(a: int, b: int):
+    if a == b:
+        x = 1
+    b = a
+    if a == b:
+        print(x)  # E: `x` may be uninitialized
+
+def call(a: int):
+    if bool(a):
+        x = 1
+    if bool(a):
+        print(x)  # E: `x` may be uninitialized
+
+def elif_guard(a: bool, b: bool):
+    if b:
+        pass
+    elif a:
+        x = 1
+    if a:
+        print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_invalidated_paths,
+    r#"
+def sibling_write(a: bool):
+    if a:
+        x = 1
+    else:
+        a = True
+    if a:
+        print(x)  # E: `x` may be uninitialized
+
+def branch_write(a: bool):
+    if a:
+        x = 1
+        a = False
+    if not a:
+        print(x)  # E: `x` may be uninitialized
+
+def deleted_target(a: bool):
+    if a:
+        x = 1
+    if a:
+        del x
+    if a:
+        print(x)  # E: `x` may be uninitialized
+
+def nested_assignment(a: bool, b: bool):
+    if a:
+        if b:
+            x = 1
+    if a:
+        print(x)  # E: `x` may be uninitialized
+
+def intervening_write(a: bool, b: bool):
+    if a:
+        x = 1
+    if b:
+        a = True
+    if a:
+        print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_loop_boundaries,
+    r#"
+def before_loop(a: bool, items: list[int]):
+    if a:
+        x = 1
+    for _ in items:
+        if a:
+            print(x)  # E: `x` may be uninitialized
+    if a:
+        print(x)  # E: `x` may be uninitialized
+
+def inside_loop(a: bool, items: list[int]):
+    for _ in items:
+        if a:
+            x = 1
+        if a:
+            print(x)
+    if a:
+        print(x)  # E: `x` may be uninitialized
+
+def before_while(a: bool, b: bool):
+    if a:
+        x = 1
+    while b:
+        if a:
+            print(x)  # E: `x` may be uninitialized
+        break
+    if a:
+        print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
+    test_guarded_initialization_exception_boundaries,
+    r#"
+from contextlib import suppress
+
+def try_boundary(a: bool):
+    if a:
+        x = 1
+    try:
+        if a:
+            print(x)  # E: `x` may be uninitialized
+    except Exception:
+        pass
+
+def finally_boundary(a: bool):
+    if a:
+        x = 1
+    try:
+        a = True
+    finally:
+        if a:
+            print(x)  # E: `x` may be uninitialized
+
+def suppression(a: bool):
+    with suppress(Exception):
+        if a:
+            x = 1
+        a = True
+        raise ValueError()
+    if a:
+        print(x)  # E: `x` may be uninitialized
+"#,
+);
+
+testcase!(
     test_listcomp_simple,
     r#"
 from typing import assert_type
@@ -4040,7 +4316,6 @@ for x in range(10):
 // `if a:`, the variable is guaranteed to be initialized because the same
 // condition guards both the definition and the use.
 testcase!(
-    bug = "false positive: b is always initialized when a is truthy",
     test_guarded_initialization_basic,
     r#"
 def f(a: bool) -> int:
@@ -4048,7 +4323,7 @@ def f(a: bool) -> int:
         b = 3
     c = 5
     if a:
-        return b  # E: `b` may be uninitialized
+        return b
     return 9
     "#,
 );
@@ -4078,7 +4353,6 @@ def f(a: bool, c: bool) -> int:
 );
 
 testcase!(
-    bug = "false positive: b and c are always initialized when a is truthy",
     test_guarded_initialization_multiple_variables,
     r#"
 def f(a: bool) -> int:
@@ -4086,13 +4360,12 @@ def f(a: bool) -> int:
         b = 3
         c = 4
     if a:
-        return b + c  # E: `b` may be uninitialized  # E: `c` may be uninitialized
+        return b + c
     return 0
     "#,
 );
 
 testcase!(
-    bug = "false positive: b is always initialized when a is truthy",
     test_guarded_initialization_with_intermediate_statements,
     r#"
 def f(a: bool) -> int:
@@ -4101,13 +4374,12 @@ def f(a: bool) -> int:
     x = 5
     y = x + 1
     if a:
-        return b  # E: `b` may be uninitialized
+        return b
     return 9
     "#,
 );
 
 testcase!(
-    bug = "false positive: b is always initialized when a is truthy",
     test_guarded_initialization_annotation_then_guarded_assign,
     r#"
 def f(a: bool) -> int:
@@ -4115,20 +4387,19 @@ def f(a: bool) -> int:
     if a:
         b = 3
     if a:
-        return b  # E: `b` may be uninitialized
+        return b
     return 9
     "#,
 );
 
 testcase!(
-    bug = "false positive: b is always initialized when a is truthy",
     test_guarded_initialization_repeated_use,
     r#"
 def f(a: bool) -> None:
     if a:
         b = 3
     if a:
-        print(b)  # E: `b` may be uninitialized
+        print(b)
     if a:
         print(b)
     "#,
@@ -4148,14 +4419,13 @@ def f(a: bool, c: bool) -> int:
 );
 
 testcase!(
-    bug = "false positive: b is always initialized when a > 0 at both sites",
     test_guarded_initialization_complex_condition,
     r#"
 def f(a: int) -> int:
     if a > 0:
         b = 3
     if a > 0:
-        return b  # E: `b` may be uninitialized
+        return b
     return 9
     "#,
 );
