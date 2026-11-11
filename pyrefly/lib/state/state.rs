@@ -701,6 +701,8 @@ struct ModuleData {
     /// are not a dependency of every module; only its resolvability affects the
     /// `tensor_shapes` bit. `None` means "not yet computed".
     tensor_shapes: Option<bool>,
+    /// The Django model module list read during solving, tracked as a find-only dependency.
+    django_model_modules: Option<Vec<ModuleName>>,
 }
 
 #[derive(Debug)]
@@ -733,6 +735,8 @@ struct ModuleDataMut {
     /// are not a dependency of every module; only its resolvability affects the
     /// `tensor_shapes` bit. `None` means "not yet computed".
     tensor_shapes: RwLock<Option<bool>>,
+    /// `None` means this module has not read the Django model module list during solving.
+    django_model_modules: RwLock<Option<Vec<ModuleName>>>,
 }
 
 impl ModuleData {
@@ -749,6 +753,7 @@ impl ModuleData {
             deps: RwLock::new(self.deps.dupe()),
             rdeps: Mutex::new(self.rdeps.dupe()),
             tensor_shapes: RwLock::new(self.tensor_shapes),
+            django_model_modules: RwLock::new(self.django_model_modules.clone()),
         }
     }
 }
@@ -764,6 +769,7 @@ impl ModuleDataMut {
             deps: Default::default(),
             rdeps: Default::default(),
             tensor_shapes: RwLock::new(None),
+            django_model_modules: RwLock::new(None),
         }
     }
 
@@ -778,6 +784,7 @@ impl ModuleDataMut {
             deps,
             rdeps,
             tensor_shapes,
+            django_model_modules,
         } = self;
         ModuleData {
             handle,
@@ -787,6 +794,7 @@ impl ModuleDataMut {
             deps: deps.into_inner(),
             rdeps: rdeps.into_inner(),
             tensor_shapes: tensor_shapes.into_inner(),
+            django_model_modules: django_model_modules.into_inner(),
         }
     }
 
@@ -1660,6 +1668,7 @@ impl<'a> Transaction<'a> {
             let mut deps_lock = module_data.deps.write();
             let _imports = mem::take(&mut *imports_lock);
             let deps = mem::take(&mut *deps_lock);
+            *module_data.django_model_modules.write() = None;
             guard.rebuild(clear_ast, self.data.now, &mut module_data.old.lock());
             for dep_handle in deps.keys() {
                 let mut rdeps = self.get_module(dep_handle).rdeps.lock();
@@ -1764,6 +1773,16 @@ impl<'a> Transaction<'a> {
                     is_dirty = true;
                     break;
                 }
+            }
+
+            // The configured model list can change without changing any resolved imports.
+            if !is_dirty {
+                let config = module_data.config.read();
+                is_dirty = module_data
+                    .django_model_modules
+                    .read()
+                    .as_ref()
+                    .is_some_and(|previous| *previous != config.django_model_modules);
             }
 
             // Re-check the find-only `tensor_shapes` dependency: whether
@@ -3890,6 +3909,8 @@ impl<'a> LookupAnswer for TransactionHandle<'a> {
 
     fn django_model_modules(&self) -> Vec<(ModuleName, ModulePath)> {
         let config = self.module_data.config.read().dupe();
+        // An empty list is also a dependency: adding modules must rebuild this module.
+        *self.module_data.django_model_modules.write() = Some(config.django_model_modules.clone());
         if config.django_model_modules.is_empty() {
             return Vec::new();
         }
