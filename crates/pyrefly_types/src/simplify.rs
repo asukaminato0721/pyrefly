@@ -38,11 +38,6 @@ fn flatten_and_dedup(xs: Vec<Type>, heap: &TypeHeap) -> Vec<Type> {
     }
     let mut flattened = Vec::with_capacity(xs.len());
     flatten(xs, &mut flattened);
-    simplify_intersections(&mut flattened, heap);
-    // Per the invariant documented on `simplify_intersections`, that call only ever introduces
-    // `Never`s (by replacing absorbed intersection types), so dropping them in place here
-    // suffices and we don't need a second flatten pass.
-    flattened.retain(|x| !x.is_never());
     // A member marked with its truthiness sorts as the unmarked type, so the marker changes neither
     // the display order of the union nor the order in which its members are solved.
     flattened.sort_by(|x, y| {
@@ -50,7 +45,21 @@ fn flatten_and_dedup(xs: Vec<Type>, heap: &TypeHeap) -> Vec<Type> {
             .cmp(y.ignoring_truthiness_marker())
             .then_with(|| x.cmp(y))
     });
-    flattened.dedup();
+    flattened.dedup_by(|current, previous| {
+        // Both truthiness branches together contain every value of the original type.
+        let base = previous.ignoring_truthiness_marker();
+        if !matches!(base, Type::Union(_))
+            && base == current.ignoring_truthiness_marker()
+            && matches!((previous.as_bool(), current.as_bool()), (Some(a), Some(b)) if a != b)
+        {
+            *previous = base.clone();
+            true
+        } else {
+            current == previous
+        }
+    });
+    simplify_intersections(&mut flattened, heap);
+    flattened.retain(|x| !x.is_never());
     // Keep only the strongest `Any` style, matching `AnyStyle::merge`.
     if let Some(strongest) = flattened
         .iter()
@@ -723,6 +732,19 @@ mod tests {
         // A union under the cap is left untouched.
         let xs: Vec<Type> = (0..8).map(|i| LitInt::new(i).to_implicit_type()).collect();
         assert!(matches!(unions(xs, &heap), Type::Union(_)));
+    }
+
+    #[test]
+    fn test_union_complementary_truthiness() {
+        let heap = TypeHeap::new();
+        let base = Type::any_tuple();
+        let truthy = intersect(vec![base.clone(), Type::Truthy], base.clone(), &heap);
+        let falsy = intersect(vec![base.clone(), Type::Falsy], base.clone(), &heap);
+        assert_eq!(unions(vec![truthy.clone(), falsy.clone()], &heap), base);
+        assert_eq!(
+            unions(vec![Type::None, falsy, truthy], &heap),
+            unions(vec![Type::None, base], &heap),
+        );
     }
 
     #[test]

@@ -1854,7 +1854,7 @@ f(MatchesAllBranches())
 testcase!(
     test_overloaded_properties_and_descriptors,
     r#"
-from typing import Callable, assert_type, overload
+from typing import Callable, assert_type, overload, reveal_type
 
 class ReadOnly[T]:
     def __get__(self, obj: object, owner: type | None = None) -> list[T]: ...
@@ -1886,7 +1886,7 @@ def check() -> None:
     assert_type(box.readonly, list[int] | list[str])
     assert_type(box.descriptor, list[int] | list[str])
     if box.values:
-        assert_type(box.values, list[int] | list[str])
+        reveal_type(box.values)  # E: revealed type: (list[int] & Truthy) | (list[str] & Truthy)
     assert_type(box.size, int)
     box.missing  # E: Object of class `Box` has no attribute `missing`
     box.missing = 1  # E: Object of class `Box` has no attribute `missing`

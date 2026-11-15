@@ -43,6 +43,65 @@ def f(x: str | None, y: bool):
 );
 
 testcase!(
+    test_truthiness_class_narrow,
+    r#"
+from typing import Literal, Never, assert_type, final, reveal_type
+
+class A:
+    name: str
+
+def asserted(a: A) -> A:
+    assert a
+    reveal_type(a)  # E: revealed type: A & Truthy
+    return a
+
+def negated(a: A) -> A:
+    assert not a
+    reveal_type(a)  # E: revealed type: A & Falsy
+    return a
+
+def branches(a: A | None) -> None:
+    if a:
+        reveal_type(a)  # E: revealed type: A & Truthy
+        assert_type(a.name, str)
+        if not a:
+            assert_type(a, Never)
+    else:
+        reveal_type(a)  # E: revealed type: (A & Falsy) | None
+    assert_type(a, A | None)
+
+@final
+class AlwaysTrue:
+    pass
+
+class AlwaysFalse:
+    def __bool__(self) -> Literal[False]:
+        return False
+
+def known(a: AlwaysTrue, b: AlwaysFalse) -> None:
+    assert a  # E: Instance of `AlwaysTrue` used as condition
+    reveal_type(a)  # E: revealed type: AlwaysTrue
+    assert not b
+    reveal_type(b)  # E: revealed type: AlwaysFalse
+
+class Boolable:
+    def __bool__(self) -> bool: ...
+
+def boolean_call(a: Boolable) -> None:
+    if bool(a):
+        reveal_type(a)  # E: revealed type: Boolable & Truthy
+    else:
+        reveal_type(a)  # E: revealed type: Boolable & Falsy
+
+def intersection(a: A) -> A:
+    if isinstance(a, Boolable):
+        assert a
+        reveal_type(a)  # E: revealed type: A & Boolable & Truthy
+    return a
+    "#,
+);
+
+testcase!(
     test_bool_simple,
     r#"
 from typing import assert_type
@@ -5001,30 +5060,30 @@ def f() -> None:
 testcase!(
     test_never_container,
     r#"
-from typing import assert_type, Never
+from typing import Never, reveal_type
 def test_set(x: set[str] | set[Never]):
     if x:
-        assert_type(x, set[str])
+        reveal_type(x)  # E: revealed type: set[str] & Truthy
     else:
-        assert_type(x, set[str] | set[Never])
+        reveal_type(x)  # E: revealed type: (set[str] & Falsy) | set[Never]
 
 def test_frozenset(x: frozenset[str] | frozenset[Never]):
     if x:
-        assert_type(x, frozenset[str])
+        reveal_type(x)  # E: revealed type: frozenset[str] & Truthy
     else:
-        assert_type(x, frozenset[str] | frozenset[Never])
+        reveal_type(x)  # E: revealed type: (frozenset[str] & Falsy) | frozenset[Never]
 
 def test_list(x: list[int] | list[Never]):
     if x:
-        assert_type(x, list[int])
+        reveal_type(x)  # E: revealed type: list[int] & Truthy
     else:
-        assert_type(x, list[int] | list[Never])
+        reveal_type(x)  # E: revealed type: (list[int] & Falsy) | list[Never]
 
 def test_dict(x: dict[str, object] | dict[Never, object]):
     if x:
-        assert_type(x, dict[str, object])
+        reveal_type(x)  # E: revealed type: dict[str, object] & Truthy
     else:
-        assert_type(x, dict[str, object] | dict[Never, object])
+        reveal_type(x)  # E: revealed type: (dict[str, object] & Falsy) | dict[Never, object]
 
     "#,
 );
@@ -5037,13 +5096,13 @@ from typing import reveal_type
 
 def f[T: (float, float | None)](value: T) -> T:
     if value:
-        reveal_type(value)  # E: revealed type: float & T
+        reveal_type(value)  # E: revealed type: float & T & Truthy
         return value / 100.0
     return value
 
 def g[T: float | None](value: T) -> float:
     if value:
-        reveal_type(value)  # E: revealed type: float & T
+        reveal_type(value)  # E: revealed type: float & T & Truthy
         return value / 100.0
     return 0.0
 

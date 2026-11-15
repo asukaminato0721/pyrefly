@@ -403,7 +403,7 @@ def f(cls: type[C]):
         reveal_type(cls.missing)  # E: revealed type: Unknown
         cls.missing[0]
     if cls.present:  # E: Instance-only attribute `present` of class `C` is not visible on the class
-        reveal_type(cls.present)  # E: revealed type: object
+        reveal_type(cls.present)  # E: revealed type: object & Truthy
         cls.present[0]  # E: Cannot index into `object`
 "#,
 );

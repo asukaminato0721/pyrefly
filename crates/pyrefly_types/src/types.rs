@@ -1015,13 +1015,11 @@ pub enum Type {
     ///
     /// See https://typing.python.org/en/latest/spec/glossary.html#term-materialize.
     Materialization,
-    /// Every value that is always falsy. It appears only as a member of an intersection: the left
-    /// operand `x: A` of `x and y` is returned only when it is falsy, so it contributes `A & Falsy`
-    /// to the result, and a later truthy narrow removes that member.
+    /// Every value that is always falsy. It appears only as a member of an intersection.
+    /// A falsy condition narrows `x: A` to `A & Falsy` when no more precise type is available.
     Falsy,
-    /// Every value that is always truthy. It appears only as a member of an intersection: the left
-    /// operand `x: A` of `x or y` is returned only when it is truthy, so it contributes
-    /// `A & Truthy` to the result, and a later falsy narrow removes that member.
+    /// Every value that is always truthy. It appears only as a member of an intersection.
+    /// A truthy condition narrows `x: A` to `A & Truthy` when no more precise type is available.
     Truthy,
     None,
 }
@@ -2294,7 +2292,7 @@ impl Type {
         self
     }
 
-    /// Whether this type only records the truthiness of a boolean operand for narrowing.
+    /// Whether this type only records truthiness for narrowing.
     pub fn is_truthiness_marker(&self) -> bool {
         matches!(self, Type::Falsy | Type::Truthy)
     }

@@ -2084,9 +2084,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 // For example, narrowing generated for implicit else branches.
                 let silent = ErrorCollector::new(errors.module().clone(), ErrorStyle::Never);
                 let narrow_member = |t: &Type| -> Type {
-                    if self.as_bool(t, range, &silent) == Some(!boolval) {
-                        return self.heap.mk_never();
-                    } else if let Type::ClassType(cls) = t {
+                    if let Some(value) = self.as_bool(t, range, &silent) {
+                        return if value == boolval {
+                            t.clone()
+                        } else {
+                            self.heap.mk_never()
+                        };
+                    }
+                    if let Type::ClassType(cls) = t {
                         if cls.is(KnownClass::Bool) {
                             return Lit::Bool(boolval).to_implicit_type();
                         }
@@ -2102,9 +2107,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                                 return Lit::Bytes(empty.into_boxed_slice()).to_implicit_type();
                             }
                         }
+                        // Keep primitive classes unmarked so literal defaults in expressions
+                        // such as `name or ""` can collapse into the class.
+                        if matches!(
+                            cls.known(),
+                            Some(KnownClass::Int | KnownClass::Str | KnownClass::Bytes)
+                        ) {
+                            return t.clone();
+                        }
                     }
-
-                    t.clone()
+                    if matches!(t, Type::ClassType(_) | Type::Intersect(_)) {
+                        let marker = if boolval { Type::Truthy } else { Type::Falsy };
+                        intersect(vec![t.clone(), marker], t.clone(), self.heap)
+                    } else {
+                        t.clone()
+                    }
                 };
                 self.distribute_over_union(ty, |t| match t.as_quantified() {
                     Some((q, current_narrow)) if q.is_type_var() => {

@@ -2796,32 +2796,6 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         })
     }
 
-    /// Intersect each class instance in `ty` whose truthiness is not statically known with
-    /// `Truthy` or `Falsy`. `x and y` returns `x` only when it is falsy, and `x or y` only when it
-    /// is truthy, so this lets a narrow of the result to the other truthiness remove `x`.
-    ///
-    /// `int`, `str` and `bytes` are not marked: their falsy values are the literals `0`, `""` and
-    /// `b""`, which a falsy narrow already produces, and an unmarked class lets a literal default
-    /// such as the `""` in `x or ""` collapse into it.
-    fn mark_truthiness(&self, ty: &Type, truthy: bool, range: TextRange) -> Type {
-        let swallow = self.error_swallower();
-        let marker = if truthy { Type::Truthy } else { Type::Falsy };
-        self.distribute_over_union(ty, |t| match t {
-            Type::ClassType(cls)
-                if matches!(
-                    cls.known(),
-                    Some(KnownClass::Int | KnownClass::Str | KnownClass::Bytes)
-                ) =>
-            {
-                t.clone()
-            }
-            Type::ClassType(_) if self.as_bool(t, range, &swallow).is_none() => self
-                .heap
-                .mk_intersect(vec![t.clone(), marker.clone()], t.clone()),
-            _ => t.clone(),
-        })
-    }
-
     // Helper method for inferring the type of a boolean operation over a sequence of values.
     fn boolop(
         &self,
@@ -2875,8 +2849,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         Some(acc) => self.union(acc, t.clone()),
                     });
                     let t = if i != last_index {
-                        let t = self.atomic_narrow(&t, &result_narrow, value.range(), errors);
-                        self.mark_truthiness(&t, target, value.range())
+                        self.atomic_narrow(&t, &result_narrow, value.range(), errors)
                     } else {
                         t
                     };

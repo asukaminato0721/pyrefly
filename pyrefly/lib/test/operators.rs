@@ -431,11 +431,11 @@ class Author:
 def assigned(author: Author | None) -> None:
     genre = author and author.genre
     if genre:
-        assert_type(genre, Genre)
+        reveal_type(genre)  # E: revealed type: Genre & Truthy
 
 def walrus(author: Author | None) -> None:
     if genre := (author and author.genre):
-        assert_type(genre, Genre)
+        reveal_type(genre)  # E: revealed type: Genre & Truthy
 
 def container(d: dict[str, int] | None) -> None:
     value = d and d["a"]
@@ -468,7 +468,7 @@ def f(flag: bool, value: object | None, other: bool) -> None:
 testcase!(
     test_boolean_or_result_falsy_narrow,
     r#"
-from typing import assert_type, reveal_type
+from typing import reveal_type
 
 class Config: ...
 
@@ -477,16 +477,16 @@ class Settings: ...
 def assigned(override: Config | None, default: Settings) -> None:
     config = override or default
     if not config:
-        assert_type(config, Settings)
+        reveal_type(config)  # E: revealed type: Settings & Falsy
 
 def walrus(override: Config | None, default: Settings) -> None:
     if not (config := override or default):
-        assert_type(config, Settings)
+        reveal_type(config)  # E: revealed type: Settings & Falsy
 
 def container(items: list[int], default: Settings) -> None:
     value = items or default
     if not value:
-        assert_type(value, Settings)
+        reveal_type(value)  # E: revealed type: Settings & Falsy
 
 def revealed(override: Config | None, default: Settings) -> None:
     reveal_type(override or default)  # E: revealed type: (Config & Truthy) | Settings

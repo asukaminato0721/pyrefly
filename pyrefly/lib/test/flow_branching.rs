@@ -2103,7 +2103,7 @@ def conditions(
         break
     assert items  # E: Implicit conversion of `list[int]` to `bool` is not allowed
     [x for x in items if x]  # E: Implicit conversion of `int` to `bool` is not allowed
-    value = 1 if items else 0  # E: Implicit conversion of `list[int]` to `bool` is not allowed
+    value = 1 if items else 0  # E: Implicit conversion of `list[int] & Truthy` to `bool` is not allowed
     fallback = optional_int or 0  # E: Implicit conversion of `int | None` to `bool` is not allowed
 
     if flag:
