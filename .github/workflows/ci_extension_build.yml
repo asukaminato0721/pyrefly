@@ -25,6 +25,8 @@ on:
         value: ${{ jobs.get_version.outputs.prerelease_flag }}
 
 env:
+  # Packaging needs the JavaScript tools, not browser binaries.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
   # Retry downloads of crates and Rust toolchains, inside cross's containers
   # too, more often than the default of 3 attempts.
   CARGO_NET_RETRY: 10
