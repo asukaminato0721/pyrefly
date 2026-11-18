@@ -816,6 +816,14 @@ pub struct FindDefinitionItem {
     pub module: Module,
 }
 
+/// Returns true if any component of the import path starts with an underscore.
+fn is_private_import(module: ModuleName) -> bool {
+    module
+        .components()
+        .iter()
+        .any(|component| component.as_str().starts_with('_'))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct QuickfixAction {
     title: String,
@@ -4064,17 +4072,13 @@ impl<'a> Transaction<'a> {
                             // edit shows "from parent import submodule" rather than the
                             // raw ", submodule" insertion text.
                             let title = format!("Insert import: `{}`", import_edit.display_text);
-                            let is_private_import = module_name
-                                .components()
-                                .last()
-                                .is_some_and(|component| component.as_str().starts_with('_'));
                             import_actions.push(QuickfixAction {
                                 title,
                                 module_info: module_info.dupe(),
                                 range: import_edit.range,
                                 insert_text: import_edit.insert_text,
                                 is_deprecated: false,
-                                is_private_import,
+                                is_private_import: is_private_import(module_name),
                             });
                         }
                         self.create_quickfix_action_for_module_import(
@@ -4260,17 +4264,13 @@ impl<'a> Transaction<'a> {
             import_regular_import_edit(ast, module_handle, Some(unknown_name));
         let range = TextRange::at(position, TextSize::new(0));
         let title = format!("Use common alias: `{}`", insert_text.trim());
-        let is_private_import = module_name
-            .components()
-            .last()
-            .is_some_and(|component| component.as_str().starts_with('_'));
         import_actions.push(QuickfixAction {
             title,
             module_info: module_info.dupe(),
             range,
             insert_text,
             is_deprecated: false,
-            is_private_import,
+            is_private_import: is_private_import(module_name),
         });
         Some(module_name)
     }
@@ -4287,17 +4287,13 @@ impl<'a> Transaction<'a> {
             let (position, insert_text, _) = import_regular_import_edit(ast, module_handle, None);
             let range = TextRange::at(position, TextSize::new(0));
             let title = format!("Insert import: `{}`", insert_text.trim());
-            let is_private_import = module_name
-                .components()
-                .last()
-                .is_some_and(|component| component.as_str().starts_with('_'));
             import_actions.push(QuickfixAction {
                 title,
                 module_info: module_info.dupe(),
                 range,
                 insert_text,
                 is_deprecated: false,
-                is_private_import,
+                is_private_import: is_private_import(module_name),
             });
         }
     }
@@ -4335,19 +4331,13 @@ impl<'a> Transaction<'a> {
             if is_deprecated { " (deprecated)" } else { "" }
         );
 
-        let is_private_import = handle_to_import_from
-            .module()
-            .components()
-            .last()
-            .is_some_and(|component| component.as_str().starts_with('_'));
-
         import_actions.push(QuickfixAction {
             title,
             module_info: module_info.dupe(),
             range,
             insert_text: import_edit.insert_text,
             is_deprecated,
-            is_private_import,
+            is_private_import: is_private_import(handle_to_import_from.module()),
         });
     }
 
@@ -5538,7 +5528,8 @@ impl<'a> Transaction<'a> {
                                 vec![(import_from.dupe(), name.clone(), export.clone())];
                             if import_from != *handle
                                 && (Self::should_include_reexport(handle, &canonical_handle, &name)
-                                    || (exports_data.is_explicit_reexport(&name)
+                                    || ((exports_data.is_explicit_reexport(&name)
+                                        || exports_data.is_dunder_all_export(&name))
                                         && Self::allows_explicit_reexport(handle)))
                             {
                                 // Use handle (re-exporting module) so completions
@@ -5590,7 +5581,8 @@ impl<'a> Transaction<'a> {
                 });
                 if import_from != *handle
                     && (Self::should_include_reexport(handle, &canonical_handle, name)
-                        || (exports_data.is_explicit_reexport(name)
+                        || ((exports_data.is_explicit_reexport(name)
+                            || exports_data.is_dunder_all_export(name))
                             && Self::allows_explicit_reexport(handle)))
                 {
                     // Use handle (re-exporting module) so completions

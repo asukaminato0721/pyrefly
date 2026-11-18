@@ -628,6 +628,15 @@ impl Exports {
         self.exports.calculate(f).unwrap_or_default()
     }
 
+    /// Returns true if `name` appears in the statically known part of an explicit `__all__`.
+    pub fn is_dunder_all_export(&self, name: &Name) -> bool {
+        self.partially_known_dunder_all.contains(name)
+            || self
+                .explicit_dunder_all_names
+                .as_ref()
+                .is_some_and(|all| all.contains(name))
+    }
+
     pub fn is_explicit_reexport(&self, name: &Name) -> bool {
         self.definitions
             .definitions
@@ -642,14 +651,7 @@ impl Exports {
     /// Names defined locally, redundantly aliased (`as` same-name), or introduced
     /// via a wildcard import are not implicit re-exports.
     pub fn is_implicit_reexport(&self, name: &Name) -> bool {
-        if self.partially_known_dunder_all.contains(name) {
-            return false;
-        }
-        if self
-            .explicit_dunder_all_names
-            .as_ref()
-            .is_some_and(|all| all.contains(name))
-        {
+        if self.is_dunder_all_export(name) {
             return false;
         }
         self.definitions
@@ -807,6 +809,40 @@ mod tests {
     #[must_use]
     fn contains(exports: &Exports, lookup: &dyn LookupExport, name: &str) -> bool {
         exports.exports(lookup).contains_key(&Name::new(name))
+    }
+
+    #[test]
+    fn test_dunder_all_exports_are_distinct_from_explicit_reexports() {
+        for (dunder_all, has_export) in [
+            ("", false),
+            ("__all__ = ['local', 'imported']", true),
+            (
+                "__all__ = ['local', 'imported']\nfor name in []:\n    __all__.append(name)",
+                true,
+            ),
+        ] {
+            let exports = mk_exports(
+                &format!(
+                    "from source import imported, unlisted, redundant as redundant\nlocal = 1\n{dunder_all}\n"
+                ),
+                ModuleStyle::Executable,
+            );
+            for name in ["local", "imported"] {
+                let name = Name::new(name);
+                assert_eq!(exports.is_dunder_all_export(&name), has_export);
+                assert!(!exports.is_explicit_reexport(&name));
+            }
+            let imported = Name::new("imported");
+            assert_eq!(exports.is_implicit_reexport(&imported), !has_export);
+            let redundant = Name::new("redundant");
+            assert!(exports.is_explicit_reexport(&redundant));
+            assert!(!exports.is_dunder_all_export(&redundant));
+            assert!(!exports.is_implicit_reexport(&redundant));
+            let unlisted = Name::new("unlisted");
+            assert!(!exports.is_explicit_reexport(&unlisted));
+            assert!(!exports.is_dunder_all_export(&unlisted));
+            assert!(exports.is_implicit_reexport(&unlisted));
+        }
     }
 
     #[test]
