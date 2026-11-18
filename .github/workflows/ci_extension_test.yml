@@ -32,6 +32,10 @@ on:
       - '.github/workflows/ci_extension_build.yml'
       - '.github/workflows/ci_extension_test.yml'
 
+env:
+  # The web test job installs Chromium explicitly after npm ci.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
 jobs:
   build_extension:
     uses: ./.github/workflows/ci_extension_build.yml
