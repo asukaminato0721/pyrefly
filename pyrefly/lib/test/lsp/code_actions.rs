@@ -771,6 +771,80 @@ my_export
 }
 
 #[test]
+fn import_module_and_submodule_prefer_public_package() {
+    let code = "needle\n# ^\n";
+    let mut env = TestEnv::new().with_default_require_level(Require::Exports);
+    env.add("main", code);
+    env.add_with_path("public", "public/__init__.py", "");
+    env.add_with_path("public.needle", "public/needle.py", "");
+    env.add_with_path("_private", "_private/__init__.py", "");
+    env.add_with_path("_private.needle", "_private/needle.py", "");
+    let (state, handle_for) = env.to_state();
+    let handle = handle_for("main");
+    let position = extract_cursors_for_test(code)[0];
+    let report = get_test_report(&state, &handle, position);
+    let titles = report
+        .lines()
+        .filter(|line| line.starts_with("# Title: Insert import:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        titles,
+        [
+            "# Title: Insert import: `from public import needle`",
+            "# Title: Insert import: `import public.needle`",
+            "# Title: Insert import: `from _private import needle`",
+            "# Title: Insert import: `import _private.needle`",
+        ],
+    );
+}
+
+#[test]
+fn import_dunder_all_reexport_suggests_public_package() {
+    let code = "FixtureRequest\n# ^\n";
+    let mut env = TestEnv::new().with_default_require_level(Require::Exports);
+    env.add("main", code);
+    env.add_with_path(
+        "pytest",
+        "pytest/__init__.py",
+        "from _pytest.fixtures import FixtureRequest\n__all__ = ['FixtureRequest']\n",
+    );
+    env.add_with_path(
+        "_pytest.fixtures",
+        "_pytest/fixtures.py",
+        "class FixtureRequest: pass\n",
+    );
+    env.add("consumer", "from _pytest.fixtures import FixtureRequest\n");
+    let (state, handle_for) = env.to_state();
+    let handle = handle_for("main");
+    let position = extract_cursors_for_test(code)[0];
+    let actions = state
+        .transaction()
+        .local_quickfix_code_actions_sorted(
+            &handle,
+            TextRange::empty(position),
+            ImportFormat::Absolute,
+            InlayHintConfig::default(),
+            None,
+        )
+        .unwrap();
+    let imports = actions
+        .iter()
+        .filter(|(title, _)| title.starts_with("Insert import:"))
+        .map(|(_, edits)| {
+            assert_eq!(edits.len(), 1);
+            edits[0].2.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        imports,
+        [
+            "from pytest import FixtureRequest\n",
+            "from _pytest.fixtures import FixtureRequest\n",
+        ],
+    );
+}
+
+#[test]
 fn prefer_public_stdlib_module_for_reexports() {
     let report = get_batched_lsp_operations_report_allow_error(
         &[

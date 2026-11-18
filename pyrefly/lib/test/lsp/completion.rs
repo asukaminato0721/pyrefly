@@ -4989,6 +4989,58 @@ T = Iterable
 }
 
 #[test]
+fn autoimport_dunder_all_reexport_suggests_public_package() {
+    let code = "FixtureReq\n#         ^\n";
+    for dunder_all in [
+        "__all__ = ['FixtureRequest']",
+        "__all__ = []\n__all__.append('FixtureRequest')",
+        "__all__ = ['FixtureRequest']\nfor name in []:\n    __all__.append(name)",
+    ] {
+        let mut env = TestEnv::new().with_default_require_level(Require::Exports);
+        env.add("main", code);
+        env.add_with_path(
+            "pytest",
+            "pytest/__init__.py",
+            &format!("from _pytest.fixtures import FixtureRequest\n{dunder_all}\n"),
+        );
+        env.add_with_path(
+            "_pytest.fixtures",
+            "_pytest/fixtures.py",
+            "class FixtureRequest: pass\n",
+        );
+        env.add("consumer", "from _pytest.fixtures import FixtureRequest\n");
+        env.add(
+            "excluded",
+            "from _pytest.fixtures import FixtureRequest\n__all__ = []\n",
+        );
+        let (state, handle_for) = env.to_state();
+        let handle = handle_for("main");
+        let position = extract_cursors_for_test(code)[0];
+        let completions =
+            state
+                .transaction()
+                .completion(&handle, position, ImportFormat::Absolute, true, None);
+        let imports = completions
+            .iter()
+            .filter(|item| item.label == "FixtureRequest")
+            .map(|item| {
+                let edits = item.additional_text_edits.as_ref().unwrap();
+                assert_eq!(edits.len(), 1);
+                edits[0].new_text.as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            imports,
+            [
+                "from pytest import FixtureRequest\n",
+                "from _pytest.fixtures import FixtureRequest\n",
+            ],
+            "{dunder_all}",
+        );
+    }
+}
+
+#[test]
 fn autoimport_explicit_reexport_suggests_reexport_path() {
     let code = r#"
 T = Thing
