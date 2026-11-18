@@ -17,6 +17,28 @@ export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension('meta.pyrefly');
   check(extension, 'The packaged Pyrefly extension must be installed.');
   await extension.activate();
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  check(folder, 'The test workspace must be open.');
+  const project = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(folder.uri, 'main.py'));
+  await vscode.window.showTextDocument(project);
+  const configDeadline = Date.now() + 30000;
+  while (!vscode.languages.getDiagnostics(project.uri).some(item => item.code === 'bad-return')) {
+    check(Date.now() < configDeadline, 'The workspace must publish its return-type error.');
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  check(!vscode.languages.getDiagnostics(project.uri).some(item => item.code === 'bad-assignment'),
+    'The unopened workspace TOML must suppress assignment errors.');
+  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(folder.uri, 'pyrefly.toml'),
+    new TextEncoder().encode('python-version = "3.11"\n[errors]\nbad-assignment = "warn"\n'));
+  const updateDeadline = Date.now() + 30000;
+  while (!vscode.languages.getDiagnostics(project.uri).some(item => item.code === 'bad-assignment')) {
+    check(Date.now() < updateDeadline, 'Changed workspace TOML must take effect without a reload.');
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const assignments = vscode.languages.getDiagnostics(project.uri)
+    .filter(item => item.code === 'bad-assignment');
+  check(assignments.length === 1 && assignments[0].severity === vscode.DiagnosticSeverity.Warning,
+    'The TOML must control both Python version and diagnostic severity.');
   const document = await vscode.workspace.openTextDocument({
     language: 'python', content: 's = "😀"; target: int = "bad"\nreveal_ty',
   });

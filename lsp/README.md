@@ -63,7 +63,7 @@ settings:
 
 ### Build the browser extension
 
-Install Rust, Node.js, and wasm-pack 0.15.0. From the repository root, run:
+Install Rust, Node.js, and the [WASM build prerequisites](../pyrefly_wasm/README.md#prerequisites). From the repository root, run:
 
 ```bash
 bash pyrefly_wasm/build.sh --no-opt
@@ -77,31 +77,18 @@ Select the `Run Web Extension` launch configuration. The argument
 `--extensionDevelopmentKind=web` selects the browser extension host.
 Use **Developer: Show Running Extensions** to check the host.
 
-The build consumes the generated JS and WASM pair in `pyrefly_wasm/target`.
-It checks their hashes before bundling, including during watch builds.
-Missing or mismatched inputs cause a build failure.
-The optional optimized website bundle requires `wasm-opt`. The browser extension
-uses the matching unoptimized binary.
-
 ### Browser support boundaries
 
-Each workspace has a separate WASM state. The worker retains original URIs.
-Untitled documents and files outside a workspace have separate, single-file states.
-Notebook cells are excluded. Reload the window after adding or removing workspace folders.
+The browser extension reads `pyrefly.toml` or `[tool.pyrefly]` in `pyproject.toml`
+from each workspace folder. Changes to these files take effect without a reload.
+The Rust checker applies their diagnostic settings and Python version.
 
-The browser cannot use the native filesystem or start an interpreter.
-Rust reports structured module requests before diagnostic filtering.
-The extension reads candidate paths through `vscode.workspace.fs` in the requesting
-workspace. It does not scan folders or search other workspace roots.
-Python resolves relative module names in Rust. Package files precede module files,
-and stub files precede source files. Loaded files, absent files, and reads in progress
-are cached. File events invalidate the caches. Document edits share a 40 ms delay
-and preserve the warm Rust state when the module set does not change.
-
-Workspace imports use paths relative to the workspace root. Interpreter packages,
-custom search paths, and nested project configurations are outside this initial
-browser implementation. Each session supports at most 1000 files, 1 MiB per file,
-and 10 MiB in total. The worker reports an error if a limit is exceeded.
+Workspace imports use paths relative to the workspace root. The browser cannot
+start an interpreter. Interpreter packages, custom search paths, and nested
+project configurations are not supported, so results can differ from the CLI.
+Untitled documents and files outside a workspace use single-file analysis.
+Notebook cells are not supported. Reload after adding or removing workspace folders.
+Each workspace supports at most 1000 files, 1 MiB per file, and 10 MiB in total.
 
 The Python-version precedence is:
 

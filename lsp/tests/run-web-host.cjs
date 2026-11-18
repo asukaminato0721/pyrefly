@@ -14,7 +14,15 @@ async function main() {
   const testPath = path.join(extension, 'dist/web-test/suite.js');
   fs.mkdirSync(path.dirname(testPath), {recursive: true});
   fs.copyFileSync(path.resolve(__dirname, '../dist/web-test/suite.js'), testPath);
+  const folderPath = path.resolve(__dirname, '../web-test/workspace');
+  fs.mkdirSync(folderPath, {recursive: true});
+  fs.writeFileSync(path.join(folderPath, 'pyrefly.toml'),
+    'python-version = "3.11"\n[errors]\nbad-assignment = "ignore"\n');
+  fs.writeFileSync(path.join(folderPath, 'main.py'),
+    'import sys\nif sys.version_info >= (3, 12):\n    versioned: int = "bad"\n' +
+    'def f() -> int:\n    return "bad"\ntarget: int = "bad"\n');
   const server = await open({
+    folderPath,
     extensionDevelopmentPath: extension,
     extensionTestsPath: testPath,
     browserType: 'none',
