@@ -1,4 +1,4 @@
-import {CompletionItem, Hover, SemanticTokens, SemanticTokensLegend} from 'vscode-languageserver-protocol';
+import {CompletionItem, DiagnosticTag, Hover, SemanticTokens, SemanticTokensLegend} from 'vscode-languageserver-protocol';
 
 // This is the worker's contract with pyrefly_wasm/lib.rs.
 // Position and range columns count Unicode scalar values and start at one.
@@ -18,12 +18,14 @@ export interface Diagnostic extends ScalarRange {
   message_details: string;
   kind: string;
   severity: number;
+  tags: DiagnosticTag[];
   filename: string;
 }
-export default function init(input: {module_or_path: Uint8Array}): Promise<unknown>;
+export default function init(input: Uint8Array): Promise<unknown>;
 export class State {
   constructor(version: string);
-  updateSandboxFiles(files: Record<string, string>, forceUpdate: boolean): string | undefined;
+  free(): void;
+  updateSandboxFiles(files: Record<string, string>, forceUpdate: boolean): string | null;
   updateSingleFile(filename: string, content: string): void;
   setActiveFile(filename: string): void;
   pendingImports(): string[];

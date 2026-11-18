@@ -71,7 +71,7 @@ function publish(session: WebSession): void {
     list.push({
       range: toLspRange(item, text),
       message: item.message_header + (item.message_details ? '\n' + item.message_details : ''),
-      code: item.kind, source: 'Pyrefly', severity,
+      code: item.kind, source: 'Pyrefly', severity, tags: item.tags,
     });
     diagnostics.set(item.filename, list);
   }
@@ -126,7 +126,7 @@ connection.onRequest('initialize', async (params: InitializeParams): Promise<Ini
     wasmBytes: Uint8Array; projects: ProjectOptions[]; pythonVersion: string;
   };
   try {
-    await init({module_or_path: options.wasmBytes});
+    await init(options.wasmBytes);
   } catch (error) {
     throw new Error('Cannot initialize Pyrefly WASM: ' + String(error) +
       '. Run pyrefly_wasm/build.sh and rebuild the extension.');
@@ -136,13 +136,15 @@ connection.onRequest('initialize', async (params: InitializeParams): Promise<Ini
     projects.push(newSession(project));
   }
   const probe = new State('3.12');
+  const legend = probe.semanticTokensLegend();
+  probe.free();
   return {capabilities: {
     positionEncoding: 'utf-16',
     textDocumentSync: TextDocumentSyncKind.Full,
     completionProvider: {resolveProvider: false},
     hoverProvider: true, definitionProvider: true, inlayHintProvider: true,
     semanticTokensProvider: {
-      legend: probe.semanticTokensLegend(), full: true, range: true,
+      legend, full: true, range: true,
     },
   }};
 });

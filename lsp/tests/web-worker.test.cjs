@@ -184,6 +184,37 @@ test('invalid editor versions report configuration errors', {timeout: 30000}, as
     /Invalid Pyrefly Python version/);
 });
 
+test('workspace TOML controls diagnostics and reloads without opening the config', {timeout: 30000}, async t => {
+  const root = 'file:///workspace';
+  const configUri = root + '/pyrefly.toml';
+  const pyproject = '[tool.pyrefly.errors]\nbad-assignment = "error"\n';
+  const s = await server(t, [project(root, '3.12', {
+    'pyrefly.toml': '[errors]\nbad-assignment = "ignore"\n',
+    'pyproject.toml': pyproject,
+  })]);
+  const uri = root + '/main.py';
+  const source = 'value: int = "bad"\ndef f() -> int:\n    return "bad"\n';
+  s.open(uri, source);
+  await s.hover(uri, 0, 1);
+  assert.ok(s.diagnostics.get(uri).some(item => item.code === 'bad-return'));
+  assert.ok(!s.diagnostics.get(uri).some(item => item.code === 'bad-assignment'));
+  for (const [type, content, severity] of [
+    [2, '[errors]\nbad-assignment = "warn"\n', 2],
+    [3, null, 1],
+    [1, '[errors]\nbad-assignment = "ignore"\n', undefined],
+  ]) {
+    content === null ? s.disk.delete(configUri) : s.disk.set(configUri, content);
+    s.notify('workspace/didChangeWatchedFiles', {changes: [{uri: configUri, type}]});
+    await s.change(uri, source + '# edited\n');
+    const error = s.diagnostics.get(uri).find(item => item.code === 'bad-assignment');
+    assert.equal(error?.severity, severity);
+  }
+  s.disk.set(configUri, 'python-version = [');
+  s.notify('workspace/didChangeWatchedFiles', {changes: [{uri: configUri, type: 2}]});
+  await s.hover(uri, 0, 1);
+  assert.ok(s.diagnostics.get(configUri).some(item => item.code === 'parse-error'));
+});
+
 test('LSP completion kinds identify classes, functions, and methods', {timeout: 30000}, async t => {
   const s = await server(t);
   const uri = 'untitled:Kinds';
