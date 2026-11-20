@@ -21,6 +21,64 @@ y: tuple[int, Literal["3"]] = (1, "3")
 );
 
 testcase!(
+    test_tuple_literal_ordering,
+    r#"
+from enum import Enum
+from typing import Literal, LiteralString, assert_type
+
+assert_type((3, 12) < (3, 14), bool)
+assert_type((3, 12) <= (3, 14), bool)
+assert_type((3, 12) > (3, 14), bool)
+assert_type((3, 12) >= (3, 14), bool)
+assert_type(("a", "b") < ("a", "c"), bool)
+assert_type((b"a", b"b") <= (b"a", b"c"), bool)
+assert_type((False,) < (True,), bool)
+assert_type((3, 12) < (3, 14) < (3, 16), bool)
+assert_type(().__lt__((3, 14)), bool)
+assert_type((3, 12).__lt__((3, 14)), bool)
+assert_type((3, 12).__le__((3, 14)), bool)
+assert_type((3, 12).__gt__((3, 14)), bool)
+assert_type((3, 12).__ge__((3, 14)), bool)
+
+def explicit_literals(x: tuple[Literal[3], Literal[12]], y: tuple[Literal[3], Literal[14]]):
+    assert_type(x <= y, bool)
+    assert_type(x.__le__(y), bool)
+
+def variable_length(x: tuple[Literal[1], ...], y: tuple[Literal[2], ...]):
+    assert_type(x < y, bool)
+    assert_type(x.__lt__(y), bool)
+
+def literal_string(x: tuple[LiteralString], y: tuple[str]):
+    assert_type(x.__lt__(y), bool)
+
+(3, 12) < ("a", "b")  # E: `<` is not supported between
+(3, 12).__lt__(("a", "b"))  # E: Argument `tuple[Literal['a'], Literal['b']]` is not assignable
+(3, 12) <= 3  # E: `<=` is not supported between
+
+class Color(Enum):
+    RED = 1
+    BLUE = 2
+
+(Color.RED,) < (Color.BLUE,)  # E: `<` is not supported between
+"#,
+);
+
+testcase!(
+    test_tuple_ordering_protocol,
+    r#"
+from typing import Iterable, Iterator, Literal, Protocol, assert_type
+
+class CanCompareWithShape(Protocol):
+    def __lt__(self, other: tuple[int, ...], /) -> bool: ...
+
+shape: CanCompareWithShape = (1, 2, 3)
+values: Iterable[Literal["ok"]] = ("ok",)
+assert_type(("ok",).__iter__(), Iterator[Literal["ok"]])
+assert_type(("ok",).__getitem__(0), Literal["ok"])
+"#,
+);
+
+testcase!(
     test_index_literal,
     r#"
 from typing import assert_type, Literal
