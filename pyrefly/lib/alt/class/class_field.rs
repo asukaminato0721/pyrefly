@@ -5434,8 +5434,28 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if let Some(attribute) = self.get_django_instance_attribute(cls, name) {
             return Some(attribute);
         }
+        let cls = if cls.is(KnownClass::Tuple)
+            && matches!(name.as_str(), "__lt__" | "__le__" | "__gt__" | "__ge__")
+        {
+            // Builtin literal values compare with other values of the same element types.
+            // Preserve literal types for methods that return elements, such as `__iter__`.
+            Cow::Owned(self.stdlib.tuple(self.distribute_over_union(
+                &cls.targs().as_slice()[0],
+                |element| match element {
+                    Type::Literal(lit) if !matches!(lit.value, Lit::Enum(_)) => {
+                        lit.value.general_class_type(self.stdlib).clone().to_type()
+                    }
+                    Type::LiteralString(_) => self.heap.mk_class_type(self.stdlib.str().clone()),
+                    _ => element.clone(),
+                },
+            )))
+        } else {
+            Cow::Borrowed(cls)
+        };
         self.get_class_member(cls.class_object(), name)
-            .map(|field| self.as_instance_attribute(name, field.as_ref(), &Instance::of_class(cls)))
+            .map(|field| {
+                self.as_instance_attribute(name, field.as_ref(), &Instance::of_class(&cls))
+            })
     }
 
     /// Look up a special method, such as `__call__` or `__get__`, on instances of `cls`. A
