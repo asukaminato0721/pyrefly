@@ -120,7 +120,7 @@ class C:
     x: int = field()
     y: int = field(default=0)
 
-reveal_type(C.__init__)  # E: revealed type: (self: C, x: int, y: int = ...) -> None
+reveal_type(C.__init__)  # E: revealed type: (self: C, x: int, y: int = 0) -> None
 "#,
 );
 

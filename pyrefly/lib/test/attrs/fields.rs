@@ -1084,8 +1084,8 @@ class D(C, B):
 class D2(B, C):
     pass
 
-reveal_type(D.__init__)   # E: revealed type: (self: D, x: int, y: bool = ..., *, z: bool = ...) -> None
-reveal_type(D2.__init__)  # E: revealed type: (self: D2, x: int, y: bool = ..., *, z: bool = ...) -> None
+reveal_type(D.__init__)   # E: revealed type: (self: D, x: int, y: bool = True, *, z: bool = True) -> None
+reveal_type(D2.__init__)  # E: revealed type: (self: D2, x: int, y: bool = True, *, z: bool = True) -> None
 
 D(1)                     # OK
 D(1, y=False, z=False)   # OK
@@ -1109,7 +1109,7 @@ class A:
 class B(A):
     x: int = field(default=5)
 
-reveal_type(B.__init__)  # E: revealed type: (self: B, y: bool = ..., x: int = ...) -> None
+reveal_type(B.__init__)  # E: revealed type: (self: B, y: bool = True, x: int = 5) -> None
 "#,
 );
 
@@ -1146,8 +1146,8 @@ class D(B, C):
 class D2(C, B):  # E: without a default may not follow
     pass
 
-reveal_type(D.__init__)   # E: revealed type: (self: D, y: int, x: int = ..., z: int = ...) -> None
-reveal_type(D2.__init__)  # E: revealed type: (self: D2, x: int = ..., z: int = ..., y: int) -> None
+reveal_type(D.__init__)   # E: revealed type: (self: D, y: int, x: int = 0, z: int = 0) -> None
+reveal_type(D2.__init__)  # E: revealed type: (self: D2, x: int = 0, z: int = 0, y: int) -> None
 D(1)  # OK
 "#,
 );
@@ -1242,7 +1242,7 @@ class C:
     a: int = field(default=attr.NOTHING)
     b: int = field(default=5)
 
-reveal_type(C.__init__)  # E: revealed type: (self: C, a: int, b: int = ...) -> None
+reveal_type(C.__init__)  # E: revealed type: (self: C, a: int, b: int = 5) -> None
 "#,
 );
 
@@ -1367,7 +1367,7 @@ class Base:
 class Sub(Base):
     y: str = field(default="a")
 
-reveal_type(Sub.__init__)  # E: revealed type: (self: Sub, x: int, y: str = ...) -> None
+reveal_type(Sub.__init__)  # E: revealed type: (self: Sub, x: int, y: str = 'a') -> None
 "#,
 );
 
@@ -2370,7 +2370,7 @@ import attr
 class A:
     x, y, z = attr.ib(), attr.ib(type=int), attr.ib(default=17)
 
-reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: int, z: int = ...) -> None
+reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: int, z: int = 17) -> None
 A(1, 2, 3)  # OK
 "#,
 );
@@ -2554,7 +2554,7 @@ x = "outer"
 class A:
     x, y = attr.ib(), attr.ib(default=x)
 
-reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: str = ...) -> None
+reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: str = 'outer') -> None
 "#,
 );
 

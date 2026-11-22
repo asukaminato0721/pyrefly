@@ -372,7 +372,7 @@ class A:
     x: int = attr.ib()
     y: int | None = attr.ib(None)
 
-reveal_type(A.__init__)  # E: revealed type: (self: A, x: int, y: int | None = ...) -> None
+reveal_type(A.__init__)  # E: revealed type: (self: A, x: int, y: int | None = None) -> None
 "#,
 );
 
@@ -389,7 +389,7 @@ class A:
     x = attr.ib()  # !E: type annotation
     y = attr.ib(default=0)  # !E: type annotation
 
-reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: int = ...) -> None
+reveal_type(A.__init__)  # E: revealed type: (self: A, x: Any, y: int = 0) -> None
 A()  # E: Missing argument `x`
 "#,
 );

@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::env;
 use std::path::PathBuf;
 use std::slice;
 
@@ -4558,6 +4559,72 @@ result = [x for x in x if x in [1]]
         report.contains("__contains__"),
         "Second 'in' should show __contains__ hover, got: {report}"
     );
+}
+
+#[test]
+fn hover_shows_dataclass_field_defaults() {
+    let code = r#"
+from dataclasses import dataclass, field
+from typing import Literal
+
+def make_default() -> Literal[7]:
+    return 7
+
+@dataclass
+class Base:
+    name: str = field(default="example")
+
+@dataclass
+class Model(Base):
+    optional: str | None = field(default=None)
+    count: int = field(default=42, kw_only=True)
+    enabled: bool = field(default=False)
+    ratio: float = field(default=-1.5)
+    mode: int = field(default=0o777)
+    generated: int = field(default_factory=make_default)
+
+Model
+#^
+"#;
+    let report = get_batched_lsp_operations_report(&[("main", code)], get_test_report);
+    let compact = report.split_whitespace().collect::<String>();
+    for expected in [
+        "name:str='example'",
+        "optional:str|None=None",
+        "count:int=42",
+        "enabled:bool=False",
+        "ratio:float=-1.5",
+        "mode:int=0o777",
+        "generated:int=...",
+    ] {
+        assert!(
+            compact.contains(expected),
+            "Expected {expected}, got: {report}"
+        );
+    }
+}
+
+// Regression test for https://github.com/pyrefly-org/pyrefly/issues/4802.
+#[test]
+fn hover_shows_mapped_column_defaults() {
+    let code = r#"
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedAsDataclass, mapped_column
+from sqlalchemy.sql.sqltypes import String
+
+class Model(MappedAsDataclass, DeclarativeBase):
+    icon: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+
+Model
+#^
+"#;
+    let sqlalchemy_path =
+        env::var("SQLALCHEMY_TEST_PATH").expect("SQLALCHEMY_TEST_PATH must be set");
+    let mut env = TestEnv::new_with_site_package_paths(&[&sqlalchemy_path]);
+    env.add("main", code);
+    let (state, handle) = env.to_state();
+    let position = extract_cursors_for_test(code)[0];
+    let report = get_test_report(&state, &handle("main"), position);
+    assert!(report.contains("icon: str | None = None"), "{report}");
 }
 
 #[test]

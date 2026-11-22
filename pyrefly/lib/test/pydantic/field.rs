@@ -1774,7 +1774,7 @@ from pydantic import BaseModel, Field
 class Model(BaseModel):
     x: int = Field(init=False, default=0)
 
-reveal_type(Model.__init__)  # E: revealed type: (self: Model, *, x: LaxInt = ..., **Unknown) -> None
+reveal_type(Model.__init__)  # E: revealed type: (self: Model, *, x: LaxInt = 0, **Unknown) -> None
 "#,
 );
 
