@@ -646,6 +646,70 @@ assert_type(~c, Literal[100])
 );
 
 testcase!(
+    test_unary_dunders_metaclass,
+    r#"
+from typing import assert_type
+
+class Meta(type):
+    def __invert__(cls) -> str:
+        return ""
+    def __neg__(cls) -> bytes:
+        return b""
+    def __pos__(cls) -> float:
+        return 0.0
+
+class C(metaclass=Meta):
+    def __invert__(self) -> int:
+        return 0
+    def __neg__(self) -> int:
+        return 0
+    def __pos__(self) -> int:
+        return 0
+
+class D(C):
+    pass
+
+assert_type(~C, str)
+assert_type(-C, bytes)
+assert_type(+C, float)
+assert_type(~D, str)
+assert_type(-D, bytes)
+assert_type(+D, float)
+assert_type(~C(), int)
+assert_type(-C(), int)
+assert_type(+C(), int)
+
+def check_class(cls: type[C]) -> None:
+    assert_type(~cls, str)
+    assert_type(-cls, bytes)
+    assert_type(+cls, float)
+
+def check_subclass[T: C](cls: type[T]) -> None:
+    assert_type(~cls, str)
+    assert_type(-cls, bytes)
+    assert_type(+cls, float)
+    "#,
+);
+
+testcase!(
+    test_unary_dunders_metaclass_getattr,
+    r#"
+from typing import Callable
+
+class Meta(type):
+    def __getattr__(cls, name: str) -> Callable[[], int]:
+        return lambda: 0
+
+class C(metaclass=Meta):
+    pass
+
+~C  # E: Unary `~` is not supported on `type[C]`
+-C  # E: Unary `-` is not supported on `type[C]`
++C  # E: Unary `+` is not supported on `type[C]`
+    "#,
+);
+
+testcase!(
     test_unary_dunders_typevar_bound,
     r#"
 from typing import Self
