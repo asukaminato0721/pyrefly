@@ -1229,6 +1229,14 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     operand_range,
                 )
             };
+            let unsupported = || {
+                self.error(
+                    errors,
+                    x.range,
+                    ErrorKind::UnsupportedOperation,
+                    context().format(self),
+                )
+            };
             match t {
                 Type::Literal(lit) if let Some(ret) = f(&lit.value) => ret,
                 Type::ClassType(_)
@@ -1240,6 +1248,30 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 | Type::Intersect(_) => {
                     self.call_method_or_error(t, method, x.range, &[], &[], errors, Some(&context))
                 }
+                Type::ClassDef(_) | Type::Type(_) => self
+                    .type_of_magic_dunder_attr(
+                        t,
+                        method,
+                        x.range,
+                        errors,
+                        Some(&context),
+                        "Expr::unop_infer",
+                        // Operator lookup must not use __getattr__ or __getattribute__.
+                        false,
+                    )
+                    .map(|callee| {
+                        self.record_resolved_trace(x.range, &callee);
+                        self.make_call_target_and_call(
+                            callee,
+                            method,
+                            x.range,
+                            &[],
+                            &[],
+                            errors,
+                            Some(&context),
+                        )
+                    })
+                    .unwrap_or_else(unsupported),
                 Type::Literal(lit) if let Lit::Enum(lit_enum) = &lit.value => self
                     .call_method_or_error(
                         &self.heap.mk_class_type(lit_enum.class.clone()),
@@ -1252,12 +1284,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     ),
                 // A unary operator on an `Any` keeps its style, like a dunder call on one.
                 Type::Any(style) => Type::Any(*style),
-                _ => self.error(
-                    errors,
-                    x.range,
-                    ErrorKind::UnsupportedOperation,
-                    context().format(self),
-                ),
+                _ => unsupported(),
             }
         };
         self.distribute_over_union(t, |t| {

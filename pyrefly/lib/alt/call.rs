@@ -1249,7 +1249,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
     }
 
-    fn make_call_target_and_call(
+    pub fn make_call_target_and_call(
         &self,
         callee_ty: Type,
         method_name: &Name,
