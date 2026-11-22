@@ -10,7 +10,6 @@ use pyrefly_util::display::DisplayWithCtx;
 
 use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
-use crate::alt::answers_solver::CalcId;
 use crate::binding::binding::AnyIdx;
 use crate::binding::binding::Binding;
 use crate::binding::binding::Key;
@@ -84,8 +83,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 "(None)".to_owned()
             }
             // Only the bindings of this solver's module are at hand.
-            Some(CalcId(module, idx)) if module == self.module().key().exact() => {
-                dispatch_anyidx!(&idx, self, show_binding_for)
+            Some(calc_id) if self.is_same_module(&calc_id) => {
+                dispatch_anyidx!(&calc_id.1, self, show_binding_for)
             }
             Some(calc_id) => format!("{calc_id:?}"),
         }

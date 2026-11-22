@@ -28,6 +28,7 @@ use dupe::Dupe;
 use dupe::IterDupedExt;
 use fxhash::FxHashMap;
 use fxhash::FxHashSet;
+use pyrefly_build::handle::Handle;
 #[cfg(test)]
 use pyrefly_graph::calculation::Calculation;
 #[cfg(test)]
@@ -38,6 +39,8 @@ use pyrefly_python::module_key::ModuleKey;
 use pyrefly_python::module_name::ModuleName;
 #[cfg(test)]
 use pyrefly_python::module_path::ModulePath;
+#[cfg(test)]
+use pyrefly_python::sys_info::SysInfo;
 use pyrefly_types::class::ClassType;
 use pyrefly_types::heap::TypeHeap;
 use pyrefly_types::known_class::KnownClass;
@@ -142,35 +145,17 @@ impl<'a, 'subset> TypeCheckOptions<'a, 'subset> {
     }
 }
 
-/// Compactly represents the identity of a binding, for the purposes of
-/// understanding the calculation stack.
+/// Identifies a binding on the calculation stack.
 ///
-/// The module is compared exactly, so an open buffer and its file on disk are
-/// different modules here.
-#[derive(Clone, Dupe, PartialEq, Eq, Hash)]
-pub struct CalcId(pub ExactModuleKey, pub AnyIdx);
+/// The full handle distinguishes open buffers, disk files, and copies checked
+/// in different Python environments. Each copy has its own solver variables.
+#[derive(Clone, Dupe, Debug, PartialEq, Eq, Hash)]
+pub struct CalcId(pub Handle, pub AnyIdx);
 
-impl Debug for CalcId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let module = self.0.key();
-        write!(
-            f,
-            "CalcId({}, {}, {:?})",
-            module.name(),
-            module.path(),
-            self.1
-        )
-    }
-}
-
-/// Orders by index, then by module name and path, which is the same in every run.
+/// Orders by index, then by handle, which is the same in every run.
 impl Ord for CalcId {
     fn cmp(&self, other: &Self) -> Ordering {
-        let (module, other_module) = (self.0.key(), other.0.key());
-        self.1
-            .cmp(&other.1)
-            .then_with(|| module.name().cmp(&other_module.name()))
-            .then_with(|| module.path().cmp(other_module.path()))
+        self.1.cmp(&other.1).then_with(|| self.0.cmp(&other.0))
     }
 }
 
@@ -189,8 +174,8 @@ impl CalcId {
     #[cfg(test)]
     pub fn for_test(module_name: &str, idx: usize) -> Self {
         let path = ModulePath::filesystem(PathBuf::from(format!("/test/{module_name}.py")));
-        let module = ModuleKey::new(ModuleName::from_str(module_name), &path);
-        CalcId(module.exact(), AnyIdx::Key(Idx::new(idx)))
+        let handle = Handle::new(ModuleName::from_str(module_name), path, SysInfo::default());
+        CalcId(handle, AnyIdx::Key(Idx::new(idx)))
     }
 }
 
@@ -2744,7 +2729,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return (v, true);
         }
 
-        let current = CalcId(self.module().key().exact(), K::to_anyidx(idx));
+        let current = CalcId(self.answers.handle().dupe(), K::to_anyidx(idx));
 
         // Check depth limit before any calculation
         let borrowed = if let Some(config) = self.recursion_limit_config()
@@ -3149,8 +3134,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     }
 
     /// Returns true if the cell is same-module.
-    fn is_same_module(&self, calc_id: &CalcId) -> bool {
-        calc_id.0 == self.module().key().exact()
+    pub(crate) fn is_same_module(&self, calc_id: &CalcId) -> bool {
+        &calc_id.0 == self.answers.handle()
     }
 
     /// Reserve a single result slot for SCC publication.
@@ -3312,7 +3297,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
     /// Drive a single iteration member by calling `get_idx` for its typed index.
     ///
-    /// The member is a `CalcId` containing `(ExactModuleKey, AnyIdx)`. For same-module
+    /// The member is a `CalcId` containing `(Handle, AnyIdx)`. For same-module
     /// members (where the member's module matches this solver's module), we
     /// dispatch through `dispatch_anyidx!` to call `get_idx` with the concrete
     /// key type. Cross-module members are driven via `solve_idx_erased`, which
@@ -4334,6 +4319,7 @@ mod scc_tests {
     use std::panic::AssertUnwindSafe;
     use std::panic::catch_unwind;
 
+    use pyrefly_build::handle::SitePackagePath;
     use pyrefly_types::lit_int::LitInt;
     use vec1::vec1;
 
@@ -5215,12 +5201,40 @@ mod scc_tests {
         // same index in each is a different calculation.
         let name = ModuleName::from_str("foo");
         let path = PathBuf::from("/test/foo.py");
-        let disk = ModuleKey::new(name, &ModulePath::filesystem(path.clone()));
-        let memory = ModuleKey::new(name, &ModulePath::memory(path));
-        let disk_id = CalcId(disk.exact(), AnyIdx::Key(Idx::new(0)));
-        let memory_id = CalcId(memory.exact(), AnyIdx::Key(Idx::new(0)));
+        let disk = Handle::new(
+            name,
+            ModulePath::filesystem(path.clone()),
+            SysInfo::default(),
+        );
+        let memory = Handle::new(name, ModulePath::memory(path), SysInfo::default());
+        let disk_id = CalcId(disk.dupe(), AnyIdx::Key(Idx::new(0)));
+        let memory_id = CalcId(memory, AnyIdx::Key(Idx::new(0)));
         assert_ne!(disk_id, memory_id);
         assert_ne!(disk_id.cmp(&memory_id), Ordering::Equal);
-        assert_eq!(disk_id, CalcId(disk.exact(), AnyIdx::Key(Idx::new(0))));
+        assert_eq!(disk_id, CalcId(disk, AnyIdx::Key(Idx::new(0))));
+    }
+
+    #[test]
+    fn test_calc_id_keeps_python_environments_apart() {
+        let own = CalcId::for_test("lib", 0);
+        let imported = ["env_a", "env_b"].map(|path| {
+            CalcId(
+                own.0
+                    .dupe()
+                    .with_importer_site_package_path(Some(SitePackagePath::new(vec![
+                        PathBuf::from(path),
+                    ]))),
+                own.1.dupe(),
+            )
+        });
+        let stack = CalcStack::new();
+        for id in [&own, &imported[0], &imported[1]] {
+            stack.push_for_test(id.dupe());
+        }
+        assert!(stack.current_cycle().is_none());
+        assert_eq!(
+            BTreeSet::from([own, imported[0].dupe(), imported[1].dupe()]).len(),
+            3,
+        );
     }
 }

@@ -27,6 +27,7 @@ use std::time::Instant;
 
 use dupe::Dupe;
 use dupe::OptionDupedExt;
+use pyrefly_build::handle::Handle;
 use pyrefly_graph::index::Idx;
 use pyrefly_python::module_key::ModuleKey;
 use pyrefly_python::module_name::ModuleName;
@@ -1384,6 +1385,9 @@ impl LookupModule {
 }
 
 pub trait LookupAnswer: Sized {
+    /// The module and Python environment used by this lookup.
+    fn handle(&self) -> &Handle;
+
     /// Look up the value of `k` in `module`.
     ///
     /// Return None if the file is undergoing concurrent modification.

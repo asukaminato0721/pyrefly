@@ -3561,15 +3561,9 @@ impl<'a> TransactionHandle<'a> {
     /// This helper centralizes that logic and returns a `TargetAnswers`
     /// enum so callers only need to handle the "answers available" case.
     fn lookup_target_answers(&self, calc_id: &CalcId) -> TargetAnswers<'a> {
-        // Look up the target module. Use default ModuleDep since cross-module
-        // operations don't establish new dependencies.
-        let module_data = match self
-            .get_module(LookupModule::Exact(calc_id.0.key()), ModuleDep::Exists)
-            .finding()
-        {
-            Some(data) => data,
-            None => return TargetAnswers::ModuleNotFound,
-        };
+        // SCC operations must use the member's original Python environment.
+        // They do not establish new dependencies.
+        let module_data = self.transaction.get_imported_module(&calc_id.0);
 
         if let Some(answers) = module_data.state.get_answers() {
             TargetAnswers::Available {
@@ -3889,6 +3883,10 @@ impl<'a> LookupExport for TransactionHandle<'a> {
 }
 
 impl<'a> LookupAnswer for TransactionHandle<'a> {
+    fn handle(&self) -> &Handle {
+        &self.module_data.handle
+    }
+
     fn get<'answer, K: Solve<Self> + Exported>(
         &self,
         module: LookupModule,
