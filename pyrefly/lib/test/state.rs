@@ -2106,6 +2106,38 @@ fn import_handle(transaction: &Transaction, handle: &Handle, module: &str) -> Ha
         .unwrap()
 }
 
+/// Recursive imports can reach the same library file in two Python environments.
+#[test]
+fn test_recursive_library_in_distinct_environments() {
+    let temp_dir = TempDir::new().unwrap();
+    let root = temp_dir.path();
+    write_apps_and_library(root, &["../lib_env"]);
+    fs::write(
+        root.join("lib").join(ConfigFile::PYREFLY_FILE_NAME),
+        "site-packages-path = ['../lib_env']\nsearch-path = ['../app']\nskip-interpreter-query = true\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("lib").join("mylib.py"),
+        "from main import g\ndef f(x: int):\n    if x <= 0:\n        return 0\n    return g(x - 1)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app").join("main.py"),
+        "from mylib import f\ndef g(x: int):\n    return f(x)\n",
+    )
+    .unwrap();
+    let state = State::new(default_config_finder(None), "1".parse().unwrap());
+    let library = handle_from_module_path(
+        &state,
+        ModulePath::filesystem(root.join("lib").join("mylib.py")),
+    );
+    let mut transaction = state.new_transaction(Require::Exports, None);
+    transaction.run(&[library.dupe()], Require::Everything, None);
+    let errors = transaction.get_errors([&library]).collect_display_errors();
+    assert!(errors.is_empty(), "expected no errors, got {errors:?}");
+}
+
 /// A library with its own config and environment, found through an app's site-package path, is
 /// checked in the app's environment. The app's copy of the library resolves `dep` to the same
 /// module as the app, so passing the app's `dep.C` to it is not an error. Each app gets its own
