@@ -3503,15 +3503,24 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             IsInherited::Maybe
         };
         if !inferred_from_method
-            && inherited_annotation.is_some()
+            && let Some(annotation) = &inherited_annotation
             && let ExprOrBinding::Expr(expr) = value
         {
             let field_ty = self.attribute_expr_infer(expr, None, name, &self.error_swallower());
-            if matches!(&field_ty, Type::ClassType(cls)
-                if self.has_instance_special_method(cls, &dunder::GET))
+            if let Type::ClassType(cls) = &field_ty
+                && self.has_instance_special_method(cls, &dunder::GET)
+                && (self.has_instance_special_method(cls, &dunder::SET)
+                    || self.has_instance_special_method(cls, &dunder::DELETE)
+                    || annotation.ty.as_ref().is_none_or(|ty| {
+                        !ty.as_unions().iter().any(|member| {
+                            matches!(member, Type::ClassType(cls)
+                                    if self.has_instance_special_method(cls, &dunder::GET))
+                                && self.is_subset_eq(&field_ty, member)
+                        })
+                    }))
             {
-                // The initializer installs a descriptor, whose instance contract is checked by the
-                // override check. The inherited value annotation cannot type its initializer.
+                // An inherited descriptor type can type a compatible non-data descriptor.
+                // Other descriptors must preserve their instance contract through override checks.
                 return (
                     self.attribute_expr_infer(expr, None, name, errors),
                     None,
