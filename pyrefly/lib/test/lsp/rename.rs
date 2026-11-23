@@ -25,6 +25,7 @@ use crate::state::lsp::ImportBehavior;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::require::Require;
 use crate::state::state::State;
+use crate::test::pydantic::util::pydantic_env;
 use crate::test::util::TestEnv;
 use crate::test::util::code_frame_of_source_at_range;
 use crate::test::util::get_batched_lsp_operations_report;
@@ -812,6 +813,199 @@ Rename locations:
         .trim(),
         report.trim(),
     );
+}
+
+#[test]
+fn test_rename_dataclass_field_updates_keyword_arguments() {
+    let model = r#"
+from dataclasses import dataclass
+@dataclass
+class Region:
+    trigger: str
+
+region = Region(trigger='Hlt1')
+print(region.trigger)
+region.trigger = 'Hlt2'
+"#;
+    let unrelated = r#"
+@dataclass
+class Other:
+    trigger: str
+other = Other(trigger='other')
+print(other.trigger)
+
+class Explicit:
+    trigger: str
+    def __init__(self, trigger: str):
+        self.trigger = trigger
+Explicit(trigger='explicit')
+
+def function(trigger: str):
+    return trigger
+function(trigger='function')
+"#;
+    let source = format!("{model}{unrelated}");
+    for (position, _) in model.match_indices("trigger") {
+        assert_eq!(
+            rename_local_symbol(&source, position),
+            format!("{}{unrelated}", model.replace("trigger", "renamed")),
+        );
+    }
+}
+
+#[test]
+fn test_rename_member_does_not_change_aliased_constructor_keyword() {
+    for (member, call, target) in [
+        (
+            "    @property\n    def x(self) -> int: return self._x",
+            "C(x=1)",
+            "def x",
+        ),
+        (
+            "    x: int = model_field(alias=\"y\")",
+            "C(x=1, y=2)",
+            "    x: int",
+        ),
+    ] {
+        let source = format!(
+            r#"
+from typing import Any, dataclass_transform
+def model_field(*, alias: str | None = None) -> Any: ...
+@dataclass_transform(field_specifiers=(model_field,))
+def model(cls): return cls
+@model
+class C:
+    _x: int = model_field(alias="x")
+{member}
+{call}
+print({call}.x)
+"#
+        );
+        let expected = source
+            .replace("def x(", "def renamed(")
+            .replace("    x: int", "    renamed: int")
+            .replace(".x)", ".renamed)");
+        for position in [
+            source.find(target).unwrap() + 4,
+            source.rfind(".x").unwrap() + 1,
+        ] {
+            assert_eq!(rename_local_symbol(&source, position), expected);
+        }
+    }
+}
+
+#[test]
+fn test_rename_property_does_not_change_attrs_constructor_keyword() {
+    let source = r#"
+import attrs
+@attrs.define
+class C:
+    _x: int
+    @property
+    def x(self) -> int: return self._x
+C(x=1)
+print(C(x=1).x)
+"#;
+    let path = std::env::var("ATTRS_TEST_PATH").unwrap();
+    let mut env = TestEnv::new_with_site_package_paths(&[&path]);
+    env.add("main", source);
+    let (state, handle) = env.to_state();
+    let handle = handle("main");
+    let expected = source
+        .replace("def x(", "def renamed(")
+        .replace(".x)", ".renamed)");
+    for position in [
+        source.find("x(self)").unwrap(),
+        source.rfind(".x").unwrap() + 1,
+    ] {
+        let ranges = state.transaction().find_local_references(
+            &handle,
+            TextSize::try_from(position).unwrap(),
+            ReferenceOptions::textual_only(true),
+        );
+        let mut renamed = source.to_owned();
+        for range in ranges.into_iter().rev() {
+            renamed.replace_range(Range::<usize>::from(range), "renamed");
+        }
+        assert_eq!(renamed, expected);
+    }
+}
+
+#[test]
+fn test_rename_model_field_updates_other_files() {
+    for (env, declaration) in [
+        (
+            TestEnv::new(),
+            "from dataclasses import dataclass\n@dataclass\nclass Region:\n    trigger: str\n",
+        ),
+        (
+            pydantic_env(),
+            "from pydantic import BaseModel\nclass Region(BaseModel):\n    trigger: str\n",
+        ),
+    ] {
+        let source = format!(
+            "{declaration}\nregion = Region(trigger='Hlt1')\nprint(region.trigger)\nregion.trigger = 'Hlt2'\n"
+        );
+        let consumer = "from model import Region\n\nregion = Region(trigger='Hlt1')\nprint(region.trigger)\nregion.trigger = 'Hlt2'\n";
+        let root = TempDir::new().unwrap();
+        let mut env = env
+            .with_default_require_level(Require::Indexing)
+            .with_run_require(Require::Indexing);
+        for (name, code) in [("model", source.as_str()), ("consumer", consumer)] {
+            let path = root.path().join(format!("{name}.py"));
+            fs::write(&path, code).unwrap();
+            env.add_real_path(name, path);
+        }
+        let (state, handle) = env.to_state();
+        let consumer_handle = handle("consumer");
+        for (name, code) in [("model", source.as_str()), ("consumer", consumer)] {
+            let handle = handle(name);
+            let mut transaction = state.transaction();
+            transaction.run(&[handle.dupe()], Require::Everything, None);
+            for (position, _) in code.match_indices("trigger") {
+                let definition = transaction
+                    .find_definition(
+                        &handle,
+                        TextSize::try_from(position).unwrap(),
+                        FindPreference::default(),
+                    )
+                    .unwrap()
+                    .first()
+                    .clone();
+                let references = transaction
+                    .find_global_references_from_definition(
+                        *handle.sys_info(),
+                        definition.metadata,
+                        TextRangeWithModule::new(definition.module, definition.definition_range),
+                        ReferenceOptions::textual_only(true),
+                    )
+                    .unwrap();
+                let mut renamed = Vec::new();
+                for (module, ranges) in references {
+                    let mut code = module.contents().as_str().to_owned();
+                    for range in ranges.into_iter().rev() {
+                        code.replace_range(Range::<usize>::from(range), "renamed");
+                    }
+                    renamed.push((module.name().to_string(), code));
+                }
+                renamed.sort();
+                assert_eq!(
+                    renamed,
+                    vec![
+                        (
+                            "consumer".to_owned(),
+                            consumer.replace("trigger", "renamed")
+                        ),
+                        ("model".to_owned(), source.replace("trigger", "renamed")),
+                    ],
+                );
+                if name == "model" {
+                    assert!(transaction.get_ast(&consumer_handle).is_none());
+                    assert!(transaction.get_answers(&consumer_handle).is_none());
+                }
+            }
+        }
+    }
 }
 
 #[test]
