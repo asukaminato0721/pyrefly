@@ -51,6 +51,8 @@ use crate::alt::answers_solver::ReservedSlot;
 use crate::alt::answers_solver::ThreadState;
 use crate::alt::attr::AttrDefinition;
 use crate::alt::attr::AttrInfo;
+use crate::alt::class::attrs::AttrsInitName;
+use crate::alt::class::class_field::DataclassMember;
 use crate::alt::traits::Solve;
 use crate::binding::binding::AnyIdx;
 use crate::binding::binding::Exported;
@@ -118,6 +120,8 @@ pub struct Index {
     pub constructor_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// Literal slot occurrences, including attributes declared in this module.
     pub slot_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
+    /// Constructor keywords that refer to class fields, including fields defined in this module.
+    pub keyword_argument_references: SmallMap<ModulePath, Vec<(IndexedAttribute, TextRange)>>,
     /// A map from (child method range) to a list of parent method definitions (ModulePath, parent method).
     /// This is used to find reimplementations when doing find-references on parent methods.
     pub parent_methods_map: SmallMap<TextRange, Vec<(ModulePath, IndexedAttribute)>>,
@@ -153,6 +157,8 @@ pub enum AttributeReferenceKind {
     ConstructorCall,
     /// A literal name in the owning class's `__slots__` binding.
     Slot,
+    /// A keyword argument to a synthesized initializer that refers to a class field.
+    KeywordArgument,
 }
 
 /// Visiting a trace store reaches every type recorded in it.
@@ -2095,6 +2101,26 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             return;
         }
         if let Some(index) = &self.current().index {
+            if let (AttributeReferenceKind::KeywordArgument, Type::ClassDef(cls)) =
+                (reference_kind, base)
+            {
+                let metadata = self.get_metadata_for_class(cls);
+                let is_field_parameter = metadata.dataclass_metadata().is_some_and(|dataclass| {
+                    dataclass.fields.contains_key(attribute_name)
+                        && matches!(
+                            self.get_dataclass_member(cls, attribute_name),
+                            DataclassMember::Field(_, flags) | DataclassMember::InitVar(_, flags)
+                                if flags.init_by_name && (flags.init || metadata.is_pydantic_model())
+                        )
+                        && !matches!(
+                            self.attrs_init_param_name(cls, attribute_name, dataclass),
+                            AttrsInitName::Renamed(_)
+                        )
+                });
+                if !is_field_parameter {
+                    return;
+                }
+            }
             for AttrInfo {
                 name,
                 ty: _,
@@ -2113,6 +2139,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         AttributeReferenceKind::Slot => index
                             .lock()
                             .slot_references
+                            .entry(cls.module_path().dupe())
+                            .or_default()
+                            .push((
+                                IndexedAttribute {
+                                    cls: cls.index(),
+                                    name,
+                                },
+                                attribute_reference_range,
+                            )),
+                        AttributeReferenceKind::KeywordArgument => index
+                            .lock()
+                            .keyword_argument_references
                             .entry(cls.module_path().dupe())
                             .or_default()
                             .push((

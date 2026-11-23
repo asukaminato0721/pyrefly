@@ -2279,6 +2279,21 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         ctor_targs: Option<&mut TArgs>,
     ) -> CallOutcome {
         let metadata = call_target.function_metadata();
+        if let Some(FunctionKind::Synthesized(symbol)) = metadata.map(|meta| &meta.kind)
+            && symbol.name == dunder::INIT
+            && let Some(cls) = &symbol.cls
+        {
+            for keyword in keywords {
+                if let Some(name) = keyword.arg {
+                    self.record_attribute_definition_index(
+                        &Type::ClassDef(*cls),
+                        &name.id,
+                        name.range,
+                        AttributeReferenceKind::KeywordArgument,
+                    );
+                }
+            }
+        }
         if let Some(meta) = metadata
             && meta.flags.is_abstract_method
             && matches!(
