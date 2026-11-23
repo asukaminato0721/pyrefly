@@ -794,6 +794,98 @@ class B(A):
     "#,
 );
 
+// https://github.com/pyrefly-org/pyrefly/issues/5725
+testcase!(
+    test_descriptor_override_preserves_inherited_union,
+    r#"
+from typing import Any, Self, assert_type
+
+class Descriptor:
+    def __get__(self, instance: object, owner: type[Any] | None = None) -> Self:
+        return self
+
+class Base:
+    x: Descriptor | None = None
+
+class Child(Base):
+    x = Descriptor()
+
+class Grandchild(Child):
+    x = Descriptor()
+
+def f(child: Child, grandchild: Grandchild) -> None:
+    assert_type(child.x, Descriptor | None)
+    assert_type(grandchild.x, Descriptor | None)
+    child.x = Descriptor()
+    child.x = None
+    grandchild.x = Descriptor()
+    grandchild.x = None
+    child.x = 1  # E: `Literal[1]` is not assignable to attribute `x` with type `Descriptor | None`
+"#,
+);
+
+testcase!(
+    test_descriptor_override_preserves_generic_union,
+    r#"
+from typing import Self, assert_type
+
+class Descriptor[T]:
+    def __get__(self, instance: object, owner: type | None = None) -> Self:
+        return self
+
+class Base[T]:
+    x: Descriptor[T] | list[T] | None = None
+
+class Child(Base[int]):
+    x = Descriptor[int]()
+
+def f(child: Child) -> None:
+    assert_type(child.x, Descriptor[int] | list[int] | None)
+    child.x = Descriptor[int]()
+    child.x = [1]
+    child.x = None
+    child.x = ["bad"]  # E: not assignable
+"#,
+);
+
+testcase!(
+    test_descriptor_override_preserves_instance_contract,
+    r#"
+from typing import Protocol, Self
+
+class SetDescriptor:
+    def __get__(self, instance: object, owner: type | None = None) -> int: ...
+    def __set__(self, instance: object, value: int) -> None: ...
+
+class DeleteDescriptor:
+    def __get__(self, instance: object, owner: type | None = None) -> Self:
+        return self
+    def __delete__(self, instance: object) -> None: ...
+
+class HasValue(Protocol):
+    value: int
+
+class NonDataDescriptor:
+    value: int = 0
+    def __get__(self, instance: object, owner: type | None = None) -> int: ...
+
+class Base:
+    set_value: object
+    delete_value: object
+    protocol_value: HasValue | None
+
+class Child(Base):
+    set_value = SetDescriptor()  # E: not assignable from `object`
+    delete_value = DeleteDescriptor()  # E: `Child.delete_value` is read-only, but `Base.delete_value` is read-write
+    protocol_value = NonDataDescriptor()  # E: `int`, which is not assignable to `HasValue | None`
+
+def f(child: Child) -> None:
+    child.set_value = 1
+    child.set_value = "bad"  # E: not assignable
+    child.delete_value = DeleteDescriptor()  # E: is a read-only descriptor
+"#,
+);
+
 testcase!(
     test_annotated_descriptor_override_error,
     r#"
