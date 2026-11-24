@@ -1585,7 +1585,10 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         let check = annotated
             .filter(|ty| ty.contains_type_variable())
             .map(|ty| (ty, &tcc as _));
-        DataclassFieldDefault::Value(self.infer_checked_default(value, check, errors))
+        DataclassFieldDefault::Value {
+            ty: self.infer_checked_default(value, check, errors),
+            display: default_display_for_expr(value, self.module().code_at(value.range())),
+        }
     }
 
     /// Determine the type and required-ness of a parameter.
@@ -1646,16 +1649,19 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                 {
                     // Docstrings rarely say that a parameter defaulting to `None` is optional.
                     match &required {
-                        Required::Optional(Some(default_val)) if default_val.ty.is_none() => {
+                        Required::Optional(Some(default_val))
+                            if default_val.ty.as_ref().is_some_and(Type::is_none) =>
+                        {
                             self.union(ty, self.heap.mk_none())
                         }
                         _ => ty,
                     }
-                } else if let Required::Optional(Some(default_val)) = &required {
+                } else if let Required::Optional(Some(default_val)) = &required
+                    && let Some(default_ty) = &default_val.ty
+                {
                     self.union(
                         self.heap.mk_any_implicit(),
-                        default_val
-                            .ty
+                        default_ty
                             .clone()
                             .with_literal_style(LitStyle::Implicit)
                             .promote(self.stdlib),
@@ -2946,7 +2952,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     Param::PosOnly(Some(name), _, Required::Optional(Some(default)))
                     | Param::Pos(name, _, Required::Optional(Some(default)))
                     | Param::KwOnly(name, _, Required::Optional(Some(default))) => {
-                        Some((name, &default.ty))
+                        default.ty.as_ref().map(|ty| (name, ty))
                     }
                     _ => None,
                 })

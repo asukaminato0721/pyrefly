@@ -522,9 +522,12 @@ impl<'a> MemberRenderer<'a> {
                         display: Some(text),
                         ..
                     }) => self.text(text),
-                    Some(DefaultValue { ty: Type::None, .. }) => self.text("None"),
                     Some(DefaultValue {
-                        ty: Type::Literal(literal),
+                        ty: Some(Type::None),
+                        ..
+                    }) => self.text("None"),
+                    Some(DefaultValue {
+                        ty: Some(Type::Literal(literal)),
                         ..
                     }) if !matches!(literal.value, Lit::Enum(_)) => {
                         self.text(&literal.value.display_with(self.env).to_string());

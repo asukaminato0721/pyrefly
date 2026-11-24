@@ -2247,15 +2247,18 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             }
         }
         for (name, ty, default) in default_check {
+            let Some(default_ty) = &default.ty else {
+                continue;
+            };
             // `ty` may contain type variables, so we record quantified bounds from the default and
             // check for inconsistent solutions. We mark any literals in the default as implicit so
             // that ordinary type variables get solved to promoted types (`int` rather than
             // `Literal[N]`). A shape-extension restriction's single binding source preserves the
             // literal instead.
             let default_ty = if call_context.is_shape_extension_var_type(ty) {
-                default.ty.clone()
+                default_ty.clone()
             } else {
-                default.ty.clone().with_literal_style(LitStyle::Implicit)
+                default_ty.clone().with_literal_style(LitStyle::Implicit)
             };
             self.check_type_with_options(
                 &default_ty,

@@ -4306,7 +4306,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         };
         let param_ty = param_type_transform(param_ty);
         let required = match &default {
-            Some(default) => default.to_required(&param_ty),
+            Some(default) => default.to_required(&param_ty, self),
             None => Required::Required,
         };
         if kw_only {

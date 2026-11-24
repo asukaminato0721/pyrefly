@@ -459,11 +459,11 @@ pub enum Param {
     Kwargs(Option<Name>, Type),
 }
 
-/// The default value of an optional parameter, containing its type and an optional
-/// display string for values whose types don't preserve the literal value (e.g. floats).
+/// This stores type and display information for an optional parameter's default.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TypeOrd)]
 pub struct DefaultValue {
-    pub ty: Type,
+    /// Call solving uses this type. `None` means that the default provides display information only.
+    pub ty: Option<Type>,
     /// Display string for defaults that can't be recovered from the type alone,
     /// e.g. `"3.14"` for float literals whose type is just `float`.
     pub display: Option<String>,
@@ -498,13 +498,26 @@ impl TypeEq for DefaultValue {
 
 impl DefaultValue {
     pub fn new(ty: Type) -> Self {
-        Self { ty, display: None }
+        Self {
+            ty: Some(ty),
+            display: None,
+        }
     }
 
     pub fn with_display(ty: Type, display: String) -> Self {
         Self {
-            ty,
+            ty: Some(ty),
             display: Some(display),
+        }
+    }
+
+    /// This formats the default from its display text or recorded type.
+    pub fn fmt_default(&self, env: &dyn TypeEnv) -> String {
+        match (&self.display, &self.ty) {
+            (Some(text), _) => text.clone(),
+            (_, Some(Type::Literal(lit))) => lit.value.display_with(env).to_string(),
+            (_, Some(Type::None)) => "None".to_owned(),
+            _ => "...".to_owned(),
         }
     }
 }
@@ -887,18 +900,9 @@ impl Callable {
 
 impl Param {
     pub(crate) fn fmt_default(&self, default: &Option<DefaultValue>, env: &dyn TypeEnv) -> String {
-        match default {
-            Some(DefaultValue {
-                display: Some(text),
-                ..
-            }) => text.clone(),
-            Some(DefaultValue {
-                ty: Type::Literal(lit),
-                ..
-            }) => lit.value.display_with(env).to_string(),
-            Some(DefaultValue { ty: Type::None, .. }) => "None".to_owned(),
-            _ => "...".to_owned(),
-        }
+        default
+            .as_ref()
+            .map_or_else(|| "...".to_owned(), |default| default.fmt_default(env))
     }
 
     pub fn fmt_with_type<O: TypeOutput>(
@@ -1237,6 +1241,19 @@ mod tests {
     }
 
     #[test]
+    fn test_display_only_default_has_no_visited_type() {
+        let mut default = DefaultValue {
+            ty: None,
+            display: Some("0".to_owned()),
+        };
+        let mut visited = Vec::new();
+        default.visit(&mut |ty: &Type| visited.push(ty.clone()));
+        assert!(visited.is_empty());
+        default.visit_mut(&mut |_: &mut Type| panic!("Display text has no type to mutate"));
+        assert_eq!(default.display.as_deref(), Some("0"));
+    }
+
+    #[test]
     fn test_default_value_visit_mut_delegates_to_ty() {
         let q = Quantified::new(
             QuantifiedIdentity::new(
@@ -1257,7 +1274,7 @@ mod tests {
         default.visit_mut(&mut |ty: &mut Type| {
             *ty = Type::None;
         });
-        assert_eq!(default.ty, Type::None);
+        assert_eq!(default.ty, Some(Type::None));
         // Display metadata should be unaffected.
         assert_eq!(default.display, Some("default".to_owned()));
     }

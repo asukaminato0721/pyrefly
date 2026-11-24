@@ -1018,7 +1018,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     | Param::KwOnly(name, ty, Required::Required) => (name, ty, None),
                     Param::Pos(name, ty, Required::Optional(default))
                     | Param::KwOnly(name, ty, Required::Optional(default)) => {
-                        (name, ty, default.as_ref().map(|d| &d.ty))
+                        (name, ty, default.as_ref().and_then(|d| d.ty.as_ref()))
                     }
                     _ => continue,
                 };

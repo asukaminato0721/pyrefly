@@ -236,7 +236,8 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                 _ => None,
             };
             if let Some(default) = runtime_default
-                && !lower_index_type(&default.ty).is_valid()
+                && let Some(default_ty) = &default.ty
+                && !lower_index_type(default_ty).is_valid()
             {
                 self.error(
                     errors,
@@ -245,7 +246,7 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                     format!(
                         "Default for parameter binding `Index` type parameter `{}` is not a valid index value: `{}`",
                         tparam.name(),
-                        default.ty.display_with(self),
+                        default_ty.display_with(self),
                     ),
                 );
             }

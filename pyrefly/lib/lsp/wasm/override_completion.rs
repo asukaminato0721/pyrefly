@@ -164,7 +164,7 @@ impl<'a, 'state> OverrideCompletion<'a, 'state> {
             | Param::KwOnly(_, _, Required::Optional(default)) = param
             {
                 // Forwarding must not replace a parent's default with a placeholder.
-                match &default.as_ref()?.ty {
+                match default.as_ref()?.ty.as_ref()? {
                     Type::None => {}
                     Type::Literal(lit) if !matches!(lit.value, Lit::Enum(_)) => {}
                     _ => return None,

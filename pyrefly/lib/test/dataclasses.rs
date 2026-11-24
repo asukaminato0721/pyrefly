@@ -11,6 +11,43 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_dataclass_defaults_do_not_make_constructor_partially_unknown,
+    TestEnv::new().enable_partially_unknown_type_error(),
+    r#"
+from dataclasses import dataclass, field
+from typing import Callable
+
+@dataclass
+class C:
+    value: int = 0
+
+@dataclass
+class D:
+    value: int = field(default=0)
+    values: list[int] = field(default_factory=list)
+
+init: Callable[[C, int], None] = C.__init__
+field_init: Callable[[D, int, list[int]], None] = D.__init__
+C()
+D()
+"#,
+);
+
+testcase!(
+    test_dataclass_default_display_does_not_check_unprovided_argument,
+    r#"
+from dataclasses import dataclass, field
+from typing import Literal, Sequence
+
+@dataclass
+class C:
+    values: Sequence[Literal["enabled"]] = field(default=("enabled",))
+
+C()
+"#,
+);
+
+testcase!(
     test_def,
     r#"
 from typing import assert_type

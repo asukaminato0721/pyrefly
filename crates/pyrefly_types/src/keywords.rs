@@ -247,7 +247,7 @@ pub enum DataclassFieldDefault {
     Unknown,
     /// A default value of this type. Like a function parameter default, it may solve type
     /// variables in the field's type.
-    Value(Type),
+    Value { ty: Type, display: Option<String> },
     /// A default factory that returns this type. It does not solve type variables, because the
     /// factory is inferred without the field's type as context.
     Factory(Type),
@@ -257,16 +257,20 @@ impl DataclassFieldDefault {
     /// The recorded type, when there is one.
     pub fn as_type(&self) -> Option<&Type> {
         match self {
-            Self::Value(ty) | Self::Factory(ty) => Some(ty),
+            Self::Value { ty, .. } | Self::Factory(ty) => Some(ty),
             Self::Unknown => None,
         }
     }
 
     /// A default value is passed to call solving only when it can solve a type variable in the
     /// parameter type.
-    pub fn to_required(&self, param_ty: &Type) -> Required {
-        let Self::Value(ty) = self else {
+    pub fn to_required(&self, param_ty: &Type, env: &dyn TypeEnv) -> Required {
+        let Self::Value { ty, display } = self else {
             return Required::Optional(None);
+        };
+        let mut default = DefaultValue {
+            ty: Some(ty.clone()),
+            display: display.clone(),
         };
         let mut quantifieds = SmallSet::new();
         param_ty.collect_quantifieds(&mut quantifieds);
@@ -276,10 +280,10 @@ impl DataclassFieldDefault {
                 .iter()
                 .any(|q| q.kind() == QuantifiedKind::IntVar)
         {
-            Required::Optional(None)
-        } else {
-            Required::Optional(Some(DefaultValue::new(ty.clone())))
+            default.display = Some(default.fmt_default(env));
+            default.ty = None;
         }
+        Required::Optional(Some(default))
     }
 }
 

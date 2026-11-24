@@ -238,7 +238,8 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                     } else {
                         let source = &sources[0];
                         if let Required::Optional(Some(default)) = &source.required
-                            && !domain.accepts_literal(&default.ty)
+                            && let Some(default_ty) = &default.ty
+                            && !domain.accepts_literal(default_ty)
                         {
                             self.error(
                                 errors,
@@ -247,7 +248,7 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                                 format!(
                                     "Default for parameter binding `Flag[{domain}]` type parameter `{}` must be a `{domain}` literal, got `{}`",
                                     tparam.name(),
-                                    default.ty.display_with(self),
+                                    default_ty.display_with(self),
                                 ),
                             );
                         }
@@ -370,7 +371,8 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                 _ => None,
             };
             if let Some(default) = runtime_default
-                && !domain.accepts_literal(&default.ty)
+                && let Some(default_ty) = &default.ty
+                && !domain.accepts_literal(default_ty)
             {
                 self.error(
                     errors,
@@ -379,7 +381,7 @@ impl<Ans: LookupAnswer> AnswersSolver<'_, '_, Ans> {
                     format!(
                         "Default for parameter binding `Flag[{domain}]` type parameter `{}` must be a `{domain}` literal, got `{}`",
                         tparam.name(),
-                        default.ty.display_with(self),
+                        default_ty.display_with(self),
                     ),
                 );
             }
