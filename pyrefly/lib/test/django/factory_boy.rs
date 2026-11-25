@@ -8,6 +8,45 @@
 use crate::factory_boy_testcase;
 
 factory_boy_testcase!(
+    test_post_generation_model,
+    r#"
+from typing import assert_type
+import factory
+from django.db import models
+from factory.django import DjangoModelFactory
+
+class Tag(models.Model):
+    name = models.CharField(max_length=10)
+
+class Company(models.Model):
+    name = models.CharField(max_length=10)
+
+class Owner(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.CASCADE)
+
+class Item(models.Model):
+    owner = models.ForeignKey(Owner, on_delete=models.CASCADE)
+    tags = models.ManyToManyField(Tag)
+
+class ItemFactory(DjangoModelFactory):
+    owner = factory.LazyAttribute(lambda o: Owner())
+
+    class Meta:
+        model = Item
+
+    @factory.post_generation
+    def tags(self, create, extracted, **kwargs):
+        assert_type(self, Item)
+        self.tags.add(Tag())
+        assert_type(self.owner.company, Company)
+
+    @factory.post_generation
+    def annotated(self: Item, create, extracted, **kwargs):
+        assert_type(self, Item)
+"#,
+);
+
+factory_boy_testcase!(
     test_create_returns_model,
     r#"
 from typing import assert_type
