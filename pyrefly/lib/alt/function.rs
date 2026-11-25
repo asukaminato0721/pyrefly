@@ -703,6 +703,16 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             self_type = None;
         }
 
+        if let Some(cls) = &defining_cls
+            && self.is_factory_boy_post_generation(cls, &decorators)
+        {
+            // Post-generation callbacks receive the model instance, not the factory.
+            self_type = Some(
+                self.get_factory_model_type(cls)
+                    .unwrap_or_else(|| self.heap.mk_any_implicit()),
+            );
+        }
+
         // Methods with an implicit receiver need a positional parameter (or `*args`)
         // for it. Covers classmethods, instance methods, and `__new__` (an implicit
         // staticmethod that still takes `cls`). Skip `@no_type_check` for ordinary
@@ -1117,7 +1127,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                         allow_subclass_receiver,
                         errors,
                     );
-                } else if !def.metadata.flags.is_staticmethod {
+                } else if !def.metadata.flags.is_staticmethod
+                    && !self.is_factory_boy_post_generation(cls, &def.decorators)
+                {
                     self.validate_self_annotation(
                         cls,
                         &stmt.name.id,

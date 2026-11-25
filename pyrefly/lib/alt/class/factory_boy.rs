@@ -31,7 +31,7 @@ const BUILD_BATCH: Name = Name::new_static("build_batch");
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
     /// Synthesize `create`, `build`, `create_batch`, `build_batch`, and
-    /// `__new__` on factory-boy `DjangoModelFactory` subclasses, returning the
+    /// `__new__` on factory-boy `Factory` subclasses, returning the
     /// model type from `class Meta: model = X`.
     pub fn get_factory_boy_synthesized_fields(
         &self,
@@ -41,6 +41,8 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         if !metadata.is_factory_boy_factory() {
             return None;
         }
+        // Factories that inherit `Meta` get the parent's synthesized methods via MRO.
+        self.get_non_synthesized_field_from_current_class_only(cls, &META)?;
         let model_type = self.get_factory_model_type(cls)?;
         let list_model_type = self
             .heap
@@ -90,11 +92,22 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         Some(ClassSynthesizedFields::new(fields))
     }
 
-    /// Extract the model type from `class Meta: model = X` defined directly on this class.
-    fn get_factory_model_type(&self, cls: &Class) -> Option<Type> {
-        // Factories that inherit `Meta` without overriding it get the parent's
-        // synthesized methods via MRO, so we skip synthesis here.
-        let meta_field = self.get_non_synthesized_field_from_current_class_only(cls, &META)?;
+    /// Identify callbacks that factory-boy calls with the produced model as their first argument.
+    pub fn is_factory_boy_post_generation(
+        &self,
+        cls: &Class,
+        decorators: &[(Type, usize)],
+    ) -> bool {
+        decorators.iter().any(|(ty, _)| {
+            ty.toplevel_func_metadata()
+                .and_then(|meta| meta.kind.as_func_def_id())
+                .is_some_and(|id| id.has_toplevel_qname("factory.helpers", "post_generation"))
+        }) && self.get_metadata_for_class(cls).is_factory_boy_factory()
+    }
+
+    /// Extract the model type from `class Meta: model = X`, including inherited `Meta` classes.
+    pub fn get_factory_model_type(&self, cls: &Class) -> Option<Type> {
+        let meta_field = self.get_non_synthesized_class_member(cls, &META)?;
         let meta_class = match meta_field.ty() {
             Type::ClassDef(cls) => cls,
             _ => return None,
