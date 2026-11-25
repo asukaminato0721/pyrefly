@@ -621,10 +621,16 @@ fn pytest_conftest_parametrize_respects_direct_and_indirect_arguments() {
     for (arguments, indirect) in [
         ("\"answer\", [42]", false),
         ("argnames=\"answer\", argvalues=[42]", false),
-        ("[\"answer\"], [42], indirect=False", false),
+        ("[\"answer\"], [(42,)], indirect=False", false),
+        ("(\"answer\",), [pytest.param(42)]", false),
         ("\"answer\", [42], indirect=True", true),
         ("\"answer\", [42], indirect=[\"answer\"]", true),
+        ("argnames=\"answer\", argvalues=[42], indirect=True", true),
+        ("\"answer\", [42], indirect=[]", false),
+        ("\"answer\", [42], indirect=(\"answer\",)", true),
         ("\"answer, other\", [(42, 0)], indirect=[\"other\"]", false),
+        ("\"answer, other\", [(42, 0)], indirect=[\"answer\"]", true),
+        ("\"answer\", [42], **{\"indirect\": True}", true),
     ] {
         let code = format!(
             "import pytest\n@pytest.mark.parametrize({arguments})\ndef test_value(answer, other=None):\n    assert answer == 42\n"

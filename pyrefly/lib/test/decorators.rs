@@ -2770,9 +2770,17 @@ class MarkDecorator:
     def __call__[T](self, func: T) -> T: ...
 
 class MarkGenerator:
-    def parametrize(self, argnames: object, argvalues: object) -> MarkDecorator: ...
+    def parametrize(self, argnames: object, argvalues: object, indirect: object = False) -> MarkDecorator: ...
 
 mark: MarkGenerator
+
+class ParameterSet: ...
+def param(*values: object, marks: object = (), id: str | None = None) -> ParameterSet: ...
+
+class FixtureRequest:
+    param: object
+
+def fixture[T](func: T) -> T: ...
 "#,
     )
 }
@@ -2795,6 +2803,163 @@ from typing import assert_type
 def test_oauth_error(exception, expected_error) -> None:
     assert_type(exception, Exception | KeyError | ValueError)
     assert_type(expected_error, str)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_single_argument_forms,
+    env_pytest_parametrize(),
+    r#"
+import pytest
+from typing import assert_type
+
+@pytest.mark.parametrize("x", [(1,), (2,)])
+def test_string(x) -> None:
+    assert_type(x, tuple[int])
+
+@pytest.mark.parametrize(["x"], [(1,), (2,)])
+def test_list(x) -> None:
+    assert_type(x, int)
+
+@pytest.mark.parametrize(("x",), [[1], [2]])
+def test_tuple(x) -> None:
+    assert_type(x, int)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_indirect,
+    env_pytest_parametrize(),
+    r#"
+import pytest
+from typing import Any, assert_type
+
+@pytest.fixture
+def value(request: pytest.FixtureRequest) -> str:
+    return str(request.param)
+
+@pytest.mark.parametrize("value", [1], indirect=True)
+def test_fixture(value) -> None:
+    assert_type(value, Any)
+    assert value.upper() == "1"
+
+@pytest.mark.parametrize("value, direct", [(1, "text")], indirect=["value"])
+def test_partial(value, direct) -> None:
+    assert_type(value, Any)
+    assert_type(direct, str)
+
+@pytest.mark.parametrize("value", [1], indirect=False)
+def test_direct(value) -> None:
+    assert_type(value, int)
+
+@pytest.mark.parametrize("value", [1], True)
+def test_positional(value) -> None:
+    assert_type(value, Any)
+
+def unknown_indirect() -> bool: ...
+
+@pytest.mark.parametrize("value", [1], indirect=unknown_indirect())
+def test_unknown(value) -> None:
+    assert_type(value, Any)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_parameter_sets,
+    env_pytest_parametrize(),
+    r#"
+import pytest as pt
+from pytest import param as parameter
+from typing import assert_type
+
+@pt.mark.parametrize("x", [pt.param(1, id="one"), 2])
+def test_single(x) -> None:
+    assert_type(x, int)
+
+@pt.mark.parametrize(["x"], [pt.param((1,), id="tuple")])
+def test_tuple_value(x) -> None:
+    assert_type(x, tuple[int])
+
+@pt.mark.parametrize("x, y", [pt.param(1, "one"), (2, "two"), parameter(3, "three")])
+def test_multiple(x, y) -> None:
+    assert_type(x, int)
+    assert_type(y, str)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_keywords_and_methods,
+    env_pytest_parametrize(),
+    r#"
+from pytest import mark
+from pytest import mark as m
+from typing import Self, assert_type
+
+@mark.parametrize(argnames="x", argvalues=[1, 2])
+def test_keywords(x) -> None:
+    assert_type(x, int)
+
+class TestValues:
+    @m.parametrize(argvalues=[(1, "one")], argnames=("x", "y"))
+    def test_method(self, x, *, y) -> None:
+        assert_type(self, Self)
+        assert_type(x, int)
+        assert_type(y, str)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_separate_decorator_hints,
+    env_pytest_parametrize(),
+    r#"
+import pytest
+from typing import Callable, assert_type
+
+def typed(func: Callable[[int, str, bool], None]) -> Callable[[int, str, bool], None]:
+    return func
+
+@typed
+@pytest.mark.parametrize("x", [1])
+def test_hints(x, y, z) -> None:
+    assert_type(x, int)
+    assert_type(y, str)
+    assert_type(z, bool)
+
+@pytest.mark.parametrize("x", [1, 2])
+@pytest.mark.parametrize("y", ["one", "two"])
+def test_stacked(x, y) -> None:
+    assert_type(x, int)
+    assert_type(y, str)
+"#,
+);
+
+testcase!(
+    test_pytest_parametrize_unsupported_rows,
+    env_pytest_parametrize(),
+    r#"
+import pytest
+from typing import Any, assert_type
+
+@pytest.mark.parametrize("x, y", [(1, "one"), (2,)])
+def test_wrong_length(x, y) -> None:
+    assert_type(x, Any)
+    assert_type(y, Any)
+
+@pytest.mark.parametrize(["x"], [pytest.param(1, 2)])
+def test_wrong_parameter_set(x) -> None:
+    assert_type(x, Any)
+
+def rows() -> list[tuple[int, str]]: ...
+
+@pytest.mark.parametrize("x, y", rows())
+def test_dynamic_rows(x, y) -> None:
+    assert_type(x, Any)
+    assert_type(y, Any)
+
+@pytest.mark.parametrize("x, y", [*rows()])
+def test_starred_rows(x, y) -> None:
+    assert_type(x, Any)
+    assert_type(y, Any)
 "#,
 );
 

@@ -5,6 +5,8 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+use std::slice;
+
 use pyrefly_graph::index::Idx;
 use pyrefly_python::short_identifier::ShortIdentifier;
 use ruff_python_ast::Expr;
@@ -23,6 +25,7 @@ pub struct PytestAliases {
     pytest_module_aliases: Vec<String>,
     fixture_aliases: Vec<String>,
     mark_aliases: Vec<String>,
+    param_aliases: Vec<String>,
 }
 
 impl PytestAliases {
@@ -62,6 +65,9 @@ impl PytestAliases {
                         } else if module.id == "pytest" && alias.name.id == "mark" {
                             let local_name = alias.asname.as_ref().unwrap_or(&alias.name);
                             aliases.mark_aliases.push(local_name.id.to_string());
+                        } else if module.id == "pytest" && alias.name.id == "param" {
+                            let local_name = alias.asname.as_ref().unwrap_or(&alias.name);
+                            aliases.param_aliases.push(local_name.id.to_string());
                         }
                     }
                 }
@@ -72,7 +78,10 @@ impl PytestAliases {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pytest_module_aliases.is_empty() && self.fixture_aliases.is_empty()
+        self.pytest_module_aliases.is_empty()
+            && self.fixture_aliases.is_empty()
+            && self.mark_aliases.is_empty()
+            && self.param_aliases.is_empty()
     }
 
     fn is_pytest_module_alias(&self, name: &Name) -> bool {
@@ -88,7 +97,7 @@ impl PytestAliases {
     }
 
     /// Recognize parametrization through pytest module and mark aliases.
-    pub(crate) fn is_parametrize(&self, expr: &Expr) -> bool {
+    fn is_parametrize(&self, expr: &Expr) -> bool {
         let Expr::Attribute(attr) = expr else {
             return false;
         };
@@ -104,6 +113,122 @@ impl PytestAliases {
                 _ => false,
             }
     }
+
+    fn is_param(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(name) => self
+                .param_aliases
+                .iter()
+                .any(|alias| alias == name.id.as_str()),
+            Expr::Attribute(attr) if attr.attr.id == "param" => {
+                matches!(attr.value.as_ref(), Expr::Name(name) if self.is_pytest_module_alias(name.id()))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A parsed parametrization separates direct values from fixture inputs.
+pub(crate) struct PytestParametrization<'a> {
+    names: Vec<Name>,
+    indirect: Vec<Name>,
+    values: &'a Expr,
+    single_value: bool,
+}
+
+impl<'a> PytestParametrization<'a> {
+    pub(crate) fn parse(expr: &'a Expr, aliases: &PytestAliases) -> Option<Self> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        if !aliases.is_parametrize(&call.func)
+            || call
+                .arguments
+                .args
+                .iter()
+                .any(|arg| matches!(arg, Expr::Starred(_)))
+            || call.arguments.keywords.iter().any(|kw| kw.arg.is_none())
+        {
+            return None;
+        }
+        let argnames = call.arguments.find_argument_value("argnames", 0)?;
+        let names = parametrize_names(argnames)?;
+        let values = call.arguments.find_argument_value("argvalues", 1)?;
+        let indirect = match call.arguments.find_argument_value("indirect", 2) {
+            None => Vec::new(),
+            Some(Expr::BooleanLiteral(value)) if !value.value => Vec::new(),
+            Some(Expr::BooleanLiteral(_)) => names.clone(),
+            Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => parametrize_names(expr)?,
+            _ => return None,
+        };
+        let single_value = matches!(argnames, Expr::StringLiteral(_)) && names.len() == 1;
+        Some(Self {
+            names,
+            indirect,
+            values,
+            single_value,
+        })
+    }
+
+    pub(crate) fn direct_parameters(&self) -> impl Iterator<Item = (usize, &Name)> {
+        self.names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !self.indirect.contains(name))
+    }
+
+    /// Return complete rows, or skip inference when a row cannot be interpreted safely.
+    pub(crate) fn rows(&self, aliases: &PytestAliases) -> Option<Vec<&'a [Expr]>> {
+        let rows = match self.values {
+            Expr::List(list) => &list.elts,
+            Expr::Tuple(tuple) => &tuple.elts,
+            _ => return None,
+        };
+        rows.iter()
+            .map(|row| {
+                let values = match row {
+                    Expr::Call(call) if aliases.is_param(&call.func) => {
+                        call.arguments.args.as_ref()
+                    }
+                    Expr::Starred(_) => return None,
+                    _ if self.single_value => slice::from_ref(row),
+                    Expr::Tuple(tuple) => &tuple.elts,
+                    Expr::List(list) => &list.elts,
+                    _ => return None,
+                };
+                (values.len() == self.names.len()
+                    && !values.iter().any(|value| matches!(value, Expr::Starred(_))))
+                .then_some(values)
+            })
+            .collect()
+    }
+}
+
+fn parametrize_names(expr: &Expr) -> Option<Vec<Name>> {
+    let elts = match expr {
+        Expr::StringLiteral(lit) => {
+            let names = lit
+                .value
+                .to_str()
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(Name::new)
+                .collect::<Vec<_>>();
+            return (!names.is_empty()).then_some(names);
+        }
+        Expr::Tuple(tuple) => &tuple.elts,
+        Expr::List(list) => &list.elts,
+        _ => return None,
+    };
+    elts.iter()
+        .map(|elt| match elt {
+            Expr::StringLiteral(lit) if !lit.value.to_str().is_empty() => {
+                Some(Name::new(lit.value.to_str()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -193,26 +318,6 @@ pub fn is_pytest_fixture_function(function_def: &StmtFunctionDef, aliases: &Pyte
         .decorator_list
         .iter()
         .any(|decorator| is_pytest_fixture_decorator(&decorator.expression, aliases))
-}
-
-pub fn is_pytest_parametrize_decorator(expr: &Expr, aliases: &PytestAliases) -> bool {
-    let Expr::Call(call) = expr else {
-        return false;
-    };
-    let Expr::Attribute(parametrize) = call.func.as_ref() else {
-        return false;
-    };
-    if parametrize.attr.id() != "parametrize" {
-        return false;
-    }
-    let Expr::Attribute(mark) = parametrize.value.as_ref() else {
-        return false;
-    };
-    mark.attr.id() == "mark"
-        && matches!(
-            mark.value.as_ref(),
-            Expr::Name(base) if aliases.is_pytest_module_alias(base.id())
-        )
 }
 
 pub(crate) fn is_pytest_fixture_decorator(expr: &Expr, aliases: &PytestAliases) -> bool {

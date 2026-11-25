@@ -25,6 +25,7 @@ use crate::binding::binding::KeyClass;
 use crate::binding::bindings::Bindings;
 use crate::binding::pytest::PytestAliases;
 use crate::binding::pytest::PytestBindingInfo;
+use crate::binding::pytest::PytestParametrization;
 use crate::binding::pytest::is_pytest_fixture_decorator;
 
 #[derive(Clone, Debug)]
@@ -345,24 +346,6 @@ pub(crate) fn collect_pytest_fixture_definitions(stmts: &[Stmt]) -> Vec<PytestFi
         .collect()
 }
 
-fn parametrize_names_contain(expr: &Expr, name: &Name) -> bool {
-    let values = match expr {
-        Expr::StringLiteral(value) => {
-            return value
-                .value
-                .to_str()
-                .split(',')
-                .any(|part| part.trim() == name.as_str());
-        }
-        Expr::List(list) => &list.elts,
-        Expr::Tuple(tuple) => &tuple.elts,
-        _ => return false,
-    };
-    values.iter().any(|value| {
-        matches!(value, Expr::StringLiteral(value) if value.value.to_str() == name.as_str())
-    })
-}
-
 /// Direct parametrization supplies values instead of requesting a fixture.
 pub(crate) fn is_directly_parametrized(
     module: &ModModule,
@@ -383,22 +366,13 @@ pub(crate) fn is_directly_parametrized(
     }
     let aliases = PytestAliases::from_module(module);
     decorators.any(|decorator| {
-        let Expr::Call(call) = &decorator.expression else {
-            return false;
-        };
-        if !aliases.is_parametrize(&call.func) {
-            return false;
-        }
-        let argnames = call.arguments.find_argument_value("argnames", 0);
-        if !argnames.is_some_and(|argnames| parametrize_names_contain(argnames, name)) {
-            return false;
-        }
-        match call.arguments.find_argument_value("indirect", 2) {
-            None => true,
-            Some(Expr::BooleanLiteral(value)) => !value.value,
-            Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => !parametrize_names_contain(expr, name),
-            _ => false,
-        }
+        PytestParametrization::parse(&decorator.expression, &aliases).is_some_and(
+            |parametrization| {
+                parametrization
+                    .direct_parameters()
+                    .any(|(_, parameter)| parameter == name)
+            },
+        )
     })
 }
 
