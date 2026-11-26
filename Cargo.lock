@@ -61,6 +61,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
+name = "annotate-snippets"
+version = "0.12.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0258346f92c78dbc5b336b9a5b27c64447aa10643bc64e651db2edb145361564"
+dependencies = [
+ "anstyle",
+ "memchr",
+ "unicode-width",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2315,6 +2326,7 @@ checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
 name = "pyrefly"
 version = "1.6.0-dev.1"
 dependencies = [
+ "annotate-snippets",
  "anstream",
  "anyhow",
  "append-only-vec",
@@ -2359,7 +2371,6 @@ dependencies = [
  "pyrefly_util",
  "rayon",
  "regex",
- "ruff_annotate_snippets",
  "ruff_notebook",
  "ruff_python_ast",
  "ruff_python_parser",
@@ -2762,17 +2773,6 @@ name = "regex-syntax"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
-
-[[package]]
-name = "ruff_annotate_snippets"
-version = "0.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebab7d58665c8c52763027c776f11a17c6e3bbcbcdfe027b68d89d8daa6a5918"
-dependencies = [
- "anstyle",
- "memchr",
- "unicode-width",
-]
 
 [[package]]
 name = "ruff_cache"

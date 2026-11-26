@@ -7,11 +7,11 @@
 
 use std::ops::Range;
 
-use ruff_annotate_snippets::AnnotationKind;
-use ruff_annotate_snippets::Group;
-use ruff_annotate_snippets::Level as SnippetLevel;
-use ruff_annotate_snippets::Renderer as SnippetRenderer;
-use ruff_annotate_snippets::Snippet as SnippetBlock;
+use annotate_snippets::AnnotationKind;
+use annotate_snippets::Group;
+use annotate_snippets::Level as SnippetLevel;
+use annotate_snippets::Renderer as SnippetRenderer;
+use annotate_snippets::Snippet as SnippetBlock;
 
 use crate::solver::solver::ParamsSubsetError;
 
@@ -251,7 +251,7 @@ fn mismatch_spans(
 /// part is highlighted. Otherwise, or when the failing parameters cannot be located in the
 /// displayed signatures, the textual differences between the signatures are highlighted.
 ///
-/// Uses `ruff_annotate_snippets` to produce caret-underline annotations, then
+/// Uses `annotate_snippets` to produce caret-underline annotations, then
 /// strips the line-number gutter from the rendered output. Returns `None` if
 /// signature parsing fails or if there are no differences to annotate.
 ///

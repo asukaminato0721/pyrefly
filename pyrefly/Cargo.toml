@@ -45,6 +45,7 @@ name = "tsp"
 harness = false
 
 [dependencies]
+annotate-snippets = "0.12.18"
 anstream = "1.0.0"
 anyhow = "1.0.104"
 append-only-vec = "0.1.10"
@@ -83,7 +84,6 @@ pyrefly_types = { path = "../crates/pyrefly_types" }
 pyrefly_util = { path = "../crates/pyrefly_util" }
 rayon = "1.11.0"
 regex = "1.13.1"
-ruff_annotate_snippets = { package = "ruff_annotate_snippets", version = "0.0.23" }
 ruff_notebook = "0.0.23"
 ruff_python_ast = { version = "0.0.23", features = ["serde"] }
 ruff_python_parser = { version = "0.0.23", features = ["stacker"] }
