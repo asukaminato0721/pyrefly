@@ -598,6 +598,13 @@ pub enum DjangoSpecialization<'a> {
         set_type: &'a Type,
         override_type: &'a Type,
     },
+    /// An expression source, explicit output type and aggregate default. `None` marks an
+    /// absent output type or default. Sources can refer to fields in the receiving query.
+    Expression {
+        source: &'a Type,
+        output_type: &'a Type,
+        default: &'a Type,
+    },
 }
 
 impl ClassType {
@@ -687,6 +694,17 @@ impl ClassType {
             self.1.with_specialization(
                 SpecializationKind::Field,
                 [get_type, set_type, override_type],
+            ),
+        )
+    }
+
+    /// Retain expression arguments until the receiving query supplies the model.
+    pub fn with_django_expression(self, source: Type, output_type: Type, default: Type) -> Self {
+        Self(
+            self.0,
+            self.1.with_specialization(
+                SpecializationKind::DjangoExpression,
+                [source, output_type, default],
             ),
         )
     }

@@ -350,13 +350,15 @@ pub(crate) enum SpecializationKind {
     EffectiveBase,
     /// The read, assignment and override types of a field.
     Field,
+    /// The source, explicit output type and default of a Django expression.
+    DjangoExpression,
 }
 
 impl SpecializationKind {
     fn len(self) -> usize {
         match self {
             Self::PartialMethod | Self::Queryset | Self::TargetPkType | Self::EffectiveBase => 1,
-            Self::Field => 3,
+            Self::Field | Self::DjangoExpression => 3,
         }
     }
 }
@@ -380,7 +382,8 @@ impl Visit<Type> for TArgs {
             Some(
                 SpecializationKind::PartialMethod
                 | SpecializationKind::TargetPkType
-                | SpecializationKind::Field,
+                | SpecializationKind::Field
+                | SpecializationKind::DjangoExpression,
             ) => specialization.iter().for_each(|ty| ty.visit(f)),
         }
     }
@@ -406,7 +409,8 @@ impl VisitMut<Type> for TArgs {
             Some(
                 SpecializationKind::PartialMethod
                 | SpecializationKind::TargetPkType
-                | SpecializationKind::Field,
+                | SpecializationKind::Field
+                | SpecializationKind::DjangoExpression,
             ) => specialization.iter_mut().for_each(|ty| ty.visit_mut(f)),
         }
     }
@@ -500,6 +504,13 @@ impl TArgs {
                     get_type,
                     set_type,
                     override_type,
+                }
+            }
+            (SpecializationKind::DjangoExpression, [source, output_type, default]) => {
+                DjangoSpecialization::Expression {
+                    source,
+                    output_type,
+                    default,
                 }
             }
             _ => unreachable!("a specialization has as many types as its kind fixes"),

@@ -147,6 +147,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         &self,
         callee: &Type,
         arguments: &Arguments,
+        errors: &ErrorCollector,
     ) -> Option<DjangoAnnotateCall> {
         let metadata = callee.toplevel_func_metadata()?.clone();
         if !Self::is_django_annotate(&metadata) {
@@ -154,14 +155,12 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
 
         let mut attributes = TypeMap::new();
-        // Positional annotations are out of scope because their generated names require Django
-        // expression semantics. Every explicit keyword still introduces a statically known name,
-        // although the expression object's type is not generally the value type Django produces.
+        // Positional annotations require Django's generated expression aliases.
         for keyword in &arguments.keywords {
             if let Some(name) = &keyword.arg {
                 attributes
                     .0
-                    .insert(name.id.clone(), self.heap.mk_any_implicit());
+                    .insert(name.id.clone(), self.expr_infer(&keyword.value, errors));
             }
         }
         if attributes.0.is_empty() {
@@ -199,7 +198,15 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         }
         let annotation = self.heap.mk_kw_call(KwCall {
             func_metadata: call.metadata,
-            keywords: call.attributes,
+            keywords: TypeMap(
+                call.attributes
+                    .0
+                    .into_iter()
+                    .map(|(name, expression)| {
+                        (name, self.django_expression_type(&expression, &row))
+                    })
+                    .collect(),
+            ),
             return_ty: row.clone(),
         });
         // The intersection preserves call-site metadata while generic QuerySet operations use the
@@ -211,6 +218,243 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
             queryset = queryset.with_django_base(base);
         }
         self.heap.mk_class_type(queryset)
+    }
+
+    /// Preserve constructor arguments whose meaning depends on the receiving query.
+    pub(crate) fn apply_django_expression_call(
+        &self,
+        result: Type,
+        callee: &Type,
+        arguments: &Arguments,
+        errors: &ErrorCollector,
+    ) -> Type {
+        let Type::ClassType(expression) = &result else {
+            return result;
+        };
+        if self.unwrap_class_object_silently(callee).is_none()
+            || !(expression.is(KnownClass::DjangoF)
+                || self
+                    .get_mro_for_class(expression.class_object())
+                    .ancestors(self.stdlib)
+                    .any(|base| {
+                        base.is(KnownClass::DjangoBaseExpression) || base.is(KnownClass::DjangoF)
+                    }))
+        {
+            return result;
+        }
+        let source = arguments
+            .find_argument_value(
+                if expression.is(KnownClass::DjangoF) {
+                    "name"
+                } else {
+                    "value"
+                },
+                0,
+            )
+            .map(|expr| self.expr_infer(expr, errors))
+            .unwrap_or_else(|| self.heap.mk_any_implicit());
+        let output_field = if expression.is(KnownClass::DjangoValue)
+            || expression.is(KnownClass::DjangoExpressionWrapper)
+            || expression.is(KnownClass::DjangoCast)
+        {
+            arguments.find_argument_value("output_field", 1)
+        } else {
+            arguments.find_keyword("output_field").map(|kw| &kw.value)
+        };
+        let output_type = output_field
+            .map(|expr| self.django_expression_field_type(&self.expr_infer(expr, errors)))
+            .unwrap_or_else(|| self.heap.mk_none());
+        let default = arguments
+            .find_keyword("default")
+            .map(|kw| self.expr_infer(&kw.value, errors))
+            .unwrap_or_else(|| self.heap.mk_none());
+        self.heap
+            .mk_class_type(
+                expression
+                    .clone()
+                    .with_django_expression(source, output_type, default),
+            )
+    }
+
+    /// Read an expression's output field without requiring a model declaration.
+    fn django_expression_field_type(&self, field: &Type) -> Type {
+        let field = self.solver().force(field.clone(), self);
+        if field.is_none() {
+            return self.heap.mk_none();
+        }
+        if let Type::ClassType(field) = &field
+            && self.inherits_from_django_field(field.class_object())
+        {
+            for (param, arg) in field.targs().iter_paired() {
+                let arg = self.solver().force(arg.clone(), self);
+                if param.name().as_str() == "_GT" && !matches!(arg, Type::Any(AnyStyle::Implicit)) {
+                    return arg;
+                }
+            }
+            if let Some(member) =
+                self.get_class_member(field.class_object(), &DJANGO_PRIVATE_GET_TYPE)
+            {
+                return member.ty();
+            }
+        }
+        self.heap.mk_any_implicit()
+    }
+
+    /// Resolve supported expressions to database values in the receiving row.
+    fn django_expression_type(&self, expression: &Type, row: &Type) -> Type {
+        self.distribute_over_union(expression, |expression| {
+            let Type::ClassType(cls) = expression else {
+                return self.heap.mk_any_implicit();
+            };
+            let ancestors = self.get_mro_for_class(cls.class_object());
+            let is = |known| {
+                cls.is(known) || ancestors.ancestors(self.stdlib).any(|base| base.is(known))
+            };
+            let (source, output_type, default) = match cls.django_specialization() {
+                Some(DjangoSpecialization::Expression {
+                    source,
+                    output_type,
+                    default,
+                }) => {
+                    (source.clone(), output_type.clone(), default.clone())
+                }
+                _ => (
+                    self.heap.mk_any_implicit(),
+                    self.heap.mk_none(),
+                    self.heap.mk_none(),
+                ),
+            };
+            let mut ty = if !output_type.is_none() {
+                output_type
+            } else if is(KnownClass::DjangoF) {
+                return self.django_expression_reference(&source, row);
+            } else if is(KnownClass::DjangoValue) {
+                let source = source.promote(self.stdlib);
+                match &source {
+                    Type::None => source,
+                    Type::ClassType(value)
+                        if matches!(
+                            value.known(),
+                            Some(
+                                KnownClass::Bool
+                                    | KnownClass::Bytes
+                                    | KnownClass::Float
+                                    | KnownClass::Int
+                                    | KnownClass::Str
+                                    | KnownClass::Decimal
+                                    | KnownClass::Datetime
+                                    | KnownClass::DatetimeDate
+                                    | KnownClass::DatetimeTime
+                                    | KnownClass::DatetimeTimedelta
+                            )
+                        ) => source,
+                    _ => self.heap.mk_any_implicit(),
+                }
+            } else {
+                let field = self.attr_infer_for_type(
+                    expression,
+                    &Name::new_static("output_field"),
+                    TextRange::default(),
+                    &self.error_swallower(),
+                    None,
+                );
+                let output = self.django_expression_field_type(&field);
+                if !output.is_any() {
+                    output
+                } else if is(KnownClass::DjangoSum)
+                    || is(KnownClass::DjangoMin)
+                    || is(KnownClass::DjangoMax)
+                {
+                    if matches!(&source, Type::Literal(lit) if matches!(&lit.value, Lit::Str(_))) {
+                        self.django_expression_reference(&source, row)
+                    } else {
+                        self.django_expression_type(&source, row)
+                    }
+                } else {
+                    self.heap.mk_any_implicit()
+                }
+            };
+            if is(KnownClass::DjangoAggregate) && !is(KnownClass::DjangoCount) {
+                let default = if matches!(
+                    &default,
+                    Type::ClassType(cls)
+                        if matches!(cls.django_specialization(), Some(DjangoSpecialization::Expression { .. }))
+                ) {
+                    self.django_expression_type(&default, row)
+                } else {
+                    default
+                };
+                if default.is_none()
+                    || default.is_any()
+                    || matches!(&default, Type::Union(union) if union.members.iter().any(Type::is_none))
+                {
+                    ty = self.union(ty, self.heap.mk_none());
+                } else if let Type::Union(union) = ty {
+                    ty = self.unions(
+                        union.members.into_iter().filter(|member| !member.is_none()).collect(),
+                    );
+                }
+            }
+            ty
+        })
+    }
+
+    /// Resolve a literal Django field path, including traversal through related managers.
+    fn django_expression_reference(&self, source: &Type, row: &Type) -> Type {
+        let Type::Literal(lit) = source else {
+            return self.heap.mk_any_implicit();
+        };
+        let Lit::Str(path) = &lit.value else {
+            return self.heap.mk_any_implicit();
+        };
+        let mut ty = row.clone();
+        for part in path.split("__") {
+            ty = self.distribute_over_union(&ty, |base| {
+                if base.is_none() {
+                    return base.clone();
+                }
+                let related_manager = self.is_django_manager_type(base);
+                let base = if related_manager && let Type::ClassType(cls) = base {
+                    self.get_mro_for_class(cls.class_object())
+                        .ancestors(self.stdlib)
+                        .find(|base| base.is(KnownClass::DjangoBaseManager))
+                        .map(|base| base.substitute_with(&cls.substitution(), self))
+                        .and_then(|base| base.targs().as_slice().first().cloned())
+                        .unwrap_or_else(|| self.heap.mk_any_implicit())
+                } else {
+                    base.clone()
+                };
+                let ty = self.attr_infer_for_type(
+                    &base,
+                    &Name::new(part),
+                    TextRange::default(),
+                    &self.error_swallower(),
+                    None,
+                );
+                if related_manager {
+                    // A reverse relation can have no matching rows in a left join.
+                    self.union(ty, self.heap.mk_none())
+                } else {
+                    ty
+                }
+            });
+        }
+        self.distribute_over_union(&ty, |ty| {
+            if let Type::ClassType(cls) = ty
+                && self
+                    .get_metadata_for_class(cls.class_object())
+                    .is_django_model()
+            {
+                // A query returns a relation's stored key, rather than a model instance.
+                self.get_pk_field_type(cls.class_object())
+                    .map(|(ty, _)| ty)
+                    .unwrap_or_else(|| self.heap.mk_any_implicit())
+            } else if self.is_django_manager_type(ty) {
+                self.heap.mk_any_implicit()
+            } else {
+                ty.clone()
+            }
+        })
     }
 
     fn is_django_model_row(&self, ty: &Type) -> bool {
@@ -756,6 +1000,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         name: &Name,
     ) -> Option<ClassAttribute> {
         match cls.django_specialization()? {
+            DjangoSpecialization::Expression { .. } => None,
             DjangoSpecialization::Field {
                 get_type,
                 set_type,
