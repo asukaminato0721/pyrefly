@@ -5263,8 +5263,8 @@ impl<'a> Transaction<'a> {
     ) -> Option<Vec<TextRange>> {
         let mut references = Vec::new();
         if let Some(mod_module) = self.get_ast(handle) {
-            let is_valid_key = |key: &Key| {
-                if let Some((def_handle, Export { location, .. })) = self
+            let local_definition_range = |key: &Key| {
+                let (def_handle, export) = self
                     .find_export_for_key(
                         handle,
                         key,
@@ -5274,14 +5274,47 @@ impl<'a> Transaction<'a> {
                             ..Default::default()
                         },
                     )
-                    .unwrap_or(None)
-                    && def_handle.path() == handle.path()
-                    && location == definition_range
-                {
-                    true
-                } else {
-                    false
+                    .ok()??;
+                (def_handle.path() == handle.path()).then_some(export.location)
+            };
+            let mut definition_ranges = HashSet::from([definition_range]);
+            if let Some(answers) = self.get_answers(handle) {
+                let bindings = answers.bindings();
+                // An Anywhere binding groups all assignments to one name in one scope.
+                // References must include every assignment, regardless of the current flow.
+                for idx in bindings.keys::<Key>() {
+                    if let Key::Anywhere(name_and_range) = bindings.idx_to_key(idx)
+                        && &name_and_range.0 == expected_name
+                    {
+                        let Binding::Phi(_, branches) = bindings.get(idx) else {
+                            unreachable!("An Anywhere binding must merge assignments");
+                        };
+                        if branches.iter().any(|branch| {
+                            bindings.idx_to_key(branch.value_key).range() == definition_range
+                        }) {
+                            definition_ranges.extend(
+                                branches
+                                    .iter()
+                                    .map(|branch| bindings.idx_to_key(branch.value_key))
+                                    .filter(|key| local_definition_range(key).is_some())
+                                    .map(Ranged::range)
+                                    .filter(|range| {
+                                        bindings.module().code_at(*range) == expected_name.as_str()
+                                    }),
+                            );
+                        }
+                    }
                 }
+            }
+            references.extend(
+                definition_ranges
+                    .iter()
+                    .copied()
+                    .filter(|range| *range != definition_range),
+            );
+            let is_valid_key = |key: &Key| {
+                local_definition_range(key)
+                    .is_some_and(|location| definition_ranges.contains(&location))
             };
             if let Some(answers) = self.get_answers(handle) {
                 let bindings = answers.bindings();

@@ -4853,7 +4853,7 @@ def foo():
         apply_first_invert_boolean_action(code, selection).expect("expected invert-boolean action");
     let expected = r#"
 def foo():
-    abc = True
+    abc = False
     abc = True
     return (not abc)
 "#;

@@ -1135,6 +1135,99 @@ fn rename_local_symbol(source: &str, position: usize) -> String {
 }
 
 #[test]
+fn test_rename_variable_across_branches() {
+    let source = r#"
+def consume(val: object, wgt: object) -> None: ...
+
+def f(has_weights: bool, arr_out: list[list[float]]) -> None:
+    if has_weights:
+        arr_val = arr_out[0]
+        arr_wgt = arr_out[1]
+    else:
+        arr_val = arr_out
+        arr_wgt = None
+
+    consume(arr_val, arr_wgt)
+"#;
+    for name in ["arr_val", "arr_wgt"] {
+        for (position, _) in source.match_indices(name) {
+            assert_eq!(
+                rename_local_symbol(source, position),
+                source.replace(name, "renamed"),
+            );
+        }
+    }
+}
+
+#[test]
+fn test_rename_reassigned_import_respects_definition() {
+    for (import, renamed_import, name) in [
+        ("from dep import value", "from dep import value", "value"),
+        (
+            "from dep import value as alias",
+            "from dep import value as renamed",
+            "alias",
+        ),
+    ] {
+        let prefix = format!("{import}\nprint({name})\n");
+        let local = format!("{name} = 1\n__all__ = ['{name}']\nprint({name})\n");
+        let source = format!("{prefix}{local}");
+        let expected_prefix = if name == "alias" {
+            format!("{renamed_import}\nprint(renamed)\n")
+        } else {
+            prefix.clone()
+        };
+        let mut env = TestEnv::new();
+        env.add("dep", "value = 42\n");
+        env.add("main", &source);
+        let (state, handle) = env.to_state();
+        let handle = handle("main");
+        let mut transaction = state.transaction();
+        transaction.run(&[handle.dupe()], Require::Everything, None);
+        for (position, _) in local.match_indices(name) {
+            let ranges = transaction.find_local_references(
+                &handle,
+                TextSize::try_from(prefix.len() + position).unwrap(),
+                ReferenceOptions::textual_only(true),
+            );
+            let mut renamed = source.clone();
+            for range in ranges.into_iter().rev() {
+                renamed.replace_range(Range::<usize>::from(range), "renamed");
+            }
+            assert_eq!(
+                renamed,
+                format!("{expected_prefix}{}", local.replace(name, "renamed")),
+            );
+        }
+    }
+}
+
+#[test]
+fn test_rename_reassigned_variable_respects_scope() {
+    let unrelated = "value = 0\ndef other(value: int) -> int:\n    return value\n";
+    let shadow = "    def shadow(value: int) -> int:\n        return value\n    [value for value in range(3)]\n";
+    for body in [
+        "    if flag:\n        value = 1\n    else:\n        value = 2\n",
+        "    if flag:\n        if flag:\n            value = 1\n        else:\n            value = 2\n    else:\n        value = 3\n",
+        "    value = 0\n    while flag:\n        value = value + 1\n",
+        "    value = 0\n    for value in range(3):\n        print(value)\n",
+        "    value: int = 0\n    if flag:\n        value = 1\n",
+        "    value = 0\n    print(value)\n    value = 1\n",
+    ] {
+        let header = format!("{unrelated}def f(flag: bool) -> None:\n");
+        let target = format!("{body}    print(value)\n    def capture():\n        return value\n");
+        let source = format!("{header}{target}{shadow}");
+        let expected = format!("{header}{}{shadow}", target.replace("value", "renamed"));
+        for (position, _) in target.match_indices("value") {
+            assert_eq!(
+                rename_local_symbol(&source, header.len() + position),
+                expected,
+            );
+        }
+    }
+}
+
+#[test]
 fn test_rename_setattr_inferred_field() {
     for setter in [
         "setattr",

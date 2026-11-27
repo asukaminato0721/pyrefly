@@ -943,7 +943,6 @@ References:
     );
 }
 
-// todo(kylei): references on renames should find lhs of assignment
 #[test]
 fn reassigned_local() {
     let code = r#"
@@ -961,6 +960,8 @@ xy = xy + 1
      ^
 References:
 2 | xy = 5
+    ^^
+4 | xy = xy + 1
     ^^
 4 | xy = xy + 1
          ^^
