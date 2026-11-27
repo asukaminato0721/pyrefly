@@ -28,6 +28,8 @@ use pyrefly_types::keywords::TypeMap;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
 use pyrefly_types::tuple::Tuple;
+use pyrefly_types::typed_dict::AnonymousTypedDictInner;
+use pyrefly_types::typed_dict::TypedDictField;
 use pyrefly_types::types::AnyStyle;
 use pyrefly_types::types::Overload;
 use pyrefly_types::types::OverloadType;
@@ -94,15 +96,9 @@ const AUTO_FIELD: Name = Name::new_static("AutoField");
 const NULL: Name = Name::new_static("null");
 const BLANK: Name = Name::new_static("blank");
 const MODEL: Name = Name::new_static("Model");
-const ANNOTATE: Name = Name::new_static("annotate");
 const MANYRELATEDMANAGER: Name = Name::new_static("ManyRelatedManager");
 const SYMMETRICAL: Name = Name::new_static("symmetrical");
 const AS_MANAGER: Name = Name::new_static("as_manager");
-
-pub(crate) struct DjangoAnnotateCall {
-    metadata: FuncMetadata,
-    attributes: TypeMap,
-}
 
 /// Find a keyword argument by name and return its value expression.
 fn find_keyword<'a>(call_expr: &'a ExprCall, name: &Name) -> Option<&'a Expr> {
@@ -132,85 +128,388 @@ enum DjangoRelationKind {
 }
 
 impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
-    fn is_django_annotate(metadata: &FuncMetadata) -> bool {
-        let Some(symbol) = metadata.kind.to_func_symbol() else {
-            return false;
-        };
-        let Some(cls) = symbol.cls.as_ref() else {
-            return false;
-        };
-        symbol.name == ANNOTATE
-            && (cls.is(KnownClass::DjangoQuerySet) || cls.is(KnownClass::DjangoManager))
+    fn is_django_queryset_method(metadata: &FuncMetadata, name: &str) -> bool {
+        metadata.kind.to_func_symbol().is_some_and(|symbol| {
+            symbol.name.as_str() == name
+                && symbol.cls.as_ref().is_some_and(|cls| {
+                    cls.is(KnownClass::DjangoQuerySet)
+                        || cls.is(KnownClass::DjangoBaseManager)
+                        || cls.is(KnownClass::DjangoManager)
+                })
+        })
     }
 
-    pub(crate) fn infer_django_annotate_call(
-        &self,
-        callee: &Type,
-        arguments: &Arguments,
-    ) -> Option<DjangoAnnotateCall> {
-        let metadata = callee.toplevel_func_metadata()?.clone();
-        if !Self::is_django_annotate(&metadata) {
-            return None;
-        }
-
-        let mut attributes = TypeMap::new();
-        // Positional annotations are out of scope because their generated names require Django
-        // expression semantics. Every explicit keyword still introduces a statically known name,
-        // although the expression object's type is not generally the value type Django produces.
-        for keyword in &arguments.keywords {
-            if let Some(name) = &keyword.arg {
-                attributes
-                    .0
-                    .insert(name.id.clone(), self.heap.mk_any_implicit());
-            }
-        }
-        if attributes.0.is_empty() {
-            None
-        } else {
-            Some(DjangoAnnotateCall {
-                metadata,
-                attributes,
-            })
-        }
-    }
-
-    pub(crate) fn apply_django_annotate_call(
+    /// Specialize Django's row-producing methods after checking their stub signatures.
+    pub(crate) fn specialize_django_queryset_call(
         &self,
         result: Type,
-        call: Option<DjangoAnnotateCall>,
+        callee: &Type,
+        arguments: &Arguments,
     ) -> Type {
-        let Some(call) = call else {
+        let Some(metadata) = callee.toplevel_func_metadata() else {
             return result;
         };
-        let mut queryset = match result {
-            Type::ClassType(queryset) => queryset,
-            result => return result,
-        };
-        let Some(mut base) = self.django_queryset_base(&queryset) else {
-            return self.heap.mk_class_type(queryset);
-        };
-        if base.targs().len() != 2 {
-            return self.heap.mk_class_type(queryset);
+        if !["annotate", "values", "values_list"]
+            .iter()
+            .any(|name| Self::is_django_queryset_method(metadata, name))
+        {
+            return result;
         }
-
-        let row = base.targs().as_slice()[1].clone();
-        if !self.is_django_model_row(&row) {
-            return self.heap.mk_class_type(queryset);
-        }
-        let annotation = self.heap.mk_kw_call(KwCall {
-            func_metadata: call.metadata,
-            keywords: call.attributes,
-            return_ty: row.clone(),
-        });
-        // The intersection preserves call-site metadata while generic QuerySet operations use the
-        // original row as their fallback type.
-        base.targs_mut().as_mut()[1] = self.heap.mk_intersect(vec![annotation], row);
-        if queryset.is(KnownClass::DjangoQuerySet) {
-            queryset = base;
-        } else {
-            queryset = queryset.with_django_base(base);
+        let Type::ClassType(mut queryset) = result else {
+            return result;
+        };
+        if let Some(mut base) = self.django_queryset_base(&queryset)
+            && base.targs().len() == 2
+            && let Some(row) = self.django_queryset_call_row(&base, callee, metadata, arguments)
+        {
+            base.targs_mut().as_mut()[1] = row;
+            if queryset.is(KnownClass::DjangoQuerySet) {
+                queryset = base;
+            } else {
+                queryset = queryset.with_django_base(base);
+            }
         }
         self.heap.mk_class_type(queryset)
+    }
+
+    fn django_queryset_call_row(
+        &self,
+        base: &ClassType,
+        callee: &Type,
+        metadata: &FuncMetadata,
+        arguments: &Arguments,
+    ) -> Option<Type> {
+        let model = &base.targs().as_slice()[0];
+        let source_row = if let Type::BoundMethod(method) = callee
+            && let Type::ClassType(receiver) = &method.obj
+        {
+            self.django_queryset_base(receiver)
+                .filter(|base| base.is(KnownClass::DjangoQuerySet))
+                .and_then(|base| base.targs().as_slice().get(1).cloned())
+        } else {
+            None
+        };
+        let source_row = source_row.as_ref().unwrap_or(model);
+        let mut known_fields = self.django_annotated_fields(source_row);
+        if let Type::AnonymousTypedDict(row) = source_row {
+            known_fields.extend(
+                row.fields
+                    .iter()
+                    .map(|(name, field)| (name.clone(), field.ty.clone())),
+            );
+        }
+        let mut expressions = TypeMap::new();
+        let is_values_list = Self::is_django_queryset_method(metadata, "values_list");
+        if !is_values_list {
+            for keyword in &arguments.keywords {
+                if let Some(name) = &keyword.arg {
+                    let ty = self
+                        .django_expression_type(&keyword.value, model, &known_fields)
+                        .unwrap_or_else(|| self.heap.mk_any_implicit());
+                    known_fields.insert(name.id.clone(), ty.clone());
+                    expressions.0.insert(name.id.clone(), ty);
+                }
+            }
+        }
+        if Self::is_django_queryset_method(metadata, "annotate") {
+            if expressions.0.is_empty() {
+                return None;
+            }
+            let row = &base.targs().as_slice()[1];
+            if let Type::AnonymousTypedDict(row) = row {
+                let mut fields: SmallMap<_, _> = row.fields.iter().cloned().collect();
+                for (name, ty) in expressions.0 {
+                    fields.insert(
+                        name,
+                        TypedDictField {
+                            ty,
+                            required: true,
+                            read_only_reason: None,
+                        },
+                    );
+                }
+                return Some(self.heap.mk_anonymous_typed_dict(AnonymousTypedDictInner {
+                    fields: fields.into_iter().collect(),
+                }));
+            }
+            if !self.is_django_model_row(row) {
+                return None;
+            }
+            let annotation = self.heap.mk_kw_call(KwCall {
+                func_metadata: metadata.clone(),
+                keywords: expressions,
+                return_ty: row.clone(),
+            });
+            // The fallback preserves the model's nominal type through generic query methods.
+            return Some(self.heap.mk_intersect(vec![annotation], row.clone()));
+        }
+        if arguments
+            .keywords
+            .iter()
+            .any(|keyword| keyword.arg.is_none())
+        {
+            return None;
+        }
+        let mut fields = Vec::new();
+        for arg in &arguments.args {
+            let Type::Literal(literal) = self.expr_infer(arg, &self.error_swallower()) else {
+                return None;
+            };
+            let Lit::Str(name) = &literal.value else {
+                return None;
+            };
+            let name = Name::new(name.as_str());
+            let ty = self.django_lookup_type(model, &known_fields, &name)?;
+            fields.push((name, ty));
+        }
+        if !is_values_list {
+            let mut fields: SmallMap<_, _> = fields.into_iter().collect();
+            fields.extend(expressions.0);
+            // With no explicit selection, Django also includes all concrete model fields.
+            if fields.is_empty() {
+                return None;
+            }
+            return Some(
+                self.heap.mk_anonymous_typed_dict(AnonymousTypedDictInner {
+                    fields: fields
+                        .into_iter()
+                        .map(|(name, ty)| {
+                            (
+                                name,
+                                TypedDictField {
+                                    ty,
+                                    required: true,
+                                    read_only_reason: None,
+                                },
+                            )
+                        })
+                        .collect(),
+                }),
+            );
+        }
+        let mut flat = false;
+        let mut named = false;
+        for keyword in &arguments.keywords {
+            let Type::Literal(literal) = self.expr_infer(&keyword.value, &self.error_swallower())
+            else {
+                return None;
+            };
+            let Lit::Bool(value) = &literal.value else {
+                return None;
+            };
+            match keyword.arg.as_ref()?.as_str() {
+                "flat" => flat = *value,
+                "named" => named = *value,
+                _ => return None,
+            }
+        }
+        if fields.is_empty() || (flat && (named || fields.len() != 1)) {
+            return None;
+        }
+        if flat {
+            return Some(fields.remove(0).1);
+        }
+        let tuple = self
+            .heap
+            .mk_concrete_tuple(fields.iter().map(|(_, ty)| ty.clone()).collect());
+        if !named {
+            return Some(tuple);
+        }
+        let mut attributes = TypeMap::new();
+        for (name, ty) in fields {
+            if !is_python_identifier(name.as_str())
+                || name.starts_with('_')
+                || attributes.0.insert(name, ty).is_some()
+            {
+                return None;
+            }
+        }
+        // Named rows retain tuple indexing and unpacking as well as their field attributes.
+        let row = self.heap.mk_kw_call(KwCall {
+            func_metadata: metadata.clone(),
+            keywords: attributes,
+            return_ty: tuple.clone(),
+        });
+        Some(self.heap.mk_intersect(
+            vec![row, self.heap.mk_class_type(self.stdlib.named_tuple_fallback().clone())],
+            tuple,
+        ))
+    }
+
+    /// Resolve database field paths, including nullable joins and raw relation keys.
+    fn django_lookup_type(
+        &self,
+        model: &Type,
+        annotations: &SmallMap<Name, Type>,
+        lookup: &Name,
+    ) -> Option<Type> {
+        if let Some(ty) = annotations.get(lookup) {
+            return Some(ty.clone());
+        }
+        let mut ty = model.clone();
+        let mut nullable = false;
+        for part in lookup.as_str().split("__") {
+            let mut members = ty.into_unions().into_iter().filter(|member| {
+                if member.is_none() {
+                    nullable = true;
+                    false
+                } else {
+                    true
+                }
+            });
+            ty = members.next()?;
+            if members.next().is_some() {
+                return None;
+            }
+            let Type::ClassType(mut cls) = ty else {
+                return None;
+            };
+            if let Some(manager) = self
+                .get_mro_for_class(cls.class_object())
+                .ancestors(self.stdlib)
+                .find(|base| base.is(KnownClass::DjangoBaseManager))
+            {
+                let manager = manager.substitute_with(&cls.substitution(), self);
+                let Type::ClassType(target) = manager.targs().as_slice().first()? else {
+                    return None;
+                };
+                cls = target.clone();
+                nullable = true;
+            }
+            if !self
+                .get_metadata_for_class(cls.class_object())
+                .is_django_model()
+            {
+                return None;
+            }
+            let name = Name::new(part);
+            if name != PK
+                && let Some(field) =
+                    self.get_non_synthesized_class_member(cls.class_object(), &name)
+                && !matches!(field.ty(), Type::ClassType(field) if self.inherits_from_django_field(field.class_object()))
+            {
+                return None;
+            }
+            let attribute = self.get_instance_attribute(&cls, &name)?;
+            ty = self
+                .resolve_get_class_attr(
+                    &name,
+                    attribute,
+                    TextRange::default(),
+                    &self.error_swallower(),
+                    None,
+                )
+                .ok()?;
+        }
+        // Selecting a relation returns its stored key rather than a model instance.
+        ty = self.distribute_over_union(&ty, |member| {
+            if let Type::ClassType(cls) = member
+                && self
+                    .get_metadata_for_class(cls.class_object())
+                    .is_django_model()
+            {
+                self.get_pk_field_type(cls.class_object())
+                    .map(|(ty, _)| ty)
+                    .unwrap_or_else(|| self.heap.mk_any_implicit())
+            } else {
+                member.clone()
+            }
+        });
+        Some(if nullable {
+            self.union(ty, self.heap.mk_none())
+        } else {
+            ty
+        })
+    }
+
+    /// Infer the database value produced by an expression, independently of its object type.
+    fn django_expression_type(
+        &self,
+        expr: &Expr,
+        model: &Type,
+        annotations: &SmallMap<Name, Type>,
+    ) -> Option<Type> {
+        let ty = self.expr_infer(expr, &self.error_swallower());
+        let Type::ClassType(cls) = &ty else {
+            return None;
+        };
+        let class = cls.class_object();
+        let name = class.name(self);
+        let call = expr.as_call_expr();
+        let output = call
+            .and_then(|call| find_keyword(call, &Name::new_static("output_field")))
+            .and_then(|expr| {
+                let ty = self.expr_infer(expr, &self.error_swallower());
+                let Type::ClassType(field) = &ty else {
+                    return None;
+                };
+                self.get_class_member(field.class_object(), &DJANGO_PRIVATE_GET_TYPE)
+                    .map(|field| field.ty())
+            });
+        let module = class.module_name();
+        if module.as_str() == "django.db.models.aggregates" {
+            if name.as_str() == "Count" {
+                return output.or_else(|| Some(self.heap.mk_class_type(self.stdlib.int().clone())));
+            }
+            let value = output.or_else(|| {
+                let expr = call?.arguments.args.first()?;
+                if let Expr::StringLiteral(literal) = expr {
+                    self.django_lookup_type(model, annotations, &Name::new(literal.value.to_str()))
+                } else {
+                    self.django_expression_type(expr, model, annotations)
+                }
+            })?;
+            if !matches!(name.as_str(), "Sum" | "Min" | "Max") {
+                return None;
+            }
+            let default = call.and_then(|call| find_keyword(call, &Name::new_static("default")));
+            return Some(
+                if let Some(default) = default
+                    && !self.expr_infer(default, &self.error_swallower()).is_none()
+                {
+                    // Django converts the default through the aggregate's output field.
+                    self.unions(
+                        value
+                            .into_unions()
+                            .into_iter()
+                            .filter(|ty| !ty.is_none())
+                            .collect(),
+                    )
+                } else {
+                    self.union(value, self.heap.mk_none())
+                },
+            );
+        }
+        if let Some(output) = output {
+            return Some(output);
+        }
+        if module.as_str() == "django.db.models.expressions" {
+            match name.as_str() {
+                "F" => {
+                    let field = call?
+                        .arguments
+                        .find_argument_value("name", 0)?
+                        .as_string_literal_expr()?;
+                    return self.django_lookup_type(
+                        model,
+                        annotations,
+                        &Name::new(field.value.to_str()),
+                    );
+                }
+                "Value" => {
+                    return Some(
+                        self.expr_infer(
+                            call?.arguments.find_argument_value("value", 0)?,
+                            &self.error_swallower(),
+                        )
+                        .promote(self.stdlib),
+                    );
+                }
+                "Exists" => return Some(self.heap.mk_class_type(self.stdlib.bool().clone())),
+                _ => {}
+            }
+        }
+        None
     }
 
     fn is_django_model_row(&self, ty: &Type) -> bool {
@@ -228,7 +527,9 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
         match ty {
             Type::KwCall(call) => {
                 self.collect_django_annotated_fields(&call.return_ty, fields);
-                if Self::is_django_annotate(&call.func_metadata) {
+                if Self::is_django_queryset_method(&call.func_metadata, "annotate")
+                    || Self::is_django_queryset_method(&call.func_metadata, "values_list")
+                {
                     for (name, ty) in &call.keywords.0 {
                         fields.insert(name.clone(), ty.clone());
                     }

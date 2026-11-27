@@ -10,7 +10,7 @@ use crate::django_testcase;
 django_testcase!(
     test_annotate_adds_keyword_attributes_to_rows,
     r#"
-from typing import Any, assert_type
+from typing import assert_type
 
 from django.db import models
 from django.db.models.query import QuerySet
@@ -25,17 +25,17 @@ assert_type(annotated.create(title="plain"), Article)
 article = annotated[0]
 assert_type(article, Article)
 assert_type(article.title, str)
-assert_type(article.extra_title, Any)
+assert_type(article.extra_title, str)
 Article().extra_title  # E: Object of class `Article` has no attribute `extra_title`
 
 filtered = annotated.filter(title="kept")[0]
 assert_type(filtered, Article)
-assert_type(filtered.extra_title, Any)
+assert_type(filtered.extra_title, str)
 
 for chained in annotated.annotate(second_title=models.F("title")):
     assert_type(chained, Article)
-    assert_type(chained.extra_title, Any)
-    assert_type(chained.second_title, Any)
+    assert_type(chained.extra_title, str)
+    assert_type(chained.second_title, str)
 
 for values_row in Article.objects.values("title").annotate(extra_title=models.F("title")):
     values_row.extra_title  # E: Object of class `dict` has no attribute `extra_title`
