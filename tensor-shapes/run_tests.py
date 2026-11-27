@@ -32,6 +32,7 @@ PACKAGES: tuple[str, ...] = (
     "jax-pyrefly-stubs",
     "pyrefly-einops-stubs",
     "comment-shape-corpus",
+    "pyrefly-triton-stubs",
 )
 
 RUNTIME_PACKAGES: frozenset[str] = frozenset(
@@ -147,7 +148,7 @@ def main() -> int:
                 str(package_root / "run_pyrefly.py"),
                 *forwarded_pyrefly,
             ]
-            if package != "microtorch":
+            if package not in ("microtorch", "pyrefly-triton-stubs"):
                 command.extend(["--python", str(python)])
             if args.nocapture:
                 command.append("--nocapture")

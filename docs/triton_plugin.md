@@ -26,11 +26,10 @@ Functions without a recognized Triton decorator retain normal Python annotation
 rules. A different decorator named `jit` or a different class named `constexpr`
 does not enable this behavior. Nested functions require their own Triton decorator.
 
-This support does not infer constants from kernel calls. It does not yet check
-Triton pointer dtypes, tensor shapes, broadcasting, or kernel launch arguments.
-It does not introduce a `strict=True` argument or a separate plugin interface.
-These features remain outside this first step for
-[issue #3884](https://github.com/facebook/pyrefly/issues/3884).
+The [experimental Triton stubs](../tensor-shapes/pyrefly-triton-stubs/README.md)
+add opt-in pointer dtype and tensor shape checks. Kernel call specialization,
+launch argument checking, and a separate compiler plugin remain outside this
+support for [issue #3884](https://github.com/pyrefly-org/pyrefly/issues/3884).
 
 Run the regression tests without Triton or a GPU:
 
