@@ -13,6 +13,53 @@ use crate::test::util::TestEnv;
 use crate::testcase;
 
 testcase!(
+    test_callable_omitted_default_constrains_typevar,
+    r#"
+from typing import Callable, Sequence, assert_type
+
+def positional[T](x: T = 1) -> T:
+    return x
+
+assert_type(positional(), int)
+good: Callable[[], int] = positional
+bad: Callable[[], str] = positional  # E: is not assignable
+provided: Callable[[str], str] = positional
+
+def positional_only[T](x: T = 1, /) -> T:
+    return x
+
+good_posonly: Callable[[], int] = positional_only
+bad_posonly: Callable[[], str] = positional_only  # E: is not assignable
+provided_posonly: Callable[[str], str] = positional_only
+
+def keyword_only[T](*, x: T = 1) -> T:
+    return x
+
+good_kwonly: Callable[[], int] = keyword_only
+bad_kwonly: Callable[[], str] = keyword_only  # E: is not assignable
+
+def nested[T](x: Sequence[T] = (1,)) -> T: ...
+
+good_nested: Callable[[], int] = nested
+bad_nested: Callable[[], str] = nested  # E: is not assignable
+
+def shared[T](x: T, *, y: T = 1) -> T: ...
+
+good_shared: Callable[[str], int | str] = shared
+bad_shared: Callable[[str], str] = shared  # E: is not assignable
+
+def invoke[T](callback: Callable[[], T]) -> T:
+    return callback()
+
+assert_type(invoke(positional), int)
+
+def needs_str(callback: Callable[[], str]) -> None: ...
+
+needs_str(positional)  # E: is not assignable
+"#,
+);
+
+testcase!(
     test_deferred_callbacks_keep_matched_keys_with_unpacking,
     TestEnv::new().enable_implicit_any_lambda_error(),
     r#"

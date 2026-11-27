@@ -23,6 +23,7 @@ use pyrefly_types::dimension::is_gradual_size;
 use pyrefly_types::dimension::type_is_gradual_fast;
 use pyrefly_types::known_class::KnownClass;
 use pyrefly_types::literal::Lit;
+use pyrefly_types::literal::LitStyle;
 use pyrefly_types::read_only::ReadOnlyReason;
 use pyrefly_types::shaped_array::IntTuple;
 use pyrefly_types::shaped_array::IntTupleView;
@@ -309,6 +310,21 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         self.is_subset_eq(unpack, &accepted)
     }
 
+    /// Constrain a parameter's type when a call can use its default value.
+    fn is_subset_param_default(&mut self, param: &Param) -> Result<(), SubsetError> {
+        if let Param::PosOnly(_, ty, Required::Optional(Some(default)))
+        | Param::Pos(_, ty, Required::Optional(Some(default)))
+        | Param::KwOnly(_, ty, Required::Optional(Some(default))) = param
+            && let Some(default_ty) = &default.ty
+        {
+            self.is_subset_eq(
+                &default_ty.clone().with_literal_style(LitStyle::Implicit),
+                ty,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Can a function with l_args be called as a function with u_args?
     ///
     /// If `u_gradual` is set, the `*args: Any` and `**kwargs: Any` parameters of `u_args` are a
@@ -390,12 +406,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 }
                 (
                     Some(
-                        Param::PosOnly(_, _, Required::Optional(_))
+                        l_param @ (Param::PosOnly(_, _, Required::Optional(_))
                         | Param::Pos(_, _, Required::Optional(_))
-                        | Param::Varargs(_, _),
+                        | Param::Varargs(_, _)),
                     ),
                     None,
                 ) => {
+                    self.is_subset_param_default(l_param)
+                        .map_err(|e| lists.error_at(l_arg, None, e))?;
                     l_arg = l_args.next();
                 }
                 // Keep a retained TypedDict's explicit overlays for keyword matching.
@@ -403,10 +421,17 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
                 (Some(Param::Kwargs(_, ty)), None) if ty.unpacked_typed_dict().is_some() => {
                     break;
                 }
-                (Some(Param::KwOnly(_, _, Required::Optional(_)) | Param::Kwargs(..)), None) => {
+                (
+                    Some(
+                        l_param @ (Param::KwOnly(_, _, Required::Optional(_)) | Param::Kwargs(..)),
+                    ),
+                    None,
+                ) => {
                     if u_param_matched_with_l_varargs.is_empty()
                         && !matches!(l_params.last(), Some(Param::Kwargs(_, ty)) if ty.unpacked_typed_dict().is_some())
                     {
+                        self.is_subset_param_default(l_param)
+                            .map_err(|e| lists.error_at(l_arg, None, e))?;
                         l_arg = l_args.next();
                     } else {
                         break;
@@ -738,10 +763,14 @@ impl<'solver, 'subset, Ans: LookupAnswer> Subset<'solver, 'subset, Ans> {
         // `u` may pass an extra keyword argument to any keyword parameter of `l` that it does not
         // declare itself. Sorting by name keeps the reported error independent of `HashMap`
         // iteration order.
-        if let Some(u_ty) = &u_kwargs {
-            for (_, (l_ty, _, l_param)) in l_keywords.iter().sorted_by_key(|(name, _)| *name) {
+        for (_, (l_ty, _, l_param)) in l_keywords.iter().sorted_by_key(|(name, _)| *name) {
+            if let Some(u_ty) = &u_kwargs {
                 self.is_subset_eq(u_ty, l_ty)
                     .map_err(|e| lists.error_at(Some(l_param), u_kwargs_param, e))?;
+            }
+            if !u_gradual {
+                self.is_subset_param_default(l_param)
+                    .map_err(|e| lists.error_at(Some(l_param), None, e))?;
             }
         }
         Ok(())
