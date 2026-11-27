@@ -268,7 +268,9 @@ fn build_assignment_replacement(
     load_edits: &[LoadEdit],
 ) -> String {
     match plan.value_kind {
-        AssignmentValueKind::UnaryNot { operand_range } => {
+        AssignmentValueKind::UnaryNot { operand_range }
+            if !load_edits.iter().any(|edit| edit.range == plan.value_range) =>
+        {
             apply_edits_to_slice(source, operand_range, load_edits)
         }
         AssignmentValueKind::BooleanLiteral { value } => {
@@ -278,7 +280,7 @@ fn build_assignment_replacement(
                 "True".to_owned()
             }
         }
-        AssignmentValueKind::Other => {
+        AssignmentValueKind::UnaryNot { .. } | AssignmentValueKind::Other => {
             let transformed = apply_edits_to_slice(source, plan.value_range, load_edits);
             format!("not ({transformed})")
         }

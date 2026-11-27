@@ -44,6 +44,7 @@ use crate::module::module_info::ModuleInfo;
 use crate::state::lsp::FindPreference;
 use crate::state::lsp::ReferenceOptions;
 use crate::state::lsp::Transaction;
+use crate::state::lsp::callee_kind_from_call;
 
 const DEFAULT_PARAMETER_PREFIX: &str = "param";
 
@@ -536,6 +537,21 @@ fn build_callsite_edits(
             if !ref_set
                 .iter()
                 .any(|range| call.func.range().contains(range.start()))
+            {
+                return;
+            }
+            // Reassignment can bind the same name to a different function value.
+            if !transaction
+                .get_callee_location(
+                    &module_handle,
+                    &callee_kind_from_call(call),
+                    FindPreference::default(),
+                )
+                .iter()
+                .any(|callee| {
+                    callee.module.path() == definition.module.path()
+                        && callee.range == definition.definition_range
+                })
             {
                 return;
             }
