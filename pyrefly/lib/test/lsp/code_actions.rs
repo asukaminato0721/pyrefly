@@ -4861,6 +4861,26 @@ def foo():
 }
 
 #[test]
+fn invert_boolean_preserves_self_negation() {
+    let code = r#"
+def f() -> bool:
+    value = True
+    value = not value
+    return value
+"#;
+    let selection = find_nth_range(code, "value", 4);
+    let updated =
+        apply_first_invert_boolean_action(code, selection).expect("expected invert-boolean action");
+    let expected = r#"
+def f() -> bool:
+    value = False
+    value = not (value)
+    return (not value)
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+}
+
+#[test]
 fn invert_boolean_nested_expression_keeps_outer_not() {
     let code = r#"
 def foo():
@@ -6677,6 +6697,35 @@ def caller():
 }
 
 #[test]
+fn introduce_parameter_preserves_rebound_function_calls() {
+    let code = r#"
+def f() -> int:
+    return (
+        # EXTRACT-START
+        1
+        # EXTRACT-END
+    )
+original = f()
+f = lambda: 2
+result = f()
+"#;
+    let updated =
+        apply_introduce_parameter_action(code, 0).expect("expected introduce-parameter action");
+    let expected = r#"
+def f(param) -> int:
+    return (
+        # EXTRACT-START
+        param
+        # EXTRACT-END
+    )
+original = f(1)
+f = lambda: 2
+result = f()
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+}
+
+#[test]
 fn introduce_parameter_parenthesizes_int_before_attribute() {
     let code = r#"
 def f(x):
@@ -7001,6 +7050,29 @@ def greet(name):
 def caller():
     greet(name="Ada")
     greet(name="Bob")
+"#;
+    assert_eq!(expected.trim(), updated.trim());
+}
+
+#[test]
+fn change_signature_preserves_rebound_function_calls() {
+    let code = r#"
+def f(unused: int) -> int:
+#      ^
+    return 0
+original = f(7)
+f = lambda unused: unused
+result = f(42)
+"#;
+    let updated = apply_change_signature_action(code, "Remove parameter `unused`")
+        .expect("expected remove-parameter action");
+    let expected = r#"
+def f() -> int:
+#      ^
+    return 0
+original = f()
+f = lambda unused: unused
+result = f(42)
 "#;
     assert_eq!(expected.trim(), updated.trim());
 }
