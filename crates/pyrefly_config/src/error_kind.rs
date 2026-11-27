@@ -375,6 +375,9 @@ pub enum ErrorKind {
     MissingArgument,
     /// Attempting to access an attribute that does not exist.
     MissingAttribute,
+    /// A Django query expression names a model field that does not exist.
+    /// This is a sub-kind of [MissingAttribute].
+    MissingAttributeDjangoField,
     /// A `unittest.mock.patch` target names an attribute that does not exist.
     /// This is a sub-kind of [MissingAttribute].
     MissingAttributePatchTarget,
@@ -658,7 +661,9 @@ impl ErrorKind {
             | ErrorKind::ImplicitAnyLambda
             | ErrorKind::ImplicitAnyParameter
             | ErrorKind::ImplicitAnyTypeArgument => Some(ErrorKind::ImplicitAny),
-            ErrorKind::MissingAttributePatchTarget => Some(ErrorKind::MissingAttribute),
+            ErrorKind::MissingAttributeDjangoField | ErrorKind::MissingAttributePatchTarget => {
+                Some(ErrorKind::MissingAttribute)
+            }
             ErrorKind::NoAnyReturnExplicit | ErrorKind::NoAnyReturnImplicit => {
                 Some(ErrorKind::NoAnyReturn)
             }
@@ -740,6 +745,7 @@ impl ErrorKind {
             ErrorKind::InvalidIgnoreComment => Severity::Warn,
             ErrorKind::MethodAssign => Severity::Ignore,
             ErrorKind::MisplacedIgnore => Severity::Warn,
+            ErrorKind::MissingAttributeDjangoField => Severity::Warn,
             ErrorKind::MissingAttributePatchTarget => Severity::Warn,
             ErrorKind::MissingOverrideDecorator => Severity::Ignore,
             ErrorKind::MissingSuperCall => Severity::Ignore,

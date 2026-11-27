@@ -598,8 +598,8 @@ pub enum DjangoSpecialization<'a> {
         set_type: &'a Type,
         override_type: &'a Type,
     },
-    /// An expression source, explicit output type and aggregate default. `None` marks an
-    /// absent output type or default. Sources can refer to fields in the receiving query.
+    /// Expression sources, an explicit output type and a default. `None` marks an absent
+    /// output type or default. Functions and cases store their sources as a tuple.
     Expression {
         source: &'a Type,
         output_type: &'a Type,

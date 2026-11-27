@@ -1609,6 +1609,21 @@ os.jongleur()  # missing-attribute
 
 Note that objects with type `Any` will never raise this error.
 
+## missing-attribute-django-field
+
+Default severity: `warn`
+
+A Django expression names a model field that does not exist.
+
+```python
+from django.db import models
+class Book(models.Model):
+    pages = models.IntegerField()
+Book.objects.annotate(total=models.Sum("missing"))  # missing-attribute-django-field
+```
+
+This is a sub-kind of [missing-attribute](#missing-attribute).
+
 ## missing-attribute-patch-target
 
 Default severity: `warn`

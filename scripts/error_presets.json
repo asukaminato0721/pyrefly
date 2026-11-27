@@ -99,6 +99,7 @@
     "misplaced-ignore": ["legacy", "default", "strict", "all"],
     "missing-argument": ["legacy", "default", "strict", "all"],
     "missing-attribute": ["legacy", "default", "strict", "all"],
+    "missing-attribute-django-field": ["legacy", "default", "strict", "all"],
     "missing-attribute-patch-target": ["legacy", "default", "strict", "all"],
     "missing-import": ["basic", "legacy", "default", "strict", "all"],
     "missing-module-attribute": ["legacy", "default", "strict", "all"],

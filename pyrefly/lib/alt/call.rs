@@ -4010,7 +4010,7 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
 
         let result =
             self.apply_django_expression_call(result, &callee.ty, &callee.expr.arguments, errors);
-        let result = self.apply_django_annotate_call(result, django_annotate_call);
+        let result = self.apply_django_annotate_call(result, django_annotate_call, errors);
         self.apply_polars_call_specialization(result, polars_call)
     }
 
