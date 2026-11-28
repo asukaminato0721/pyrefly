@@ -14,6 +14,7 @@ use crate::alt::answers::LookupAnswer;
 use crate::alt::answers_solver::AnswersSolver;
 use crate::binding::binding::KeyDecorator;
 use crate::binding::pytest::PytestParametrization;
+use crate::binding::pytest::PytestParametrizationRow;
 use crate::error::collector::ErrorCollector;
 use crate::types::types::Type;
 
@@ -44,11 +45,32 @@ impl<'ctx, 'answer, Ans: LookupAnswer> AnswersSolver<'ctx, 'answer, Ans> {
                     continue;
                 }
                 for (index, name) in parametrization.direct_parameters() {
-                    let column = columns.entry(name.clone()).or_default();
-                    column.extend(rows.iter().map(|row| {
-                        self.expr_infer(&row[index], &hint_errors)
-                            .promote(self.stdlib)
-                    }));
+                    let types = rows
+                        .iter()
+                        .map(|row| {
+                            let ty = self.expr_infer(&row.values()[index], &hint_errors);
+                            let ty = self.solver().expand(ty, self);
+                            if matches!(row, PytestParametrizationRow::Single(_))
+                                && ty.as_unions().iter().any(|member| {
+                                    matches!(member, Type::ClassType(cls) if {
+                                        let qname = cls.qname(self);
+                                        qname.id() == "ParameterSet"
+                                            && matches!(
+                                                qname.module_name().as_str(),
+                                                "_pytest.mark.structures" | "pytest"
+                                            )
+                                    })
+                                })
+                            {
+                                return None;
+                            }
+                            // Speculative variables must not reach answer sanitization.
+                            Some(ty.clean_var().promote(self.stdlib))
+                        })
+                        .collect::<Option<Vec<_>>>();
+                    if let Some(types) = types {
+                        columns.entry(name.clone()).or_default().extend(types);
+                    }
                 }
             }
         }

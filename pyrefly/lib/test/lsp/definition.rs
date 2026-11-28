@@ -620,6 +620,7 @@ fn pytest_conftest_parametrize_respects_direct_and_indirect_arguments() {
     let fixture = "import pytest\n@pytest.fixture\ndef answer(): return 42\n";
     for (arguments, indirect) in [
         ("\"answer\", [42]", false),
+        ("\"answer,\", [(42,)]", false),
         ("argnames=\"answer\", argvalues=[42]", false),
         ("[\"answer\"], [(42,)], indirect=False", false),
         ("(\"answer\",), [pytest.param(42)]", false),

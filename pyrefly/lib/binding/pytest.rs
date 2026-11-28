@@ -133,7 +133,22 @@ pub(crate) struct PytestParametrization<'a> {
     names: Vec<Name>,
     indirect: Vec<Name>,
     values: &'a Expr,
-    single_value: bool,
+    /// None means that the row layout depends on the pytest version.
+    single_value: Option<bool>,
+}
+
+pub(crate) enum PytestParametrizationRow<'a> {
+    Single(&'a Expr),
+    Unpacked(&'a [Expr]),
+}
+
+impl<'a> PytestParametrizationRow<'a> {
+    pub(crate) fn values(&self) -> &'a [Expr] {
+        match self {
+            Self::Single(value) => slice::from_ref(*value),
+            Self::Unpacked(values) => values,
+        }
+    }
 }
 
 impl<'a> PytestParametrization<'a> {
@@ -161,7 +176,12 @@ impl<'a> PytestParametrization<'a> {
             Some(expr @ (Expr::List(_) | Expr::Tuple(_))) => parametrize_names(expr)?,
             _ => return None,
         };
-        let single_value = matches!(argnames, Expr::StringLiteral(_)) && names.len() == 1;
+        let single_value = match argnames {
+            Expr::StringLiteral(lit) if names.len() == 1 => {
+                (!lit.value.to_str().trim_end().ends_with(',')).then_some(true)
+            }
+            _ => Some(false),
+        };
         Some(Self {
             names,
             indirect,
@@ -178,7 +198,11 @@ impl<'a> PytestParametrization<'a> {
     }
 
     /// Return complete rows, or skip inference when a row cannot be interpreted safely.
-    pub(crate) fn rows(&self, aliases: &PytestAliases) -> Option<Vec<&'a [Expr]>> {
+    pub(crate) fn rows(
+        &self,
+        aliases: &PytestAliases,
+    ) -> Option<Vec<PytestParametrizationRow<'a>>> {
+        let single_value = self.single_value?;
         let rows = match self.values {
             Expr::List(list) => &list.elts,
             Expr::Tuple(tuple) => &tuple.elts,
@@ -186,19 +210,20 @@ impl<'a> PytestParametrization<'a> {
         };
         rows.iter()
             .map(|row| {
-                let values = match row {
+                let parsed = match row {
                     Expr::Call(call) if aliases.is_param(&call.func) => {
-                        call.arguments.args.as_ref()
+                        PytestParametrizationRow::Unpacked(call.arguments.args.as_ref())
                     }
                     Expr::Starred(_) => return None,
-                    _ if self.single_value => slice::from_ref(row),
-                    Expr::Tuple(tuple) => &tuple.elts,
-                    Expr::List(list) => &list.elts,
+                    _ if single_value => PytestParametrizationRow::Single(row),
+                    Expr::Tuple(tuple) => PytestParametrizationRow::Unpacked(&tuple.elts),
+                    Expr::List(list) => PytestParametrizationRow::Unpacked(&list.elts),
                     _ => return None,
                 };
+                let values = parsed.values();
                 (values.len() == self.names.len()
                     && !values.iter().any(|value| matches!(value, Expr::Starred(_))))
-                .then_some(values)
+                .then_some(parsed)
             })
             .collect()
     }
